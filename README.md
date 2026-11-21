@@ -46,7 +46,30 @@ A saga has a **state**, which gives its direction or its end:
 | `COMPLETED` | Every step is done |
 | `FAILED` | Every completed step was undone |
 
-The current step has a **status**:
+A saga's whole life, from its creation to its purge:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> RUNNING : create, in the business transaction
+    RUNNING --> RUNNING : step done, next step
+    RUNNING --> COMPLETED : last step done, onCompleted runs
+    RUNNING --> COMPENSATING : step or signal rejected, timeout check found nothing, cancel, abort
+    RUNNING --> FAILED : the same at the first step, nothing to undo
+    COMPENSATING --> COMPENSATING : step undone, previous step
+    COMPENSATING --> FAILED : first step undone, onFailed runs
+    COMPLETED --> [*] : purgeFinished, after the retention period
+    FAILED --> [*] : purgeFinished, after the retention period
+    note right of RUNNING
+        In either direction, the current step
+        can stop at STUCK until a human acts
+        (retry, markDone, abort)
+    end note
+```
+
+`RUNNING` and `COMPENSATING` are unfinished: the saga holds its business key, and `resumeDue` picks it up whenever it is due. `COMPLETED` and `FAILED` are final: nothing changes them, and a new saga may start for the same key.
+
+Within those states, the current step has a **status**:
 
 | Status | Meaning |
 |---|---|
