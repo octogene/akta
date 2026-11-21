@@ -66,7 +66,6 @@ object SagaStepResultTable : Table("saga_step_result") {
     override val primaryKey = PrimaryKey(sagaId, stepIndex)
 }
 
-/** History: every call, check, compensation and manual action. */
 /** Signals received for signal steps: one per name and saga. */
 object SagaSignalTable : Table("saga_signal") {
     val sagaId = uuid("saga_id")
@@ -76,6 +75,7 @@ object SagaSignalTable : Table("saga_signal") {
     override val primaryKey = PrimaryKey(sagaId, signalName)
 }
 
+/** History: every call, check, compensation and manual action. */
 object SagaLogTable : Table("saga_log") {
     val id = long("id").autoIncrement()
     val sagaId = uuid("saga_id")

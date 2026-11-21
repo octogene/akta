@@ -775,8 +775,9 @@ class SagaEngine(
 
     // ---- Transitions ------------------------------------------------------------------------
 
-    /** Step done: move on to the next one, or complete the saga. */
     /**
+     * Step done: move on to the next one, or complete the saga.
+     *
      * The current step is done: on to the next one, or the saga is completed. A saga whose cancellation
      * was requested compensates instead, this step included, even when it was the last one.
      */
