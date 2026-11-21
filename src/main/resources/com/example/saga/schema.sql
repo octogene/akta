@@ -7,7 +7,7 @@ CREATE TABLE saga (
     business_key    text        NOT NULL,                 -- e.g. the item id
     state           text        NOT NULL CHECK (state IN ('RUNNING', 'COMPENSATING', 'COMPLETED', 'FAILED')),
     step_index      int         NOT NULL CHECK (step_index >= 0),
-    step_status     text        NOT NULL CHECK (step_status IN ('READY', 'IN_PROGRESS', 'UNKNOWN', 'STUCK')),
+    step_status     text        NOT NULL CHECK (step_status IN ('READY', 'IN_PROGRESS', 'WAITING', 'UNKNOWN', 'STUCK')),
     attempts        int         NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     check_failures  int         NOT NULL DEFAULT 0 CHECK (check_failures >= 0),
     next_attempt_at timestamptz NOT NULL,
@@ -15,6 +15,7 @@ CREATE TABLE saga (
     last_error      text,
     traceparent     text,                                 -- W3C traceparent of the originating request
     input           text,                                 -- the saga's input, encoded; written once
+    cancel_requested_at timestamptz,                      -- set by cancel: compensate once no call is in flight
     created_at      timestamptz NOT NULL,
     updated_at      timestamptz NOT NULL,
     CONSTRAINT saga_lock CHECK ((step_status = 'IN_PROGRESS') = (locked_until IS NOT NULL))
@@ -42,6 +43,16 @@ CREATE TABLE saga_step_result (
     done_at        timestamptz NOT NULL,
     compensated_at timestamptz,
     PRIMARY KEY (saga_id, step_index)
+);
+
+-- Signals received for signal steps: at most one per name and saga, so a redelivery changes nothing.
+-- Kept until the saga is purged: a signal that arrives before its step waits is used when it does.
+CREATE TABLE saga_signal (
+    saga_id     uuid        NOT NULL REFERENCES saga (id),
+    signal_name text        NOT NULL,                     -- e.g. payment: one step of the saga waits for it
+    value       text        NOT NULL,                     -- encoded by the engine's serializer
+    received_at timestamptz NOT NULL,
+    PRIMARY KEY (saga_id, signal_name)
 );
 
 CREATE TABLE saga_log (

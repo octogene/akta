@@ -6,10 +6,15 @@ import com.example.saga.SagaContext
 import com.example.saga.SagaDefinition
 import com.example.saga.SagaEngine
 import com.example.saga.SagaState
+import com.example.saga.SignalResult
+import com.example.saga.StepStatus
 import com.example.saga.StepNotSent
 import com.example.saga.StepRejected
 
 import com.example.saga.saga
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.v1.core.DatabaseConfig
@@ -29,6 +34,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.days
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
 /** Runs the engine against a real PostgreSQL (Testcontainers: Docker required). */
@@ -55,7 +61,7 @@ class ExposedSagaRepositoryIT {
     fun resetSchema() {
         val schema = javaClass.getResource("/com/example/saga/schema.sql")!!.readText()
         transaction(database) {
-            exec("DROP TABLE IF EXISTS saga_log, saga_step_result, saga")
+            exec("DROP TABLE IF EXISTS saga_log, saga_signal, saga_step_result, saga")
             exec(schema)
         }
     }
@@ -201,6 +207,33 @@ class ExposedSagaRepositoryIT {
             mapOf("hold" to """{"id":"H-1","warehouse":"north"}""", "booking" to "\"C-1@north\""),
             storedResults(id),
         )
+    }
+
+    @Test
+    fun `a signal delivered twice at once counts once, and is purged with the saga`() {
+        val definition = saga("PAYMENT") {
+            step<String>("create-payment") { execute { "P-1" } }
+            val paid = awaitSignal<String>("await-payment", signal = "payment", timeout = 30.minutes)
+            step<String>("confirm") { execute { "confirmed ${requireResult(paid)}" } }
+        }
+        val engine = SagaEngine(ExposedSagaTransactions(database), repository, listOf(definition), serializer)
+        val id = runBlocking { ExposedSagaTransactions(database).inTransaction { engine.create(definition, "R-1") } }
+        assertEquals(StepStatus.WAITING, runBlocking { engine.run(id, Clock.System.now() + 10.seconds) }.stepStatus)
+
+        // Two listeners deliver the same event at the same moment: the row lock orders them.
+        val results = runBlocking {
+            (1..2).map { async(Dispatchers.IO) { engine.signal(id, "payment", "PAID-1") } }.awaitAll()
+        }
+        assertEquals(setOf(SignalResult.Delivered(id), SignalResult.Ignored(id)), results.toSet())
+
+        val saga = runBlocking { engine.run(id, Clock.System.now() + 10.seconds) }
+        assertEquals(SagaState.COMPLETED, saga.state)
+        assertEquals("\"confirmed PAID-1\"", storedResults(id)["confirm"])
+
+        transaction(database) { exec("UPDATE saga SET updated_at = updated_at - interval '40 days' WHERE id = '$id'") }
+        assertEquals(1, runBlocking { engine.purgeFinished(olderThan = 30.days) })
+        val signalsLeft = transaction(database) { exec("SELECT count(*) FROM saga_signal") { it.next(); it.getLong(1) } }
+        assertEquals(0L, signalsLeft)
     }
 
     @Test

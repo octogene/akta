@@ -8,6 +8,8 @@ import com.example.saga.SagaEngine
 import com.example.saga.SagaEvents
 import com.example.saga.SagaState
 import com.example.saga.SagaStep
+import com.example.saga.SignalResult
+import com.example.saga.SignalStep
 import com.example.saga.StepNotSent
 import com.example.saga.StepRejected
 import com.example.saga.KotlinxJsonSagaSerializer
@@ -54,12 +56,15 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
+import kotlin.uuid.Uuid
 
 /**
  * Runs many sagas against PostgreSQL while everything that can go wrong does, at random: rejections,
  * requests not sent, lost requests and responses, calls outliving their lock, failing checks and
  * compensations, hooks that throw, and pods dying mid-call. Several pods resume sagas concurrently,
  * and an operator resolves stuck sagas by looking at the external systems, as a human would.
+ * Payment sagas wait for the provider's event, which a listener delivers early, late, twice or never;
+ * customers cancel sagas at random moments.
  *
  * The external systems are simulated and record the truth: what was really applied. At the end,
  * every invariant of the engine is checked against it (see [checkInvariants]).
@@ -91,6 +96,11 @@ class SagaStressIT {
     private val violations = ConcurrentHashMap.newKeySet<String>()
     private val crashes = AtomicInteger()
     private val manualActions = ConcurrentHashMap<String, AtomicInteger>()
+    private val deliveries = ConcurrentHashMap<String, AtomicInteger>()
+    private val cancellations = ConcurrentHashMap<String, AtomicInteger>()
+
+    private fun ConcurrentHashMap<String, AtomicInteger>.count(key: String) =
+        computeIfAbsent(key) { AtomicInteger() }.incrementAndGet()
 
     @BeforeAll
     fun start() {
@@ -223,7 +233,60 @@ class SagaStressIT {
     private val stepsByType = mapOf(
         "ITEM_SETUP" to chain("stock", "booking", "promo"),
         "ITEM_EXIT" to chain("unstock", "archive"),      // the type an old pod does not know (rolling deploy)
+        "ITEM_PAY" to chain("charge", "ship"),           // with a wait for the payment between them
     )
+
+    /** A payment provider's event: the outcome of the payment of an item. */
+    @Serializable
+    data class PaymentEvent(val paymentId: String, val succeeded: Boolean, val customer: String)
+
+    /** The payment provider: it decides each payment once; its events say so (see [listener]). */
+    private inner class PaymentProvider {
+        private val decided = HashMap<String, PaymentEvent>()
+        private var counter = 0
+
+        /** Decides the payment of [key] the first time: null when it was already decided. */
+        @Synchronized fun decide(key: String, customer: String): PaymentEvent? {
+            if (key in decided) return null
+            return PaymentEvent("pay-${++counter}", succeeded = dice.chance(0.85), customer).also { decided[key] = it }
+        }
+        @Synchronized fun lookup(key: String): PaymentEvent? = decided[key]
+    }
+
+    private val provider = PaymentProvider()
+    private val charge = stepsByType.getValue("ITEM_PAY").first().system
+
+    /** Waits for the payment event. At its timeout, asks the provider (which fails like any lookup). */
+    private inner class PaymentWait : SignalStep<ItemRequest, PaymentEvent> {
+        override val name = "await-payment"
+        override val signal = "payment"
+        override val timeout = 1500.milliseconds
+        override val checksOnTimeout = true
+        override val outputType = typeOf<PaymentEvent>()
+        override fun describe(output: PaymentEvent) = output.paymentId       // never the customer
+
+        override fun accept(ctx: SagaContext<ItemRequest>, value: PaymentEvent) {
+            if (!value.succeeded) throw StepRejected("payment ${value.paymentId} declined")
+        }
+
+        override suspend fun check(ctx: SagaContext<ItemRequest>): CheckResult<PaymentEvent> {
+            pause()
+            return when (dice.pick(lookupWeights)) {
+                Lookup.TRUTH -> provider.lookup(ctx.key)?.let { CheckResult.Done(it) } ?: CheckResult.NotDone
+                Lookup.FAILS -> throw IOException("payment lookup unavailable")
+                Lookup.CANNOT_TELL -> CheckResult.CannotTell
+                Lookup.CRASH -> crash()
+            }
+        }
+    }
+
+    private val paymentWait = PaymentWait()
+
+    /** The steps of a saga type: those calling systems, plus the payment wait of ITEM_PAY. */
+    private fun stepsOf(type: String): List<SagaStep<ItemRequest, *>> {
+        val calls = stepsByType.getValue(type)
+        return if (type == "ITEM_PAY") listOf(calls[0], paymentWait, calls[1]) else calls
+    }
 
     /** The business change of the hooks, in the engine's transaction; throws sometimes, after writing. */
     private fun hook(key: String, status: String) {
@@ -233,8 +296,8 @@ class SagaStressIT {
         if (dice.chance(hookFailure)) error("hook failed for $key")
     }
 
-    private val definitions = stepsByType.mapValues { (type, steps) ->
-        SagaDefinition(type, typeOf<ItemRequest>(), steps, onCompleted = { hook(key, "DONE") }, onFailed = { hook(key, "FAILED") })
+    private val definitions = stepsByType.keys.associateWith { type ->
+        SagaDefinition(type, typeOf<ItemRequest>(), stepsOf(type), onCompleted = { hook(key, "DONE") }, onFailed = { hook(key, "FAILED") })
     }
 
     private val serializer = KotlinxJsonSagaSerializer()
@@ -288,7 +351,8 @@ class SagaStressIT {
                     val types = if (n == 1) setOf("ITEM_SETUP") else stepsByType.keys
                     launch { restarting("pod-$n") { pod(newEngine(types)) } }
                 } +
-                    launch { restarting("operator") { operator(newEngine()) } }
+                    launch { restarting("operator") { operator(newEngine()) } } +
+                    launch { listener(newEngine()) }
                 val done = withTimeoutOrNull(timeout) {
                     requests.join()
                     while (unfinished() > 0) delay(200)
@@ -320,7 +384,7 @@ class SagaStressIT {
             permits.acquire()
             launch {
                 try {
-                    val type = if (dice.chance(0.25)) "ITEM_EXIT" else "ITEM_SETUP"
+                    val type = dice.pick(mapOf("ITEM_SETUP" to 50, "ITEM_EXIT" to 25, "ITEM_PAY" to 25))
                     val key = "$type-$i"
                     val id = transactions.inTransaction {
                         TransactionManager.current().exec("INSERT INTO item (key, status) VALUES ('$key', 'PENDING')")
@@ -338,10 +402,101 @@ class SagaStressIT {
                         }
                     }
                     request.join()
+                    if (dice.chance(0.1)) launch { customerCancels(engine, id) }
                 } finally {
                     permits.release()
                 }
             }
+        }
+    }
+
+    /** Runs [block] as a pod of its own: a crash ends [block] only. Errors other than injected ones are violations. */
+    private suspend fun inOwnPod(what: String, block: suspend () -> Unit) = coroutineScope {
+        launch {
+            withContext(Pod(coroutineContext.job)) {
+                try {
+                    block()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (!e.isInjected()) violations += "$what failed: $e"
+                }
+            }
+        }.join()
+    }
+
+    /**
+     * The Kafka listener of the payment events. The provider decides a payment once its charge is
+     * applied; its event then arrives after a random delay (often after the step's timeout, sometimes
+     * before the step waits), twice, or never.
+     */
+    private suspend fun listener(engine: SagaEngine): Unit = coroutineScope {
+        while (true) {
+            val running = pg.query("SELECT id, business_key, input FROM saga WHERE type = 'ITEM_PAY' AND state = 'RUNNING'") {
+                Triple(Uuid.parse(it.getString(1)), it.getString(2), Json.decodeFromString<ItemRequest>(it.getString(3)))
+            }
+            for ((id, key, input) in running) {
+                if (charge.lookup(key) == null) continue                    // nothing charged: no payment
+                val event = provider.decide(key, input.customer) ?: continue
+                if (dice.chance(0.1)) {
+                    deliveries.count("lost")
+                    continue
+                }
+                repeat(if (dice.chance(0.2)) 2 else 1) {
+                    launch {
+                        delay(dice.millis(2000))
+                        deliver(engine, id, event)
+                    }
+                }
+            }
+            delay(30)
+        }
+    }
+
+    /** Delivers one event: redelivered while the database fails, as Kafka does until the offset is committed. */
+    private suspend fun deliver(engine: SagaEngine, id: Uuid, event: PaymentEvent) {
+        while (true) {
+            val result = try {
+                engine.signal(id, "payment", event)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (!e.isInjected()) return run { violations += "signal for saga $id failed: $e" }
+                deliveries.count("failed (database)")
+                delay(dice.millis(50))
+                continue
+            }
+            deliveries.count(result::class.simpleName!!)
+            if (result is SignalResult.Delivered && dice.chance(0.5)) {
+                inOwnPod("run after the signal of saga $id") { engine.run(id, Clock.System.now() + 100.milliseconds) }
+            }
+            return
+        }
+    }
+
+    /** A customer who cancels at a random moment, and tries again when it fails. */
+    private suspend fun customerCancels(engine: SagaEngine, id: Uuid) {
+        delay(dice.millis(3000))
+        repeat(3) {
+            var outcome = "crashed"
+            inOwnPod("cancel of saga $id") {
+                outcome = try {
+                    engine.cancel(id, "customer cancelled", "customer")
+                    "cancelled"
+                } catch (e: IllegalArgumentException) {
+                    if (!e.message.orEmpty().contains("is finished")) throw e
+                    "too late"
+                } catch (e: IllegalStateException) {
+                    if (!e.message.orEmpty().startsWith("hook failed")) throw e
+                    "failed (hook)"                                      // rolled back: try again
+                } catch (e: Exception) {
+                    if (!e.isInjected()) throw e
+                    "failed (database)"
+                }
+            }
+            cancellations.count(outcome)
+            if (!outcome.startsWith("failed")) return
+            delay(dice.millis(200))
         }
     }
 
@@ -374,9 +529,15 @@ class SagaStressIT {
             for ((saga, typeAndKey) in stuck) {
                 val (id, state, stepIndex) = saga
                 val (type, key) = typeAndKey
-                val truth = stepsByType.getValue(type)[stepIndex].system.lookup(key)
+                val step = definitions.getValue(type).steps[stepIndex]
+                // The truth: what the step's system holds, or for the payment wait what the provider decided.
+                val (truth, json) = when (step) {
+                    is ChaosStep -> step.system.lookup(key).let { it to it?.let { e -> Json.encodeToString(e) } }
+                    else -> provider.lookup(key).let { it to it?.let { e -> Json.encodeToString(e) } }
+                }
                 val action = when {
                     state == SagaState.COMPENSATING -> "retry"
+                    truth is PaymentEvent && !truth.succeeded -> "abort"   // declined: the saga gives up
                     truth != null -> if (dice.chance(0.7)) "markDone" else "abort(applied)"
                     else -> if (dice.chance(0.7)) "retry" else "abort"
                 }
@@ -384,8 +545,8 @@ class SagaStressIT {
                 try {
                     when (action) {
                         "retry" -> engine.retry(id, "operator")
-                        "markDone" -> engine.markDone(id, Json.encodeToString(truth), "operator")
-                        "abort(applied)" -> engine.abort(id, "operator", currentStepApplied = true, output = Json.encodeToString(truth))
+                        "markDone" -> engine.markDone(id, json, "operator")
+                        "abort(applied)" -> engine.abort(id, "operator", currentStepApplied = true, output = json)
                         else -> engine.abort(id, "operator", currentStepApplied = false)
                     }
                 } catch (e: CancellationException) {
@@ -411,20 +572,21 @@ class SagaStressIT {
 
     private class Row(
         val type: String, val key: String, val state: String, val stepStatus: String, val lockedUntil: Any?,
-        val itemStatus: String, val hookRuns: Int, val input: ItemRequest,
+        val itemStatus: String, val hookRuns: Int, val input: ItemRequest, val cancelRequested: Boolean,
     )
 
     private fun checkInvariants() {
         val problems = violations.toMutableList()
         val rows = pg.query(
             """
-            SELECT s.type, s.business_key, s.state, s.step_status, s.locked_until, i.status, i.hook_runs, s.input
+            SELECT s.type, s.business_key, s.state, s.step_status, s.locked_until, i.status, i.hook_runs, s.input,
+                   s.cancel_requested_at IS NOT NULL
             FROM saga s JOIN item i ON i.key = s.business_key
             """.trimIndent(),
         ) {
             Row(
                 it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getObject(5), it.getString(6),
-                it.getInt(7), Json.decodeFromString(it.getString(8)),
+                it.getInt(7), Json.decodeFromString(it.getString(8)), it.getBoolean(9),
             )
         }
         // step results by key: step name -> (ref, compensated)
@@ -445,6 +607,7 @@ class SagaStressIT {
                 problems += "${r.key}: finished with a lock (${r.stepStatus})"
             }
             if (r.hookRuns != 1) problems += "${r.key}: hook ran ${r.hookRuns} times, expected exactly once"
+            if (r.cancelRequested && r.state != SagaState.FAILED.name) problems += "${r.key}: cancelled but ${r.state}"
             when (r.state) {
                 SagaState.COMPLETED.name -> {
                     if (r.itemStatus != "DONE") problems += "${r.key}: COMPLETED but item is ${r.itemStatus}"
@@ -458,6 +621,13 @@ class SagaStressIT {
                             problems += "${r.key}: ${step.name} was applied for ${truth.customer}, the saga's input is ${r.input.customer}"
                         }
                         if (compensated) problems += "${r.key}: COMPLETED but ${step.name} is marked compensated"
+                    }
+                    if (r.type == "ITEM_PAY") {
+                        val paid = stored[paymentWait.name]?.first?.let { Json.decodeFromString<PaymentEvent>(it) }
+                        val truth = provider.lookup(r.key)
+                        if (paid == null || paid != truth || !paid.succeeded) {
+                            problems += "${r.key}: COMPLETED with payment $paid, the provider has $truth"
+                        }
                     }
                 }
                 SagaState.FAILED.name -> {
@@ -482,6 +652,7 @@ class SagaStressIT {
             SagaEvents.CREATED, SagaEvents.LOCK_EXPIRED, SagaEvents.LATE_RESULT_IGNORED, SagaEvents.RECORD_FAILED,
             SagaEvents.RESUME_FAILED,
             SagaEvents.MANUAL_RETRY, SagaEvents.MANUAL_DONE, SagaEvents.MANUAL_ABORT,
+            SagaEvents.WAIT_STARTED, SagaEvents.WAIT_TIMED_OUT, SagaEvents.SIGNAL_RECEIVED, SagaEvents.CANCEL_REQUESTED,
         )
         val outcome = Regex("(EXECUTE|CHECK|COMPENSATE):[A-Za-z]+")
         pg.query("SELECT DISTINCT event FROM saga_log") { it.getString(1) }
@@ -516,6 +687,8 @@ class SagaStressIT {
                 appendLine("Calls that threw a JVM Error: " +
                     pg.long("SELECT count(*) FROM saga_log WHERE detail LIKE '%NotImplementedError%'"))
                 appendLine("Manual actions: ${manualActions.mapValues { it.value.get() }}")
+                appendLine("Payment events: ${deliveries.mapValues { it.value.get() }}")
+                appendLine("Cancellations: ${cancellations.mapValues { it.value.get() }}")
                 appendLine("Events:")
                 events.forEach { appendLine(it) }
             },

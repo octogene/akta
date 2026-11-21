@@ -27,6 +27,8 @@ enum class StepStatus {
     READY,
     /** A call is in flight until `lockedUntil`. */
     IN_PROGRESS,
+    /** A signal step waits for its signal, until `nextAttemptAt` (its timeout). No call is in flight. */
+    WAITING,
     /** The outcome of the last call is unknown: a check is scheduled at `nextAttemptAt`. */
     UNKNOWN,
     /** Blocked: a human must step in (retry, mark as done, or abort). */
@@ -60,6 +62,8 @@ data class SagaRecord(
     val checkFailures: Int = 0,
     /** The saga's input, as written by the engine's [SagaSerializer]. Null when the saga has none. Never changes. */
     val input: String? = null,
+    /** Set by [SagaEngine.cancel]: the saga compensates as soon as no call of it is in flight. */
+    val cancelRequestedAt: Instant? = null,
 )
 
 /** One line of the saga history. */
@@ -92,6 +96,14 @@ object SagaEvents {
     const val MANUAL_RETRY = "MANUAL_RETRY"
     const val MANUAL_DONE = "MANUAL_DONE"
     const val MANUAL_ABORT = "MANUAL_ABORT"
+    /** A signal step started waiting; the detail gives the signal and the deadline. */
+    const val WAIT_STARTED = "WAIT_STARTED"
+    /** A signal step's timeout passed without its signal: checked, or stuck. */
+    const val WAIT_TIMED_OUT = "WAIT_TIMED_OUT"
+    /** A signal arrived; the detail says delivered, stored, consumed (stored earlier) or ignored. */
+    const val SIGNAL_RECEIVED = "SIGNAL_RECEIVED"
+    /** [SagaEngine.cancel] was called; the detail gives the reason. */
+    const val CANCEL_REQUESTED = "CANCEL_REQUESTED"
 
     /*
      * Outcomes of a call are logged as "<action>:<outcome>":

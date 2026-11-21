@@ -1,6 +1,7 @@
 package com.example.saga
 
 import kotlin.reflect.KType
+import kotlin.time.Duration
 import kotlin.uuid.Uuid
 
 /*
@@ -107,6 +108,48 @@ interface SagaStep<I, O> {
     val ref: StepRef<O> get() = StepRef(name)
 }
 
+/**
+ * A step that makes no call: it waits for a signal named [signal], delivered from outside through
+ * [SagaEngine.signal] (a Kafka listener, an HTTP call). The signal's value, of type [S], becomes the
+ * step's output. While it waits, the saga is only a row that is not due: no thread, connection or lock.
+ *
+ * At [timeout], the step's [check] decides, if [checksOnTimeout]: the value it finds means accepted,
+ * NotDone means rejected (the saga compensates), CannotTell means stuck. Without a check, a timeout
+ * makes the saga stuck. The DSL (`awaitSignal<S>(…) { … }`) builds these.
+ */
+interface SignalStep<I, S> : SagaStep<I, S> {
+    /** The name a listener signals: it describes the event (`payment`), not the step. Unique in a saga. */
+    val signal: String
+
+    /** How long to wait, from the moment the step starts waiting. */
+    val timeout: Duration
+
+    /** Whether [check] asks the external system at the timeout. False: a timeout makes the saga stuck. */
+    val checksOnTimeout: Boolean
+
+    /**
+     * Decides on a received value: return to accept it, throw [StepRejected] to fail the saga and
+     * compensate. Runs inside the engine's transaction: no external calls. Default: accept.
+     */
+    fun accept(ctx: SagaContext<I>, value: S) {}
+
+    /** A signal step makes no call. */
+    override suspend fun execute(ctx: SagaContext<I>): S =
+        throw UnsupportedOperationException("Signal step '$name' makes no call: it waits for signal '$signal'")
+}
+
+/** What [SagaEngine.signal] did with a signal. */
+sealed interface SignalResult {
+    /** The step was waiting for it: accepted (the saga moves on) or rejected (it compensates). */
+    data class Delivered(val sagaId: Uuid) : SignalResult
+    /** The step does not wait yet (or its timeout check is in flight): kept, used when it waits. */
+    data class Stored(val sagaId: Uuid) : SignalResult
+    /** A signal of that name was already received, or the step is done, or the saga finished: nothing changes. */
+    data class Ignored(val sagaId: Uuid) : SignalResult
+    /** No saga with that id. */
+    data object NoSaga : SignalResult
+}
+
 class SagaDefinition<I>(
     /** Saga type, stored in the database (e.g. "ITEM_SETUP"). */
     val type: String,
@@ -123,5 +166,9 @@ class SagaDefinition<I>(
         require(steps.isNotEmpty()) { "Saga $type has no steps" }
         val duplicates = steps.groupBy { it.name }.filterValues { it.size > 1 }.keys
         require(duplicates.isEmpty()) { "Duplicate step names in saga $type: $duplicates" }
+        val signals = steps.filterIsInstance<SignalStep<*, *>>()
+        val duplicateSignals = signals.groupBy { it.signal }.filterValues { it.size > 1 }.keys
+        require(duplicateSignals.isEmpty()) { "Signal names used by several steps in saga $type: $duplicateSignals" }
+        signals.forEach { require(it.outputType != null) { "Signal step '${it.name}' of saga $type needs a value type" } }
     }
 }

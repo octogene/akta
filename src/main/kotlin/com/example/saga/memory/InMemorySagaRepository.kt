@@ -20,6 +20,7 @@ class InMemorySagaRepository : SagaRepository {
     private val results = mutableListOf<StoredResult>()
     private val logEntries = mutableListOf<SagaLogEntry>()
     private val updatedAt = hashMapOf<Uuid, Instant>()
+    private val signals = linkedMapOf<Pair<Uuid, String>, String>()
 
     data class StoredResult(
         val sagaId: Uuid,
@@ -83,24 +84,33 @@ class InMemorySagaRepository : SagaRepository {
             .toSet()
         logEntries.removeAll { it.sagaId in ids }
         results.removeAll { it.sagaId in ids }
+        signals.keys.removeAll { it.first in ids }
         ids.forEach { sagas.remove(it); updatedAt.remove(it) }
         return ids.size
     }
+
+    override fun saveSignal(sagaId: Uuid, name: String, value: String, now: Instant): Boolean =
+        signals.putIfAbsent(sagaId to name, value) == null
+
+    override fun signal(sagaId: Uuid, name: String): String? = signals[sagaId to name]
 
     internal class Snapshot(
         val sagas: Map<Uuid, SagaRecord>,
         val results: List<StoredResult>,
         val logEntries: List<SagaLogEntry>,
         val updatedAt: Map<Uuid, Instant>,
+        val signals: Map<Pair<Uuid, String>, String>,
     )
 
-    internal fun snapshot() = Snapshot(LinkedHashMap(sagas), results.toList(), logEntries.toList(), HashMap(updatedAt))
+    internal fun snapshot() =
+        Snapshot(LinkedHashMap(sagas), results.toList(), logEntries.toList(), HashMap(updatedAt), LinkedHashMap(signals))
 
     internal fun restore(snapshot: Snapshot) {
         sagas.clear(); sagas.putAll(snapshot.sagas)
         results.clear(); results.addAll(snapshot.results)
         logEntries.clear(); logEntries.addAll(snapshot.logEntries)
         updatedAt.clear(); updatedAt.putAll(snapshot.updatedAt)
+        signals.clear(); signals.putAll(snapshot.signals)
     }
 }
 

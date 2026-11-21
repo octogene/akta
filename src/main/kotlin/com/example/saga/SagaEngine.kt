@@ -10,6 +10,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.reflect.KType
+import kotlin.reflect.typeOf
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.days
@@ -260,7 +261,7 @@ class SagaEngine(
     suspend fun abort(id: Uuid, actor: String, currentStepApplied: Boolean, output: String? = null): SagaRecord =
         manual(id, actor, SagaEvents.MANUAL_ABORT) { r, now ->
             require(r.state == SagaState.RUNNING) { "Saga $id is not running forward" }
-            require(r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.STUCK) {
+            require(r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.WAITING || r.stepStatus == StepStatus.STUCK) {
                 "A call of saga $id may have been applied: wait for its outcome"
             }
             require(!currentStepApplied || r.stepStatus == StepStatus.STUCK) {
@@ -274,6 +275,135 @@ class SagaEngine(
                 compensateFrom(r, r.stepIndex - 1, now)
             }
             ManualChange(updated, detail = "currentStepApplied=$currentStepApplied")
+        }
+
+    // ---- Signals and cancellation -----------------------------------------------------------
+
+    /**
+     * Delivers the signal [name], with its [value], to the saga [sagaId]: to the step of its definition
+     * that waits for that name. One short transaction; call it from a Kafka listener (then commit the
+     * offset) or an HTTP handler. Only the first signal of a name counts: a redelivery is ignored.
+     *
+     * @return [SignalResult.Delivered] (the step was waiting: accepted or rejected by its onSignal),
+     *   [SignalResult.Stored] (it does not wait yet: used when it does), [SignalResult.Ignored]
+     *   (already received, or too late), or [SignalResult.NoSaga].
+     * @throws IllegalArgumentException if no step of the saga waits for [name], or it expects another type.
+     */
+    suspend inline fun <reified S> signal(sagaId: Uuid, name: String, value: S): SignalResult =
+        signal(sagaId, name, value, typeOf<S>())
+
+    @PublishedApi
+    internal suspend fun signal(sagaId: Uuid, name: String, value: Any?, type: KType): SignalResult {
+        val trace = traceId()
+        return transactions.inTransaction { deliver(sagaId, name, value, type, trace) }
+    }
+
+    private fun deliver(sagaId: Uuid, name: String, value: Any?, type: KType, trace: String?): SignalResult {
+        val r = repository.lock(sagaId) ?: return SignalResult.NoSaga
+        val now = currentTime()
+        val def = definition(r.type)
+        val index = def.steps.indexOfFirst { it is SignalStep<*, *> && it.signal == name }
+        require(index >= 0) { "No step of saga type ${r.type} waits for signal '$name'" }
+        val step = def.signalStepAt(index)
+        require(step.outputType == type) { "Signal '$name' of saga type ${r.type} carries ${step.outputType}, not $type" }
+        val encoded = serializer.encode(value, type)
+        val size = encoded.utf8Size()
+        require(size <= config.maxDataBytes) { "Signal '$name' is $size bytes, over maxDataBytes (${config.maxDataBytes})" }
+
+        fun received(what: String) {
+            val detail = listOfNotNull(what, describe(step, value)?.let { "ref=$it" }).joinToString(" ")
+            log(r.id, index, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
+        }
+        if (!repository.saveSignal(r.id, name, encoded, now)) {
+            received("ignored: already received")
+            return SignalResult.Ignored(r.id)
+        }
+        val running = r.state == SagaState.RUNNING
+        return when {
+            running && r.stepIndex == index && r.stepStatus == StepStatus.WAITING -> {
+                received("delivered")
+                applySignal(r, def, step, context(r, def), value, encoded, now)
+                SignalResult.Delivered(r.id)
+            }
+            // Not waiting yet (an earlier step runs, or this one is ready, checking or stuck): kept for it.
+            running && r.stepIndex <= index -> {
+                received("stored")
+                SignalResult.Stored(r.id)
+            }
+            else -> {
+                received("ignored: too late")
+                SignalResult.Ignored(r.id)
+            }
+        }
+    }
+
+    /** The signal step [step] starts waiting, or consumes at once a signal that arrived before it. */
+    private fun enterWait(
+        r: SagaRecord,
+        def: AnyDefinition,
+        step: AnySignalStep,
+        ctx: SagaContext<Any?>,
+        now: Instant,
+        trace: String?,
+    ): Cycle {
+        val stored = repository.signal(r.id, step.signal)
+        if (stored != null) {
+            val value = decode(stored, checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
+            log(r.id, r.stepIndex, step.name, SagaEvents.SIGNAL_RECEIVED, "consumed (stored earlier)", now, trace)
+            return claimLocked(applySignal(r, def, step, ctx, value, stored, now), trace)
+        }
+        val deadline = now + step.timeout
+        val waiting = r.copy(stepStatus = StepStatus.WAITING, nextAttemptAt = deadline, attempts = 0, lastError = null)
+        repository.save(waiting, now)
+        log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_STARTED, "signal '${step.signal}' until $deadline", now, trace)
+        return Cycle(waiting, next = null)
+    }
+
+    /** A signal for the waiting [step]: its onSignal accepts it (the saga moves on) or rejects it (it compensates). */
+    private fun applySignal(
+        r: SagaRecord,
+        def: AnyDefinition,
+        step: AnySignalStep,
+        ctx: SagaContext<Any?>,
+        value: Any?,
+        encoded: String,
+        now: Instant,
+    ): SagaRecord {
+        val updated = try {
+            step.accept(ctx, value)
+            repository.saveResult(r.id, r.stepIndex, step.name, encoded, now)
+            next(r, def, now)
+        } catch (e: StepRejected) {
+            compensateFrom(r.copy(lastError = e.toString()), r.stepIndex - 1, now)
+        }
+        repository.save(updated, now)
+        finishIfNeeded(r, updated)
+        return updated
+    }
+
+    /**
+     * Abandons the saga: everything done so far is compensated. A saga that is waiting or ready
+     * compensates at once. One with a call in flight, or an outcome still to check, compensates as soon
+     * as that outcome is recorded, since the call may have been applied and must be undone too. A stuck
+     * saga stays stuck until a human retries or aborts it. Refused for a finished saga: undoing it is a
+     * new saga.
+     */
+    suspend fun cancel(id: Uuid, reason: String, actor: String): SagaRecord =
+        manual(id, actor, SagaEvents.CANCEL_REQUESTED) { r, now ->
+            require(!r.state.isFinished) { "Saga $id is finished: undoing it is a new saga" }
+            if (r.state != SagaState.RUNNING) return@manual ManualChange(r, detail = reason)   // already compensating
+            val requested = r.copy(cancelRequestedAt = r.cancelRequestedAt ?: now, lastError = "Cancelled: $reason")
+            ManualChange(cancelIfRequested(requested, now), detail = reason)
+        }
+
+    /** A saga whose cancellation was requested compensates once no call of it is in flight. */
+    private fun cancelIfRequested(r: SagaRecord, now: Instant): SagaRecord =
+        if (r.cancelRequestedAt != null && r.state == SagaState.RUNNING &&
+            (r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.WAITING)
+        ) {
+            compensateFrom(r, r.stepIndex - 1, now)
+        } else {
+            r
         }
 
     private class ManualChange(val record: SagaRecord, val detail: String? = null)
@@ -394,6 +524,32 @@ class SagaEngine(
         // Decoded before anything is called: data that cannot be read throws here, and the transaction
         // rolls back. resumeDue then postpones the saga (another version of the code may read it).
         val ctx = context(r, def)
+        // A cancellation that waited for a call to end: compensate now that none is in flight.
+        val cancelled = cancelIfRequested(r, now)
+        if (cancelled !== r) {
+            repository.save(cancelled, now)
+            finishIfNeeded(r, cancelled)
+            return claimLocked(cancelled, trace)
+        }
+        val step = def.stepAt(r.stepIndex)
+        if (step is SignalStep<*, *> && r.state == SagaState.RUNNING) {
+            @Suppress("UNCHECKED_CAST")
+            val signalStep = step as AnySignalStep
+            when (r.stepStatus) {
+                StepStatus.READY -> return enterWait(r, def, signalStep, ctx, now, trace)
+                StepStatus.WAITING -> {                  // its timeout passed without the signal
+                    log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
+                    val noSignal = "No signal '${signalStep.signal}' before the timeout"
+                    if (!signalStep.checksOnTimeout) {
+                        val stuck = r.copy(stepStatus = StepStatus.STUCK, lastError = noSignal)
+                        repository.save(stuck, now)
+                        return Cycle(stuck, next = null)
+                    }
+                    r = r.copy(stepStatus = StepStatus.UNKNOWN, lastError = noSignal)   // the check decides, below
+                }
+                else -> Unit                              // UNKNOWN: its timeout check, claimed below
+            }
+        }
         val action = when {
             r.stepStatus == StepStatus.UNKNOWN -> Action.CHECK
             r.state == SagaState.RUNNING -> Action.EXECUTE
@@ -438,8 +594,11 @@ class SagaEngine(
         when (work.action) {
             Action.EXECUTE -> done(work, work.step.execute(work.ctx))
             Action.CHECK -> when (val c = work.step.check(work.ctx)) {
-                is CheckResult.Done -> done(work, c.output)
-                CheckResult.NotDone -> Outcome.NotDone
+                is CheckResult.Done -> accepted(work, c.output)
+                // A signal step found nothing at its timeout: the signal will not come, the saga gives up.
+                CheckResult.NotDone -> (work.step as? SignalStep<*, *>)
+                    ?.let { Outcome.Rejected("No signal '${it.signal}' before the timeout, and the check found none") }
+                    ?: Outcome.NotDone
                 CheckResult.CannotTell -> Outcome.CannotTell
             }
             Action.COMPENSATE -> {
@@ -447,6 +606,20 @@ class SagaEngine(
                 Outcome.Compensated
             }
         }
+
+    /** A check found [output]. For a signal step, its onSignal decides first, as for a signal received. */
+    private fun accepted(work: Work, output: Any?): Outcome {
+        val step = work.step
+        if (step is SignalStep<*, *>) {
+            try {
+                @Suppress("UNCHECKED_CAST")
+                (step as AnySignalStep).accept(work.ctx, output)
+            } catch (e: StepRejected) {
+                return Outcome.Rejected(e.toString())
+            }
+        }
+        return done(work, output)
+    }
 
     /**
      * The call returned [output]: encode it now, outside any transaction. The call was made, so if the
@@ -495,7 +668,7 @@ class SagaEngine(
         // Any outcome but a failed check ends the series of failed checks.
         val r = current.copy(lockedUntil = null, checkFailures = 0)
 
-        val updated = when (outcome) {
+        val decided = when (outcome) {
             is Outcome.Done -> {
                 repository.saveResult(r.id, r.stepIndex, work.step.name, outcome.output, now)
                 next(r, def, now)
@@ -546,6 +719,8 @@ class SagaEngine(
             }
             is Outcome.CompensationFailed -> retryLater(r, outcome.error, now)
         }
+        // Cancelled while the call was in flight: the call's outcome is recorded, now compensate (it included).
+        val updated = cancelIfRequested(decided, now)
         repository.save(updated, now)
         // The new lastError when it changed (it may add "Too many attempts"), else the outcome's own
         // detail: a repeated error is logged every time, not only the first.
@@ -597,7 +772,12 @@ class SagaEngine(
     // ---- Transitions ------------------------------------------------------------------------
 
     /** Step done: move on to the next one, or complete the saga. */
+    /**
+     * The current step is done: on to the next one, or the saga is completed. A saga whose cancellation
+     * was requested compensates instead, this step included, even when it was the last one.
+     */
     private fun next(r: SagaRecord, def: AnyDefinition, now: Instant): SagaRecord {
+        if (r.cancelRequestedAt != null && r.state == SagaState.RUNNING) return compensateFrom(r, r.stepIndex, now)
         val index = r.stepIndex + 1
         return if (index == def.steps.size) {
             r.copy(state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null)
@@ -727,9 +907,14 @@ class SagaEngine(
 private typealias AnyDefinition = SagaDefinition<Any?>
 private typealias AnyStep = SagaStep<Any?, Any?>
 
+private typealias AnySignalStep = SignalStep<Any?, Any?>
+
 /** The engine handles every step through its erased type: each one only ever sees its own values. */
 @Suppress("UNCHECKED_CAST")
 private fun AnyDefinition.stepAt(index: Int): AnyStep = steps[index] as AnyStep
+
+@Suppress("UNCHECKED_CAST")
+private fun AnyDefinition.signalStepAt(index: Int): AnySignalStep = steps[index] as AnySignalStep
 
 /**
  * A saga's input or a step's output cannot be read: it was written by another version of the code, or

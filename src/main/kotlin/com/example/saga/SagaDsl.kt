@@ -2,6 +2,7 @@ package com.example.saga
 
 import kotlin.reflect.KType
 import kotlin.reflect.typeOf
+import kotlin.time.Duration
 
 /*
  * Kotlin DSL on top of SagaDefinition / SagaStep. It builds exactly the same objects:
@@ -58,6 +59,30 @@ class SagaBuilder<I> @PublishedApi internal constructor(
     @PublishedApi
     internal fun <O> addStep(name: String, outputType: KType?, block: StepBuilder<I, O>.() -> Unit): StepRef<O> {
         steps += StepBuilder<I, O>(name, outputType).apply(block).build()
+        return StepRef(name)
+    }
+
+    /**
+     * Declares the next step as a wait for the signal named [signal], whose value is an [S]: it makes no
+     * call, and the value becomes its output. After [timeout], its check decides (`check` or
+     * `checkByLookup` in [block]); without one, the saga becomes stuck. Returns a `StepRef<S>`.
+     */
+    inline fun <reified S> awaitSignal(
+        name: String,
+        signal: String,
+        timeout: Duration,
+        noinline block: SignalStepBuilder<I, S>.() -> Unit = {},
+    ): StepRef<S> = addSignalStep(name, signal, timeout, typeOf<S>(), block)
+
+    @PublishedApi
+    internal fun <S> addSignalStep(
+        name: String,
+        signal: String,
+        timeout: Duration,
+        valueType: KType,
+        block: SignalStepBuilder<I, S>.() -> Unit,
+    ): StepRef<S> {
+        steps += SignalStepBuilder<I, S>(name, signal, timeout, valueType).apply(block).build()
         return StepRef(name)
     }
 
@@ -147,6 +172,72 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
             override suspend fun check(ctx: SagaContext<I>): CheckResult<O> = ctx.checkBlock()
             override fun describe(output: O): String? = describeBlock(output)
             override fun toString() = "SagaStep($stepName)"
+        }
+    }
+}
+
+@SagaDslMarker
+class SignalStepBuilder<I, S> @PublishedApi internal constructor(
+    private val name: String,
+    private val signal: String,
+    private val timeout: Duration,
+    private val valueType: KType,
+) {
+    private var acceptBlock: SagaContext<I>.(S) -> Unit = {}
+    private var checkBlock: (suspend SagaContext<I>.() -> CheckResult<S>)? = null
+    private var describeBlock: ((S) -> String?)? = null
+
+    /**
+     * Decides on a received value: return to accept it, throw [StepRejected] to fail the saga and
+     * compensate. Runs inside the engine's transaction: no external calls.
+     */
+    fun onSignal(block: SagaContext<I>.(signal: S) -> Unit) {
+        acceptBlock = block
+    }
+
+    /** At the timeout, asks the external system: [CheckResult.Done] accepts its value, NotDone rejects. */
+    fun check(block: suspend SagaContext<I>.() -> CheckResult<S>) {
+        checkBlock = block
+    }
+
+    /** At the timeout, looks the value up: none means rejected, one means accepted, several means cannot tell. */
+    fun checkByLookup(lookup: suspend SagaContext<I>.() -> List<S>) {
+        checkBlock = {
+            val found = lookup()
+            when (found.size) {
+                0 -> CheckResult.NotDone
+                1 -> CheckResult.Done(found.single())
+                else -> CheckResult.CannotTell
+            }
+        }
+    }
+
+    /** What `saga_log` records about the value: an identifier, never personal data. Default: nothing. */
+    fun logAs(block: (S) -> String?) {
+        describeBlock = block
+    }
+
+    @PublishedApi
+    internal fun build(): SignalStep<I, S> {
+        require(timeout.isPositive()) { "Signal step '$name' needs a positive timeout" }
+        val acceptBlock = acceptBlock
+        val checkBlock = checkBlock
+        val describeBlock = describeBlock ?: { _: S -> null }
+        val stepName = name
+        val signalName = signal
+        val stepTimeout = timeout
+        val type = valueType
+        return object : SignalStep<I, S> {
+            override val name = stepName
+            override val signal = signalName
+            override val timeout = stepTimeout
+            override val outputType = type
+            override val checksOnTimeout = checkBlock != null
+            override fun accept(ctx: SagaContext<I>, value: S) = ctx.acceptBlock(value)
+            override suspend fun check(ctx: SagaContext<I>): CheckResult<S> =
+                checkBlock?.let { ctx.it() } ?: CheckResult.CannotTell
+            override fun describe(output: S): String? = describeBlock(output)
+            override fun toString() = "SignalStep($stepName, signal=$signalName)"
         }
     }
 }

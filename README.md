@@ -52,6 +52,7 @@ The current step has a **status**:
 |---|---|
 | `READY` | Will run at `next_attempt_at` |
 | `IN_PROGRESS` | A call is in flight until `locked_until` |
+| `WAITING` | A signal step waits for its signal, until its timeout at `next_attempt_at`. No call is in flight |
 | `UNKNOWN` | The last call's outcome is unknown; a check is scheduled |
 | `STUCK` | A human must step in |
 
@@ -64,6 +65,10 @@ stateDiagram-v2
     UNKNOWN --> IN_PROGRESS : check, after the settle delay
     IN_PROGRESS --> STUCK : cannot tell / too many attempts / output not stored
     STUCK --> READY : manual retry
+    READY --> WAITING : signal step, no signal yet
+    WAITING --> READY : signal accepted (next step)
+    WAITING --> UNKNOWN : timeout, with a check
+    WAITING --> STUCK : timeout, without a check
 ```
 
 ---
@@ -82,13 +87,14 @@ Publish it locally while it has no repository: `./gradlew publishToMavenLocal`, 
 
 ### Database schema
 
-Copy [`src/main/resources/com/example/saga/schema.sql`](src/main/resources/com/example/saga/schema.sql) into one of your Flyway migrations (for example `V5__saga.sql`). It creates three tables:
+Copy [`src/main/resources/com/example/saga/schema.sql`](src/main/resources/com/example/saga/schema.sql) into one of your Flyway migrations (for example `V5__saga.sql`). It creates four tables:
 
 | Table | Content |
 |---|---|
 | `saga` | One row per saga: state, current step, attempts, lock, last error, and its input |
 | `saga_step_result` | The output of each completed step |
-| `saga_log` | History: every call, check, compensation and manual action, with the trace id |
+| `saga_signal` | The signals received for signal steps: at most one per name and saga |
+| `saga_log` | History: every call, check, compensation, signal and manual action, with the trace id |
 
 Inputs and outputs are stored as text (JSON), not JSONB: the engine never queries inside them.
 
@@ -179,6 +185,51 @@ A saga's input and its steps' outputs are stored as text by the engine's `SagaSe
 
 `onCompleted` and `onFailed` run **inside** the transaction that ends the saga, so the business state and the saga state change together. They must not call external systems.
 
+### Waiting for a signal
+
+A step can wait for an event that something else delivers, a payment confirmed on Kafka for example, instead of making a call. While it waits, the saga is only a row that is not due: no thread, connection or lock is held.
+
+```kotlin
+val reservation = saga<ReservationRequest>("RESERVATION") {
+    val payment = step<Payment>("create-payment") {
+        execute { payments.create(reference = sagaId.toString(), amount = input.amount) }   // our saga id, for routing
+        compensate { own -> own?.let { payments.cancelOrRefund(it.id) } }
+    }
+    val paid = awaitSignal<PaymentResult>("await-payment", signal = "payment", timeout = 30.minutes) {
+        onSignal { if (!it.succeeded) throw StepRejected("payment failed") }   // reject: the saga compensates
+        check { payments.status(requireResult(payment).id) }                    // at the timeout: ask before giving up
+        logAs { it.paymentId }
+    }
+    step<String>("confirm") { execute { notifications.confirmed(key, requireResult(paid).paymentId) } }
+}
+
+// One Kafka listener for every saga type: it maps events to signal names. Commit the offset once signal returns.
+when (val result = engine.signal(Uuid.parse(event.reference), "payment", PaymentResult(event.paymentId, event.succeeded))) {
+    is SignalResult.Delivered -> engine.run(result.sagaId, Clock.System.now() + 10.seconds)   // optional: finish now
+    else -> Unit
+}
+```
+
+| DSL | Meaning |
+|---|---|
+| `awaitSignal<S>(name, signal, timeout) { … }` | A step that makes no call and waits for the signal named `signal` (it names the event, not the step), whose value is an `S`. The value becomes the step's output. A signal name is used by one step of a saga. |
+| `onSignal { value -> … }` | Optional. Throw `StepRejected` to reject the value: the saga compensates. Runs inside the engine's transaction: no external calls. |
+| `check { … }` / `checkByLookup { … }` | Optional. At the timeout, ask the external system: a value found is accepted (it goes through `onSignal` too), `NotDone` rejects, `CannotTell` makes the saga stuck. Without a check, a timeout makes the saga stuck. |
+
+`engine.signal(sagaId, name, value)` is one short transaction. The engine finds the step of that saga's definition that waits for `name`, and checks the value's type against the one it declares:
+
+| The step for that name | Result |
+|---|---|
+| Is waiting | `Delivered`: accepted (the saga moves on) or rejected (it compensates) |
+| Does not wait yet (an earlier step runs, or its timeout check is in flight) | `Stored`: used as soon as the step waits; during a timeout check, the check decides |
+| Has already received a signal of that name, is done, or the saga finished | `Ignored`: a redelivered or late event changes nothing |
+| Does not exist, or expects another type | `IllegalArgumentException`, nothing stored |
+| (no saga with that id) | `NoSaga` |
+
+The external system must carry our saga id, for example as the payment's reference, so that its events lead back to the saga. `run` returns a saga that waits with `stepStatus = WAITING`: an HTTP handler answers 202, with what earlier steps returned (`requireResult(payment).url`).
+
+**Cancelling.** `engine.cancel(sagaId, reason, actor)` abandons a saga, a customer who cancels for example: everything done so far is compensated. A saga that waits or is ready compensates at once. One with a call in flight, or an outcome still to check, compensates as soon as that outcome is recorded, the call included. A finished saga cannot be cancelled.
+
 ---
 
 ## Running sagas
@@ -250,6 +301,7 @@ It picks up every saga with something to do: a retry that is due, an unknown out
 | A **compensation fails** | Retries with backoff, then `STUCK`. The same applies when the pod keeps dying during a compensation. |
 | The outcome **cannot be recorded** (`onCompleted` / `onFailed` throws, a constraint fails…) | The transaction is rolled back and recorded again, alone. If that fails too, the saga becomes `STUCK` on the step that ran, logged as `RECORD_FAILED`; a successful call's output is saved with its result. Fix the cause, then use `markDone(id, null, actor)` to continue with it (or `retry` for a compensation). |
 | A call's **output cannot be stored** (it cannot be encoded, or is over `maxDataBytes`) | The call has happened, so it is never run again: the step becomes `STUCK`. Record an output with `markDone`, or undo the step with `abort(currentStepApplied = true)`. |
+| **No signal before the timeout** | With a check: it decides (the value found is accepted, `NotDone` compensates, `CannotTell` makes the saga `STUCK`). Without one: `STUCK`. |
 | A saga's **data cannot be read** (written by another version of the code) | No call is made. The saga is postponed by `resumeFailureDelay` and logged as `RESUME_FAILED`, so that a version that can read it picks it up. |
 | A call runs **longer than `callLock`** | The engine cuts it at `callLock`: the outcome is unknown, and is checked. |
 | A result arrives **after** its lock expired and another instance took over | It is ignored and logged as `LATE_RESULT_IGNORED`. |
@@ -267,7 +319,9 @@ When a saga is `STUCK`, a human decides. Expose these from an admin screen:
 |---|---|
 | `engine.retry(id, actor)` | The cause is fixed (service back up, data corrected). Forward, it **executes the step again without checking**: if the saga is stuck because a check could not tell, first confirm by hand that the step was not applied. |
 | `engine.markDone(id, output, actor)` | You confirmed by hand that the step was applied. `output` is the step's output as JSON, checked against the step's type before it is saved; `null` keeps the output already saved (after `RECORD_FAILED`), or means no output. |
-| `engine.abort(id, actor, currentStepApplied, output)` | You give up: completed steps are undone. Refused while a call is in flight or its outcome is unknown. For a stuck step, look in the external system first: with `currentStepApplied = true` the stuck step is undone too, and its compensation receives `output` (JSON, checked like `markDone`'s). |
+| `engine.abort(id, actor, currentStepApplied, output)` | You give up: completed steps are undone. Works on a waiting saga too. Refused while a call is in flight or its outcome is unknown. For a stuck step, look in the external system first: with `currentStepApplied = true` the stuck step is undone too, and its compensation receives `output` (JSON, checked like `markDone`'s). |
+
+For a signal step that got stuck at its timeout, `retry` waits again (and uses a signal received meanwhile), and `markDone` takes the signal's value as JSON. A lost event can also be delivered by hand with `engine.signal`, and `engine.cancel` abandons a saga at any time before it finishes.
 
 Every manual action is logged with its author in `saga_log`.
 
@@ -365,8 +419,8 @@ Two longer checks run against PostgreSQL in Docker. They are left out of `./grad
 ```
 
 **`SagaStressIT`** runs hundreds of sagas while failures are injected at random, and checks every invariant at the end:
-- **Injected failures:** rejections, requests not sent, lost requests and lost responses, calls that outlive their lock, failing or undecided checks, failing compensations, hooks that throw after writing, and pods dying mid-call.
-- **Concurrent actors:** several pods resume sagas while an operator resolves stuck sagas from what the external systems really hold.
+- **Injected failures:** rejections, requests not sent, lost requests and lost responses, calls that outlive their lock, failing or undecided checks, failing compensations, hooks that throw after writing, and pods dying mid-call. Payment sagas wait for the provider's event, which arrives early, late (after the timeout), twice or never, and customers cancel sagas at random moments.
+- **Concurrent actors:** several pods resume sagas, a Kafka listener delivers payment events, and an operator resolves stuck sagas from what the external systems really hold.
 - **Ground truth:** the simulated external systems record what was really applied.
 - **Invariants checked:**
   - every saga ends;
@@ -376,6 +430,8 @@ Two longer checks run against PostgreSQL in Docker. They are left out of `./grad
   - each hook ran exactly once;
   - each step saw the right output from the previous one, and every external effect was made with the saga's input;
   - every stored output equals what the external system returned;
+  - a completed payment saga holds the provider's payment, which succeeded;
+  - a cancelled saga always ends failed, compensated;
   - no input or output value ever appears in `saga_log` or `last_error`.
 
 Concurrency makes runs non-deterministic: a seed reproduces the mix of failures, not the exact interleaving. A run that fails prints its seed and the violations.
@@ -419,6 +475,7 @@ Other systems and users see the intermediate state while a saga runs (stock move
 ### Data and definitions
 
 - **Steps run one after the other.** No parallel branches.
+- **One signal per name and saga.** A saga that needs two payments (a deposit, then the balance) waits for two names. A signal must carry our saga id to be routed: for a system that only returns its own ids, a correlation table would be needed, not built yet.
 - **Saga data is for parameters and identifiers,** at most `maxDataBytes` (16 KB) per value. An input up to about 2 KB is stored inside the saga row, which the engine updates about 4 times per saga: each update copies it, so it takes several times its size until PostgreSQL vacuums the old copies. Moving the input to a table written once is proposed.
 - **Data written by one version of the code must stay readable by the next.** Add fields with defaults; for anything else, declare a new saga type.
 - **Renaming or reordering steps** affects running sagas, which store the index and name of their current step. Let them finish, or migrate them, before changing a definition.

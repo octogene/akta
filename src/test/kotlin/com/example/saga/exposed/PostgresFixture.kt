@@ -43,7 +43,7 @@ class PostgresFixture(private val durable: Boolean) : AutoCloseable {
     fun resetSchema(extraDdl: String = "") {
         val schema = javaClass.getResource("/com/example/saga/schema.sql")!!.readText()
         sql {
-            exec("DROP TABLE IF EXISTS saga_log, saga_step_result, saga, item")
+            exec("DROP TABLE IF EXISTS saga_log, saga_signal, saga_step_result, saga, item")
             exec(schema)
             if (extraDdl.isNotBlank()) exec(extraDdl)
         }

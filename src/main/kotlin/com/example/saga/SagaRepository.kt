@@ -33,9 +33,18 @@ interface SagaRepository {
 
     /**
      * Deletes up to [limit] finished sagas (COMPLETED or FAILED) last updated before [before], oldest first,
-     * with their results and log entries. Returns how many sagas were deleted.
+     * with their results, signals and log entries. Returns how many sagas were deleted.
      */
     fun purgeFinished(before: Instant, limit: Int): Int
+
+    /**
+     * Stores the first signal named [name] received for the saga, [value] encoded. Returns false, storing
+     * nothing, when one of that name was already received: a redelivered event changes nothing.
+     */
+    fun saveSignal(sagaId: Uuid, name: String, value: String, now: Instant): Boolean
+
+    /** The encoded value of the signal named [name] received for the saga, if any. */
+    fun signal(sagaId: Uuid, name: String): String?
 }
 
 /** Opens a short transaction. External calls are never made inside [inTransaction]. */

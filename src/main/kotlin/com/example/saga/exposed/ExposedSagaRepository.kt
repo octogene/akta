@@ -48,6 +48,7 @@ object SagaTable : Table("saga") {
     val lastError = text("last_error").nullable()
     val traceparent = text("traceparent").nullable()
     val input = text("input").nullable()
+    val cancelRequestedAt = timestampWithTimeZone("cancel_requested_at").nullable()
     val createdAt = timestampWithTimeZone("created_at")
     val updatedAt = timestampWithTimeZone("updated_at")
     override val primaryKey = PrimaryKey(id)
@@ -65,6 +66,15 @@ object SagaStepResultTable : Table("saga_step_result") {
 }
 
 /** History: every call, check, compensation and manual action. */
+/** Signals received for signal steps: one per name and saga. */
+object SagaSignalTable : Table("saga_signal") {
+    val sagaId = uuid("saga_id")
+    val signalName = text("signal_name")
+    val value = text("value")
+    val receivedAt = timestampWithTimeZone("received_at")
+    override val primaryKey = PrimaryKey(sagaId, signalName)
+}
+
 object SagaLogTable : Table("saga_log") {
     val id = long("id").autoIncrement()
     val sagaId = uuid("saga_id")
@@ -173,6 +183,7 @@ class ExposedSagaRepository : SagaRepository {
         s[SagaTable.stepStatus] = r.stepStatus.name
         s[SagaTable.attempts] = r.attempts
         s[SagaTable.checkFailures] = r.checkFailures
+        s[SagaTable.cancelRequestedAt] = r.cancelRequestedAt?.utc()
         s[SagaTable.nextAttemptAt] = r.nextAttemptAt.utc()
         s[SagaTable.lockedUntil] = r.lockedUntil?.utc()
         s[SagaTable.lastError] = r.lastError?.take(MAX_TEXT)
@@ -195,6 +206,7 @@ class ExposedSagaRepository : SagaRepository {
         traceparent = this[SagaTable.traceparent],
         createdAt = this[SagaTable.createdAt].toKotlin(),
         input = this[SagaTable.input],
+        cancelRequestedAt = this[SagaTable.cancelRequestedAt]?.toKotlin(),
     )
 
     override fun purgeFinished(before: Instant, limit: Int): Int {
@@ -208,9 +220,24 @@ class ExposedSagaRepository : SagaRepository {
         if (ids.isEmpty()) return 0
         // Children first: saga_log and saga_step_result reference saga.
         SagaLogTable.deleteWhere { SagaLogTable.sagaId inList ids }
+        SagaSignalTable.deleteWhere { SagaSignalTable.sagaId inList ids }
         SagaStepResultTable.deleteWhere { SagaStepResultTable.sagaId inList ids }
         return SagaTable.deleteWhere { SagaTable.id inList ids }
     }
+
+    override fun saveSignal(sagaId: Uuid, name: String, value: String, now: Instant): Boolean =
+        SagaSignalTable.insertIgnore {                 // ON CONFLICT DO NOTHING: the first signal of a name wins
+            it[this.sagaId] = sagaId
+            it[signalName] = name
+            it[this.value] = value
+            it[receivedAt] = now.utc()
+        }.insertedCount > 0
+
+    override fun signal(sagaId: Uuid, name: String): String? =
+        SagaSignalTable.select(SagaSignalTable.value)
+            .where { (SagaSignalTable.sagaId eq sagaId) and (SagaSignalTable.signalName eq name) }
+            .singleOrNull()
+            ?.get(SagaSignalTable.value)
 
     private companion object {
         const val MAX_TEXT = 2000
