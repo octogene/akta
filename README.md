@@ -89,9 +89,10 @@ Copy [`src/main/resources/com/example/saga/schema.sql`](src/main/resources/com/e
 
 There is no JSONB: a step finds its input from the business key and from earlier results.
 
-If you already applied an earlier version of the schema, add the index used by `purgeFinished` in a new migration:
+If you already applied an earlier version of the schema, add what it lacks in a new migration (the column holds the count of failed checks, the index serves `purgeFinished`):
 
 ```sql
+ALTER TABLE saga ADD COLUMN check_failures int NOT NULL DEFAULT 0 CHECK (check_failures >= 0);
 CREATE INDEX saga_finished ON saga (updated_at) WHERE state IN ('COMPLETED', 'FAILED');
 ```
 
@@ -228,7 +229,8 @@ It picks up every saga with something to do: a retry that is due, an unknown out
 | A step is **rejected** | Undoes the completed steps, last to first. The saga ends `FAILED`, then `onFailed` runs. |
 | The request was **not sent** | Retries after 1, 2, 4… minutes (capped at 1 hour). After 10 attempts, `STUCK`. |
 | The outcome is **unknown** | Waits for the settle delay (2 minutes), then calls `check`. `Done` keeps the reference and moves on, `NotDone` executes again (after 10 attempts, `STUCK`), `CannotTell` makes the saga `STUCK`. |
-| The **check fails** | Checks again later, with backoff (at least 1 minute, at most 1 hour). Never `STUCK`: the call may have been applied, so a blind manual retry would be unsafe. |
+| The **check fails** | Checks again later, with backoff (at least 1 minute, at most 1 hour). Failed checks are counted apart from executions. After `maxAttempts` failed checks in a row, `STUCK`, like a check that cannot tell: the call may have been applied, so look in the external system before `retry`. |
+| A step throws a JVM **`Error`** (a `TODO()`, an assertion) | Treated like any failed call. Only fatal JVM errors (out of memory, stack overflow) escape. |
 | The **pod dies** mid-call | The step stays `IN_PROGRESS` until its lock expires (35 s). Forward, it becomes `UNKNOWN` and is checked, never replayed blindly. During compensation it is simply replayed, since compensations are safe to repeat. |
 | A **compensation fails** | Retries with backoff, then `STUCK`. The same applies when the pod keeps dying during a compensation. |
 | The outcome **cannot be recorded** (`onCompleted` / `onFailed` throws, a constraint fails…) | The transaction is rolled back and the saga becomes `STUCK` on the step that ran. The outcome, including its reference, is kept in `last_error` and logged as `RECORD_FAILED`. Fix the cause, then use `markDone(id, ref, actor)` (or `retry` for a compensation). |

@@ -24,8 +24,8 @@ import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.hours
-import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
@@ -261,21 +261,55 @@ class SagaEngineTest {
     }
 
     @Test
-    fun `a failing check backs off but never gets stuck`() {
-        val stock = FakeStep("stock", { throw RuntimeException("timeout") },
-            checkResult = { throw RuntimeException("lookup down") })
-        val engine = engine(stock, config = SagaConfig(maxAttempts = 2))
-        val saga = engine.start()
-        engine.resumeAfter(2.minutes)                         // 1st check fails: retry in 2 min
-        engine.resumeAfter(1.minutes)
-        assertEquals(1, stock.checks)
-        engine.resumeAfter(1.minutes)                         // 2nd check fails: retry in 4 min
-        engine.resumeAfter(3.minutes)
-        assertEquals(2, stock.checks)
-        repeat(10) { engine.resumeAfter(1.hours) }
+    fun `failed checks do not use up the executions of a step`() {
+        var checks = 0
+        val stock = FakeStep(
+            "stock", { throw RuntimeException("timeout") }, { "STK-1" },
+            checkResult = { if (++checks <= 2) throw RuntimeException("lookup down") else CheckResult.NotDone },
+        )
+        val engine = engine(stock, config = SagaConfig(maxAttempts = 3))
+        val saga = engine.start()                                         // execution 1: outcome unknown
+        engine.resumeAfter(2.minutes)                                     // check fails (1): again in 1 min
+        engine.resumeAfter(1.minutes)                                     // check fails (2): again in 2 min
+        engine.resumeAfter(2.minutes)                                     // not applied: execution 2
 
-        assertEquals(StepStatus.UNKNOWN, engine.state(saga).stepStatus)
+        assertEquals(SagaState.COMPLETED, engine.state(saga).state)       // before: STUCK, "Too many attempts"
+        assertEquals(2, stock.executions)
+    }
+
+    @Test
+    fun `a check that keeps failing gets stuck, and a human can resolve it`() {
+        val stock = FakeStep(
+            "stock", { throw RuntimeException("timeout") },
+            checkResult = { throw RuntimeException("lookup down") },
+        )
+        val engine = engine(stock, config = SagaConfig(maxAttempts = 3))
+        val saga = engine.start()
+        engine.resumeAfter(2.minutes)                                     // check fails (1): again in 1 min
+        engine.resumeAfter(1.minutes)                                     // check fails (2): again in 2 min
+        engine.resumeAfter(2.minutes)                                     // check fails (3): STUCK
+
+        val stuck = engine.state(saga)
+        assertEquals(StepStatus.STUCK, stuck.stepStatus)                  // before: UNKNOWN forever, no way out
+        assertTrue(stuck.lastError!!.startsWith("Check keeps failing"))
+        assertEquals(3, stock.checks)
         assertEquals(1, stock.executions)
+
+        val after = runBlocking { engine.markDone(saga.id, "STK-7", actor = "alice") }   // found by hand
+        assertEquals(SagaState.COMPLETED, after.state)
+    }
+
+    @Test
+    fun `a repeated error is logged every time`() {
+        val down = { throw StepNotSent("connection refused") }
+        val engine = engine(FakeStep("stock", down, down, down, { "STK-1" }))
+        engine.start()
+        engine.resumeAfter(1.minutes)
+        engine.resumeAfter(2.minutes)
+
+        val details = repository.log.filter { it.event == "EXECUTE:NotSent" }.map { it.detail }
+        assertEquals(3, details.size)
+        assertTrue(details.all { it!!.contains("connection refused") }, "$details")   // before: [error, null, null]
     }
 
     @Test
@@ -408,7 +442,9 @@ class SagaEngineTest {
         // limit = 1: each batch only takes the oldest due saga, which is the failing one.
         val first = runBlocking { engine.resumeDue(limit = 1) }
         assertEquals(setOf(poison), first.failures.keys)
-        assertEquals(1, repository.log.count { it.sagaId == poison && it.event == SagaEvents.RESUME_FAILED })
+        val resumeFailed = repository.log.single { it.sagaId == poison && it.event == SagaEvents.RESUME_FAILED }
+        assertTrue(resumeFailed.detail!!.contains("corrupted row"))
+        assertNull(repository.find(poison)!!.lastError)                         // the step's own error is kept
 
         val second = runBlocking { engine.resumeDue(limit = 1) }                   // postponed: the other one runs
         assertEquals(emptyMap(), second.failures)
@@ -538,11 +574,56 @@ class SagaEngineTest {
             override val name = "stock"
             override suspend fun execute(ctx: SagaContext): String? { delay(10.seconds); return "STK-1" }
         }
-        val engine = engine(stock, config = SagaConfig(callLock = 100.milliseconds))
-        val saga = engine.start()                                         // returns after ~100 ms, not 10 s
+        val engine = engine(stock, config = SagaConfig(callLock = 2.seconds))
+        val started = System.nanoTime()
+        val saga = engine.start()
+        val elapsed = (System.nanoTime() - started).nanoseconds
 
         assertEquals(StepStatus.UNKNOWN, saga.stepStatus)
         assertTrue(saga.lastError!!.contains("TimeoutCancellationException"))
+        // Cut before the lock expires (callLock minus a margin to record it), not at the expiry itself.
+        assertTrue(elapsed < 2.seconds, "the call ran $elapsed, as long as its lock")
+    }
+
+    @Test
+    fun `an Error thrown by a step stays with its saga and does not stop the batch`() {
+        val stock = object : SagaStep {
+            override val name = "stock"
+            override suspend fun execute(ctx: SagaContext): String =
+                if (ctx.key == "stub") TODO("stock client not written yet") else { delay(50); "STK-1" }
+        }
+        val engine = engine(stock)
+        val stub = engine.create("TEST", "stub")
+        val healthy = engine.create("TEST", "healthy")
+
+        val result = runBlocking { engine.resumeDue(concurrency = 2) }    // before: NotImplementedError escaped
+
+        assertEquals(emptyMap(), result.failures)
+        assertEquals(SagaState.COMPLETED, repository.find(healthy)!!.state)
+        val unknown = repository.find(stub)!!
+        assertEquals(StepStatus.UNKNOWN, unknown.stepStatus)              // checked later, like any failed call
+        assertTrue(unknown.lastError!!.contains("NotImplementedError"))
+    }
+
+    @Test
+    fun `a failure to claim the next step does not lose the outcome just recorded`() {
+        var resultsCalls = 0
+        val failingOnce = object : SagaRepository by repository {
+            // Call 1: claim of step 1. Call 2: claim of step 2, in the transaction recording step 1.
+            override fun results(sagaId: Uuid): Map<String, String?> =
+                if (++resultsCalls == 2) throw IllegalStateException("statement timeout") else repository.results(sagaId)
+        }
+        val definition = SagaDefinition("TEST", listOf(FakeStep("stock", { "STK-1" }), FakeStep("booking", { "RES-1" })))
+        val engine = SagaEngine(InMemorySagaTransactions(repository), failingOnce, listOf(definition), clock = clock)
+        val id = engine.create("TEST", "item-1")
+
+        val saga = runBlocking { engine.run(id, clock.now + 10.seconds) }
+
+        assertEquals(StepStatus.READY, saga.stepStatus)                   // before: STUCK on step 1, RECORD_FAILED
+        assertEquals(1, saga.stepIndex)
+        assertEquals(mapOf("stock" to "STK-1"), repository.results(id))
+        assertTrue(repository.log.none { it.event == SagaEvents.RECORD_FAILED })
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.run(id, clock.now + 10.seconds) }.state)
     }
 
     @Test

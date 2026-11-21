@@ -43,7 +43,7 @@ data class SagaRecord(
     /** Index of the current step in the definition. */
     val stepIndex: Int,
     val stepStatus: StepStatus,
-    /** Attempts on the current step. */
+    /** Calls of the current step: executions, or compensations. Limited by [SagaConfig.maxAttempts]. */
     val attempts: Int,
     /** When the engine should look at this saga again. While a call is in flight, equals [lockedUntil]. */
     val nextAttemptAt: Instant,
@@ -52,6 +52,12 @@ data class SagaRecord(
     /** W3C traceparent of the request that started the saga. */
     val traceparent: String?,
     val createdAt: Instant,
+    /**
+     * Consecutive failed checks of the current step (the lookup itself threw). Counted apart from
+     * [attempts], so that a lookup outage does not use up the step's executions. Limited by
+     * [SagaConfig.maxAttempts]: past it the step is STUCK, like a check that cannot tell.
+     */
+    val checkFailures: Int = 0,
 )
 
 /** One line of the saga history. */
@@ -103,7 +109,7 @@ data class SagaConfig(
     val settleDelay: Duration = 2.minutes,
     /** Wait before a new check when the check itself failed. */
     val checkRetryDelay: Duration = 1.minutes,
-    /** Attempts on one step before it becomes STUCK. */
+    /** Calls of one step (executions or compensations), and consecutive failed checks, before it becomes STUCK. */
     val maxAttempts: Int = 10,
     val maxBackoff: Duration = 1.hours,
     /** Wait before resumeDue tries again a saga whose run threw, so that it does not block the others. */

@@ -140,14 +140,17 @@ class SagaStressIT {
 
     private suspend fun pause() = delay(dice.millis(5))
 
-    private enum class Call { OK, REJECTED, NOT_SENT, LOST_REQUEST, LOST_RESPONSE, OUTLIVES_LOCK, CRASH }
+    private enum class Call { OK, REJECTED, NOT_SENT, LOST_REQUEST, LOST_RESPONSE, OUTLIVES_LOCK, CRASH, JVM_ERROR }
     private enum class Undo { OK, FAILS_BEFORE, FAILS_AFTER, CRASH }
     private enum class Lookup { TRUTH, FAILS, CANNOT_TELL, CRASH }
 
     private val callWeights = mapOf(
         Call.OK to 70, Call.REJECTED to 3, Call.NOT_SENT to 8, Call.LOST_REQUEST to 5,
-        Call.LOST_RESPONSE to 6, Call.OUTLIVES_LOCK to 3, Call.CRASH to 5,
+        Call.LOST_RESPONSE to 6, Call.OUTLIVES_LOCK to 3, Call.CRASH to 5, Call.JVM_ERROR to 2,
     )
+
+    /** About 1 item in 25 per system has a lookup that always throws: its check can never answer. */
+    private fun lookupBroken(system: ExternalSystem, key: String) = Math.floorMod("${system.name}/$key".hashCode(), 25) == 0
     private val undoWeights = mapOf(Undo.OK to 80, Undo.FAILS_BEFORE to 8, Undo.FAILS_AFTER to 7, Undo.CRASH to 5)
     private val lookupWeights = mapOf(Lookup.TRUTH to 80, Lookup.FAILS to 10, Lookup.CANNOT_TELL to 7, Lookup.CRASH to 3)
     private val hookFailure = 0.1
@@ -171,6 +174,8 @@ class SagaStressIT {
                 Call.LOST_RESPONSE -> { system.apply(ctx.key); pause(); throw IOException("read timeout (applied)") }
                 Call.OUTLIVES_LOCK -> system.apply(ctx.key).also { delay(config.callLock + 200.milliseconds) }
                 Call.CRASH -> { if (dice.chance(0.5)) system.apply(ctx.key); crash() }
+                // A JVM Error, not an Exception (a TODO() or an assertion in a client), applied or not.
+                Call.JVM_ERROR -> { if (dice.chance(0.5)) system.apply(ctx.key); throw NotImplementedError("client bug") }
             }
         }
 
@@ -186,6 +191,7 @@ class SagaStressIT {
 
         override suspend fun check(ctx: SagaContext): CheckResult {
             pause()
+            if (lookupBroken(system, ctx.key)) throw IOException("lookup broken for ${ctx.key}")
             return when (dice.pick(lookupWeights)) {
                 Lookup.TRUTH -> system.lookup(ctx.key)?.let { CheckResult.Done(it) } ?: CheckResult.NotDone
                 Lookup.FAILS -> throw IOException("lookup unavailable")
@@ -476,6 +482,10 @@ class SagaStressIT {
                 appendLine("Sagas:\n${stateHistogram()}")
                 appendLine("Pod crashes: ${crashes.get()}")
                 appendLine("Injected database failures: ${dbFailures.mapValues { it.value.get() }}")
+                appendLine("Sagas stuck by a check that kept failing: " +
+                    pg.long("SELECT count(DISTINCT saga_id) FROM saga_log WHERE detail LIKE 'Check keeps failing%'"))
+                appendLine("Calls that threw a JVM Error: " +
+                    pg.long("SELECT count(*) FROM saga_log WHERE detail LIKE '%NotImplementedError%'"))
                 appendLine("Manual actions: ${manualActions.mapValues { it.value.get() }}")
                 appendLine("Events:")
                 events.forEach { appendLine(it) }

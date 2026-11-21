@@ -9,6 +9,7 @@ CREATE TABLE saga (
     step_index      int         NOT NULL CHECK (step_index >= 0),
     step_status     text        NOT NULL CHECK (step_status IN ('READY', 'IN_PROGRESS', 'UNKNOWN', 'STUCK')),
     attempts        int         NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    check_failures  int         NOT NULL DEFAULT 0 CHECK (check_failures >= 0),
     next_attempt_at timestamptz NOT NULL,
     locked_until    timestamptz,
     last_error      text,

@@ -41,6 +41,7 @@ object SagaTable : Table("saga") {
     val stepIndex = integer("step_index")
     val stepStatus = text("step_status")
     val attempts = integer("attempts")
+    val checkFailures = integer("check_failures")
     val nextAttemptAt = timestampWithTimeZone("next_attempt_at")
     val lockedUntil = timestampWithTimeZone("locked_until").nullable()
     val lastError = text("last_error").nullable()
@@ -173,6 +174,7 @@ class ExposedSagaRepository : SagaRepository {
         s[SagaTable.stepIndex] = r.stepIndex
         s[SagaTable.stepStatus] = r.stepStatus.name
         s[SagaTable.attempts] = r.attempts
+        s[SagaTable.checkFailures] = r.checkFailures
         s[SagaTable.nextAttemptAt] = r.nextAttemptAt.utc()
         s[SagaTable.lockedUntil] = r.lockedUntil?.utc()
         s[SagaTable.lastError] = r.lastError?.take(MAX_TEXT)
@@ -188,6 +190,7 @@ class ExposedSagaRepository : SagaRepository {
         stepIndex = this[SagaTable.stepIndex],
         stepStatus = StepStatus.valueOf(this[SagaTable.stepStatus]),
         attempts = this[SagaTable.attempts],
+        checkFailures = this[SagaTable.checkFailures],
         nextAttemptAt = this[SagaTable.nextAttemptAt].toKotlin(),
         lockedUntil = this[SagaTable.lockedUntil]?.toKotlin(),
         lastError = this[SagaTable.lastError],
