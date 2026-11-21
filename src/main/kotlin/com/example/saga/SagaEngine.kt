@@ -9,6 +9,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.reflect.KType
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.days
@@ -26,7 +27,9 @@ import kotlin.uuid.Uuid
 class SagaEngine(
     private val transactions: SagaTransactions,
     private val repository: SagaRepository,
-    definitions: List<SagaDefinition>,
+    definitions: List<SagaDefinition<*>>,
+    /** The format of every saga input and step output, e.g. [KotlinxJsonSagaSerializer]. */
+    private val serializer: SagaSerializer,
     private val config: SagaConfig = SagaConfig(),
     private val clock: Clock = Clock.System,
     /**
@@ -35,33 +38,60 @@ class SagaEngine(
      */
     private val traceId: () -> String? = { null },
 ) {
-    private val definitions: Map<String, SagaDefinition> = definitions.associateBy { it.type }
+    @Suppress("UNCHECKED_CAST")
+    private val definitions: Map<String, AnyDefinition> = definitions.associateBy { it.type } as Map<String, AnyDefinition>
 
     init {
         require(this.definitions.size == definitions.size) { "Duplicate saga types" }
+        // Every declared type must be serializable: a missing serializer stops the engine here, at startup,
+        // never as a saga stuck in production.
+        for (def in definitions) {
+            def.inputType?.let { type ->
+                require(serializer.supports(type)) { "Saga ${def.type}: cannot serialize its input $type (missing @Serializable?)" }
+            }
+            for (step in def.steps) step.outputType?.let { type ->
+                require(serializer.supports(type)) {
+                    "Saga ${def.type}, step ${step.name}: cannot serialize its output $type (missing @Serializable?)"
+                }
+            }
+        }
     }
 
     // ---- Start and run ----------------------------------------------------------------------
 
     /**
-     * Creates a saga. Call it INSIDE the transaction that makes the business change
-     * (e.g. inserting the item), then call [run] once that transaction is committed.
+     * Creates a saga of [definition] with its [input]. Call it INSIDE the transaction that makes the
+     * business change (e.g. inserting the item), then call [run] once that transaction is committed.
      *
      * @throws DuplicateSagaException if an unfinished saga already exists for [key].
+     * @throws IllegalArgumentException if [definition] is not registered, or the encoded input is over
+     *   [SagaConfig.maxDataBytes]. Nothing is written in either case.
      */
     @OptIn(ExperimentalUuidApi::class)
-    fun create(type: String, key: String, traceparent: String? = null): Uuid {
-        definition(type)
+    fun <I> create(definition: SagaDefinition<I>, key: String, input: I, traceparent: String? = null): Uuid {
+        require(definitions[definition.type] === definition) { "Saga type ${definition.type} is not registered with this engine" }
+        val encoded = definition.inputType?.let { type ->
+            serializer.encode(input, type).also { text ->
+                val size = text.utf8Size()
+                require(size <= config.maxDataBytes) {
+                    "The input of saga ${definition.type} is $size bytes, over maxDataBytes (${config.maxDataBytes})"
+                }
+            }
+        }
         val now = currentTime()
         val record = SagaRecord(
-            id = Uuid.generateV7(), type = type, key = key, state = SagaState.RUNNING,
+            id = Uuid.generateV7(), type = definition.type, key = key, state = SagaState.RUNNING,
             stepIndex = 0, stepStatus = StepStatus.READY, attempts = 0, nextAttemptAt = now,
-            lockedUntil = null, lastError = null, traceparent = traceparent, createdAt = now,
+            lockedUntil = null, lastError = null, traceparent = traceparent, createdAt = now, input = encoded,
         )
         repository.insert(record, now)
         log(record.id, record.stepIndex, null, SagaEvents.CREATED, null, now, trace = traceId())
         return record.id
     }
+
+    /** Creates a saga of [definition], which has no input. See the other [create]. */
+    fun create(definition: SagaDefinition<Unit>, key: String, traceparent: String? = null): Uuid =
+        create(definition, key, Unit, traceparent)
 
     /**
      * Moves the saga forward until it ends, blocks (waiting for a retry, an unknown outcome,
@@ -201,16 +231,23 @@ class SagaEngine(
      */
     suspend fun retry(id: Uuid, actor: String): SagaRecord = manual(id, actor, SagaEvents.MANUAL_RETRY) { r, now ->
         require(r.stepStatus == StepStatus.STUCK) { "Saga $id is not stuck" }
-        r.copy(stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now, lastError = null)
+        ManualChange(r.copy(stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now, lastError = null))
     }
 
-    /** The stuck step was found done by hand (with its reference, if any): move on to the next one. */
-    suspend fun markDone(id: Uuid, ref: String?, actor: String): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_DONE, detail = ref?.let { "ref=$it" }) { r, now ->
+    /**
+     * The stuck step was found done by hand: move on to the next one. [output] is the step's output as
+     * the engine's serializer writes it (JSON for [KotlinxJsonSagaSerializer]), checked against the
+     * step's output type before it is saved. Null keeps the output already saved for the step (after a
+     * `RECORD_FAILED`), or means no output.
+     */
+    suspend fun markDone(id: Uuid, output: String?, actor: String): SagaRecord =
+        manual(id, actor, SagaEvents.MANUAL_DONE) { r, now ->
             require(r.state == SagaState.RUNNING && r.stepStatus == StepStatus.STUCK) { "Saga $id has no stuck forward step" }
             val def = definition(r.type)
-            repository.saveResult(r.id, r.stepIndex, def.steps[r.stepIndex].name, ref, now)
-            next(r, def, now)
+            val step = def.stepAt(r.stepIndex)
+            val (encoded, decoded) = manualOutput(r, step, output)
+            repository.saveResult(r.id, r.stepIndex, step.name, encoded, now)
+            ManualChange(next(r, def, now), detail = describe(step, decoded)?.let { "ref=$it" })
         }
 
     /**
@@ -218,10 +255,10 @@ class SagaEngine(
      *
      * A stuck step may have been applied (its check could not tell): say so with [currentStepApplied],
      * after looking in the external system. When true, the current step is compensated too, and
-     * receives [ref] as its own result. A step that is READY was never applied.
+     * receives [output] as its own output (checked as in [markDone]). A step that is READY was never applied.
      */
-    suspend fun abort(id: Uuid, actor: String, currentStepApplied: Boolean, ref: String? = null): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_ABORT, detail = "currentStepApplied=$currentStepApplied") { r, now ->
+    suspend fun abort(id: Uuid, actor: String, currentStepApplied: Boolean, output: String? = null): SagaRecord =
+        manual(id, actor, SagaEvents.MANUAL_ABORT) { r, now ->
             require(r.state == SagaState.RUNNING) { "Saga $id is not running forward" }
             require(r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.STUCK) {
                 "A call of saga $id may have been applied: wait for its outcome"
@@ -229,32 +266,61 @@ class SagaEngine(
             require(!currentStepApplied || r.stepStatus == StepStatus.STUCK) {
                 "The current step of saga $id is READY: it was not applied"
             }
-            if (currentStepApplied) {
-                repository.saveResult(r.id, r.stepIndex, definition(r.type).steps[r.stepIndex].name, ref, now)
+            val updated = if (currentStepApplied) {
+                val step = definition(r.type).stepAt(r.stepIndex)
+                repository.saveResult(r.id, r.stepIndex, step.name, manualOutput(r, step, output).first, now)
                 compensateFrom(r, r.stepIndex, now)
             } else {
                 compensateFrom(r, r.stepIndex - 1, now)
             }
+            ManualChange(updated, detail = "currentStepApplied=$currentStepApplied")
         }
+
+    private class ManualChange(val record: SagaRecord, val detail: String? = null)
 
     private suspend fun manual(
         id: Uuid,
         actor: String,
         event: String,
-        detail: String? = null,
-        change: (SagaRecord, Instant) -> SagaRecord,
+        change: (SagaRecord, Instant) -> ManualChange,
     ): SagaRecord {
         val trace = traceId()
         transactions.inTransaction {
             val r = repository.lock(id) ?: throw NoSuchElementException("Saga $id not found")
             val now = currentTime()
-            val updated = change(r, now)
+            val (updated, detail) = change(r, now).let { it.record to it.detail }
             repository.save(updated, now)
             // r: logged on the step the action was taken on
             log(r.id, r.stepIndex, null, event, detail, now, trace, actor)
             finishIfNeeded(r, updated)
         }
         return run(id, deadline = currentTime() + 10.seconds)
+    }
+
+    /**
+     * The output an operator gives for [step], encoded and decoded, after checking it against the step's
+     * output type. Null keeps the output already saved for the step, if any.
+     */
+    private fun manualOutput(r: SagaRecord, step: AnyStep, output: String?): Pair<String?, Any?> {
+        val type = step.outputType
+        if (type == null) {
+            require(output == null) { "Step '${step.name}' has no output" }
+            return null to Unit
+        }
+        if (output == null) {
+            val stored = repository.results(r.id)
+            if (step.name in stored) return stored[step.name] to stored[step.name]?.let { decode(it, type) { "the output of step '${step.name}'" } }
+            require(type.isMarkedNullable) { "Step '${step.name}' needs an output of type $type" }
+            return null to null
+        }
+        val size = output.utf8Size()
+        require(size <= config.maxDataBytes) { "The output is $size bytes, over maxDataBytes (${config.maxDataBytes})" }
+        val decoded = try {
+            serializer.decode(output, type)
+        } catch (e: Exception) {
+            throw IllegalArgumentException("Not a valid output of step '${step.name}' ($type): $e", e)
+        }
+        return output to decoded
     }
 
     // ---- One step cycle ---------------------------------------------------------------------
@@ -268,15 +334,18 @@ class SagaEngine(
 
     private class Work(
         val saga: SagaRecord,
-        val step: SagaStep,
+        val step: AnyStep,
         val action: Action,
-        val ctx: SagaContext,
+        val ctx: SagaContext<Any?>,
         val trace: String?,
     )
 
     /** [event]: the second half of the logged event (see [SagaEvents]). Stored: never change it. */
     private sealed class Outcome(val event: String, val detail: String? = null) {
-        class Done(val ref: String?) : Outcome("Done", ref?.let { "ref=$it" })
+        /** [output] is encoded; [logged] is what the step's describe() returned: never the value itself. */
+        class Done(val output: String?, logged: String?) : Outcome("Done", logged?.let { "ref=$it" })
+        /** The call was made, but its output could not be encoded or is too large: the step must not run again. */
+        class OutputUnstorable(val reason: String) : Outcome("OutputUnstorable", reason)
         class Rejected(val error: String) : Outcome("Rejected", error)
         class NotSent(val error: String) : Outcome("NotSent", error)
         class Unknown(val error: String) : Outcome("Unknown", error)
@@ -322,6 +391,9 @@ class SagaEngine(
         if (r.stepStatus == StepStatus.STUCK || r.nextAttemptAt > now) return Cycle(r, next = null)
 
         val def = definition(r.type)
+        // Decoded before anything is called: data that cannot be read throws here, and the transaction
+        // rolls back. resumeDue then postpones the saga (another version of the code may read it).
+        val ctx = context(r, def)
         val action = when {
             r.stepStatus == StepStatus.UNKNOWN -> Action.CHECK
             r.state == SagaState.RUNNING -> Action.EXECUTE
@@ -335,8 +407,7 @@ class SagaEngine(
             nextAttemptAt = lockedUntil,      // the recovery job looks again when the lock expires
         )
         repository.save(claimed, now)
-        val ctx = SagaContext(r.id, r.key, repository.results(r.id))
-        return Cycle(claimed, Work(claimed, def.steps[r.stepIndex], action, ctx, trace))
+        return Cycle(claimed, Work(claimed, def.stepAt(r.stepIndex), action, ctx, trace))
     }
 
     /**
@@ -365,17 +436,35 @@ class SagaEngine(
 
     private suspend fun call(work: Work): Outcome =
         when (work.action) {
-            Action.EXECUTE -> Outcome.Done(work.step.execute(work.ctx))
+            Action.EXECUTE -> done(work, work.step.execute(work.ctx))
             Action.CHECK -> when (val c = work.step.check(work.ctx)) {
-                is CheckResult.Done -> Outcome.Done(c.ref)
+                is CheckResult.Done -> done(work, c.output)
                 CheckResult.NotDone -> Outcome.NotDone
                 CheckResult.CannotTell -> Outcome.CannotTell
             }
             Action.COMPENSATE -> {
-                work.step.compensate(work.ctx)
+                work.step.compensate(work.ctx, work.ctx.output(work.step.name))
                 Outcome.Compensated
             }
         }
+
+    /**
+     * The call returned [output]: encode it now, outside any transaction. The call was made, so if the
+     * output cannot be stored the step must not run again: it becomes STUCK for a human.
+     */
+    private fun done(work: Work, output: Any?): Outcome {
+        val type = work.step.outputType ?: return Outcome.Done(output = null, logged = null)
+        val encoded = try {
+            serializer.encode(output, type)
+        } catch (e: Exception) {
+            return Outcome.OutputUnstorable("cannot encode it: $e")
+        }
+        val size = encoded.utf8Size()
+        if (size > config.maxDataBytes) {
+            return Outcome.OutputUnstorable("it is $size bytes, over maxDataBytes (${config.maxDataBytes})")
+        }
+        return Outcome.Done(encoded, describe(work.step, output))
+    }
 
     private fun failure(action: Action, e: Throwable): Outcome {
         val error = e.toString()
@@ -408,9 +497,14 @@ class SagaEngine(
 
         val updated = when (outcome) {
             is Outcome.Done -> {
-                repository.saveResult(r.id, r.stepIndex, work.step.name, outcome.ref, now)
+                repository.saveResult(r.id, r.stepIndex, work.step.name, outcome.output, now)
                 next(r, def, now)
             }
+            is Outcome.OutputUnstorable -> r.copy(
+                stepStatus = StepStatus.STUCK,
+                lastError = "The call was made, but its output could not be stored (${outcome.reason}): " +
+                    "record it with markDone, or undo the step with abort",
+            )
             is Outcome.Rejected -> compensateFrom(r.copy(lastError = outcome.error), r.stepIndex - 1, now)
             is Outcome.NotSent -> retryLater(r, outcome.error, now)
             is Outcome.Unknown -> r.copy(
@@ -471,8 +565,9 @@ class SagaEngine(
 
     /**
      * Fallback transaction, after [record] was rolled back: the saga becomes STUCK on the step that
-     * ran, and the outcome (with its reference) is kept in lastError and the log, for a human to apply
-     * with [markDone], [retry] or [abort] once the cause is fixed.
+     * ran, for a human to resolve with [markDone], [retry] or [abort] once the cause is fixed. The
+     * outcome is described in lastError and the log. A successful call's output is saved with the
+     * step's result, never in lastError (it may hold personal data): `markDone(id, null)` continues with it.
      */
     private fun recordFailed(work: Work, outcome: Outcome, error: Throwable): SagaRecord? {
         val current = repository.lock(work.saga.id) ?: return null
@@ -481,10 +576,12 @@ class SagaEngine(
             log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, outcome), now)
             return current
         }
+        if (outcome is Outcome.Done) repository.saveResult(current.id, current.stepIndex, work.step.name, outcome.output, now)
+        val kept = if (outcome is Outcome.Done) ". The output is saved: markDone(id, null) continues with it" else ""
         val stuck = current.copy(
             stepStatus = StepStatus.STUCK,
             lockedUntil = null,
-            lastError = "Could not record ${describe(work, outcome)}: $error",
+            lastError = "Could not record ${describe(work, outcome)}: $error$kept",
         )
         repository.save(stuck, now)
         log(work, SagaEvents.RECORD_FAILED, stuck.lastError, now)
@@ -500,7 +597,7 @@ class SagaEngine(
     // ---- Transitions ------------------------------------------------------------------------
 
     /** Step done: move on to the next one, or complete the saga. */
-    private fun next(r: SagaRecord, def: SagaDefinition, now: Instant): SagaRecord {
+    private fun next(r: SagaRecord, def: AnyDefinition, now: Instant): SagaRecord {
         val index = r.stepIndex + 1
         return if (index == def.steps.size) {
             r.copy(state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null)
@@ -553,9 +650,50 @@ class SagaEngine(
     private fun finishIfNeeded(before: SagaRecord, after: SagaRecord) {
         if (before.state == after.state || !after.state.isFinished) return
         val def = definition(after.type)
-        val ctx = SagaContext(after.id, after.key, repository.results(after.id))
+        val ctx = context(after, def)
         if (after.state == SagaState.COMPLETED) def.onCompleted(ctx) else def.onFailed(ctx)
     }
+
+    // ---- Saga data --------------------------------------------------------------------------
+
+    /** The saga's input and the outputs of its completed steps, decoded. Throws [SagaDataException]. */
+    private fun context(r: SagaRecord, def: AnyDefinition): SagaContext<Any?> {
+        val inputType = def.inputType
+        val input = if (inputType == null) {
+            Unit
+        } else {
+            val text = r.input ?: throw SagaDataException("Saga ${r.id} has no stored input")
+            decode(text, inputType) { "the input of saga ${r.id}" }
+        }
+        val stored = repository.results(r.id)
+        val outputs = def.steps.filter { it.name in stored }.associate { step ->
+            val type = step.outputType
+            val text = stored[step.name]
+            step.name to when {
+                type == null -> Unit
+                text == null -> null
+                else -> decode(text, type) { "the output of step '${step.name}' of saga ${r.id}" }
+            }
+        }
+        return SagaContext(r.id, r.key, input, outputs)
+    }
+
+    private fun decode(text: String, type: KType, what: () -> String): Any? =
+        try {
+            serializer.decode(text, type)
+        } catch (e: Exception) {
+            throw SagaDataException("Cannot read ${what()} as $type: $e", e)
+        }
+
+    /** What saga_log may record about [output]: the step's describe(), never the value. */
+    private fun describe(step: AnyStep, output: Any?): String? =
+        try {
+            step.describe(output)
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun String.utf8Size() = encodeToByteArray().size
 
     private fun log(
         sagaId: Uuid,
@@ -582,6 +720,19 @@ class SagaEngine(
     /** Errors the JVM cannot recover from (out of memory, stack overflow): never caught. */
     private fun Throwable.isFatal() = this is VirtualMachineError
 
-    private fun definition(type: String): SagaDefinition =
+    private fun definition(type: String): AnyDefinition =
         definitions[type] ?: throw IllegalArgumentException("Unknown saga type: $type")
 }
+
+private typealias AnyDefinition = SagaDefinition<Any?>
+private typealias AnyStep = SagaStep<Any?, Any?>
+
+/** The engine handles every step through its erased type: each one only ever sees its own values. */
+@Suppress("UNCHECKED_CAST")
+private fun AnyDefinition.stepAt(index: Int): AnyStep = steps[index] as AnyStep
+
+/**
+ * A saga's input or a step's output cannot be read: it was written by another version of the code, or
+ * the serializer's configuration changed. Thrown before any call is made, so nothing is left half done.
+ */
+class SagaDataException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)

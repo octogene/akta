@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.serialization)
     `java-library`
     `maven-publish`
 }
@@ -21,6 +22,8 @@ java {
 
 dependencies {
     api(libs.kotlinx.coroutines.core)
+    // The format of saga inputs and step outputs (SagaSerializer).
+    api(libs.kotlinx.serialization.json)
     // Exposed is only used by the com.example.saga.exposed package.
     api(libs.exposed.core)
     api(libs.exposed.jdbc)

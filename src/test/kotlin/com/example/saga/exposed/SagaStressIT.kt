@@ -10,6 +10,7 @@ import com.example.saga.SagaState
 import com.example.saga.SagaStep
 import com.example.saga.StepNotSent
 import com.example.saga.StepRejected
+import com.example.saga.KotlinxJsonSagaSerializer
 import com.example.saga.SagaTransactions
 import com.example.saga.StepStatus
 import kotlinx.coroutines.Dispatchers
@@ -28,6 +29,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.TransactionManager
@@ -44,6 +47,7 @@ import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
+import kotlin.reflect.typeOf
 import kotlin.test.fail
 import kotlin.time.Clock
 import kotlin.time.Duration
@@ -115,16 +119,25 @@ class SagaStressIT {
     }
 
     /** An external system without idempotency keys. It knows what is really applied, for each item. */
+    /** A saga's input: the request, with a customer marked as personal data (it must never be logged). */
+    @Serializable
+    data class ItemRequest(val customer: String, val nonce: Long)
+
+    /** What an external system returns for a call: a step's output. */
+    @Serializable
+    data class Effect(val ref: String, val customer: String)
+
+    /** An external system without idempotency keys. It knows what is really applied, for each item. */
     private inner class ExternalSystem(val name: String) {
-        private val applied = HashMap<String, String>()
+        private val applied = HashMap<String, Effect>()
         private var counter = 0
 
-        @Synchronized fun apply(key: String): String {
-            applied[key]?.let { violations += "$name: applied a second time for $key (already $it): duplicate" }
-            return "$name-${++counter}".also { applied[key] = it }
+        @Synchronized fun apply(key: String, request: ItemRequest): Effect {
+            applied[key]?.let { violations += "$name: applied a second time for $key (already ${it.ref}): duplicate" }
+            return Effect("$name-${++counter}", request.customer).also { applied[key] = it }
         }
         @Synchronized fun remove(key: String) { applied.remove(key) }
-        @Synchronized fun lookup(key: String): String? = applied[key]
+        @Synchronized fun lookup(key: String): Effect? = applied[key]
     }
 
     /** The coroutine of a pod (or of a request): a crash cancels all of it, as when a process dies. */
@@ -155,31 +168,33 @@ class SagaStressIT {
     private val lookupWeights = mapOf(Lookup.TRUTH to 80, Lookup.FAILS to 10, Lookup.CANNOT_TELL to 7, Lookup.CRASH to 3)
     private val hookFailure = 0.1
 
-    /** A step calling [system]. It also checks that it sees the reference of the previous step. */
-    private inner class ChaosStep(val system: ExternalSystem, private val previous: ChaosStep?) : SagaStep {
+    /** A step calling [system]. It also checks that it sees the output of the previous step. */
+    private inner class ChaosStep(val system: ExternalSystem, private val previous: ChaosStep?) : SagaStep<ItemRequest, Effect> {
         override val name = system.name
+        override val outputType = typeOf<Effect>()
+        override fun describe(output: Effect) = output.ref        // never the customer
 
-        override suspend fun execute(ctx: SagaContext): String? {
+        override suspend fun execute(ctx: SagaContext<ItemRequest>): Effect {
             previous?.let {
-                val seen = ctx.result(it.name)
+                val seen = ctx.result(it.ref)
                 val truth = it.system.lookup(ctx.key)
                 if (seen != truth) violations += "$name for ${ctx.key}: saw ${it.name}=$seen, but the system has $truth"
             }
             pause()
             return when (dice.pick(callWeights)) {
-                Call.OK -> system.apply(ctx.key).also { pause() }
+                Call.OK -> system.apply(ctx.key, ctx.input).also { pause() }
                 Call.REJECTED -> throw StepRejected("refused")
                 Call.NOT_SENT -> throw StepNotSent("connection refused")
                 Call.LOST_REQUEST -> throw IOException("read timeout (request lost, not applied)")
-                Call.LOST_RESPONSE -> { system.apply(ctx.key); pause(); throw IOException("read timeout (applied)") }
-                Call.OUTLIVES_LOCK -> system.apply(ctx.key).also { delay(config.callLock + 200.milliseconds) }
-                Call.CRASH -> { if (dice.chance(0.5)) system.apply(ctx.key); crash() }
+                Call.LOST_RESPONSE -> { system.apply(ctx.key, ctx.input); pause(); throw IOException("read timeout (applied)") }
+                Call.OUTLIVES_LOCK -> system.apply(ctx.key, ctx.input).also { delay(config.callLock + 200.milliseconds) }
+                Call.CRASH -> { if (dice.chance(0.5)) system.apply(ctx.key, ctx.input); crash() }
                 // A JVM Error, not an Exception (a TODO() or an assertion in a client), applied or not.
-                Call.JVM_ERROR -> { if (dice.chance(0.5)) system.apply(ctx.key); throw NotImplementedError("client bug") }
+                Call.JVM_ERROR -> { if (dice.chance(0.5)) system.apply(ctx.key, ctx.input); throw NotImplementedError("client bug") }
             }
         }
 
-        override suspend fun compensate(ctx: SagaContext) {
+        override suspend fun compensate(ctx: SagaContext<ItemRequest>, own: Effect?) {
             pause()
             when (dice.pick(undoWeights)) {
                 Undo.OK -> system.remove(ctx.key)
@@ -189,7 +204,7 @@ class SagaStressIT {
             }
         }
 
-        override suspend fun check(ctx: SagaContext): CheckResult {
+        override suspend fun check(ctx: SagaContext<ItemRequest>): CheckResult<Effect> {
             pause()
             if (lookupBroken(system, ctx.key)) throw IOException("lookup broken for ${ctx.key}")
             return when (dice.pick(lookupWeights)) {
@@ -218,14 +233,16 @@ class SagaStressIT {
         if (dice.chance(hookFailure)) error("hook failed for $key")
     }
 
-    private val definitions = stepsByType.map { (type, steps) ->
-        SagaDefinition(type, steps, onCompleted = { hook(it.key, "DONE") }, onFailed = { hook(it.key, "FAILED") })
+    private val definitions = stepsByType.mapValues { (type, steps) ->
+        SagaDefinition(type, typeOf<ItemRequest>(), steps, onCompleted = { hook(key, "DONE") }, onFailed = { hook(key, "FAILED") })
     }
+
+    private val serializer = KotlinxJsonSagaSerializer()
 
     /** An engine as deployed in one pod: [types] are the saga types its version knows. */
     private fun newEngine(types: Set<String> = stepsByType.keys) = SagaEngine(
         FlakyTransactions(ExposedSagaTransactions(pg.database)), ExposedSagaRepository(),
-        definitions.filter { it.type in types }, config,
+        definitions.filterKeys { it in types }.values.toList(), serializer, config,
     )
 
     /** A database failure injected by [FlakyTransactions]. */
@@ -307,7 +324,7 @@ class SagaStressIT {
                     val key = "$type-$i"
                     val id = transactions.inTransaction {
                         TransactionManager.current().exec("INSERT INTO item (key, status) VALUES ('$key', 'PENDING')")
-                        engine.create(type, key)
+                        engine.create(definitions.getValue(type), key, ItemRequest("PII-customer-$i", dice.millis(1_000_000)))
                     }
                     val request = launch {
                         withContext(Pod(coroutineContext.job)) {
@@ -367,8 +384,8 @@ class SagaStressIT {
                 try {
                     when (action) {
                         "retry" -> engine.retry(id, "operator")
-                        "markDone" -> engine.markDone(id, truth, "operator")
-                        "abort(applied)" -> engine.abort(id, "operator", currentStepApplied = true, ref = truth)
+                        "markDone" -> engine.markDone(id, Json.encodeToString(truth), "operator")
+                        "abort(applied)" -> engine.abort(id, "operator", currentStepApplied = true, output = Json.encodeToString(truth))
                         else -> engine.abort(id, "operator", currentStepApplied = false)
                     }
                 } catch (e: CancellationException) {
@@ -394,23 +411,26 @@ class SagaStressIT {
 
     private class Row(
         val type: String, val key: String, val state: String, val stepStatus: String, val lockedUntil: Any?,
-        val itemStatus: String, val hookRuns: Int,
+        val itemStatus: String, val hookRuns: Int, val input: ItemRequest,
     )
 
     private fun checkInvariants() {
         val problems = violations.toMutableList()
         val rows = pg.query(
             """
-            SELECT s.type, s.business_key, s.state, s.step_status, s.locked_until, i.status, i.hook_runs
+            SELECT s.type, s.business_key, s.state, s.step_status, s.locked_until, i.status, i.hook_runs, s.input
             FROM saga s JOIN item i ON i.key = s.business_key
             """.trimIndent(),
         ) {
-            Row(it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getObject(5), it.getString(6), it.getInt(7))
+            Row(
+                it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getObject(5), it.getString(6),
+                it.getInt(7), Json.decodeFromString(it.getString(8)),
+            )
         }
         // step results by key: step name -> (ref, compensated)
         val results = pg.query(
             """
-            SELECT s.business_key, r.step_name, r.external_ref, r.compensated_at IS NOT NULL
+            SELECT s.business_key, r.step_name, r.output, r.compensated_at IS NOT NULL
             FROM saga_step_result r JOIN saga s ON s.id = r.saga_id
             """.trimIndent(),
         ) { listOf(it.getString(1), it.getString(2), it.getString(3), it.getBoolean(4).toString()) }
@@ -430,9 +450,13 @@ class SagaStressIT {
                     if (r.itemStatus != "DONE") problems += "${r.key}: COMPLETED but item is ${r.itemStatus}"
                     for (step in steps) {
                         val truth = step.system.lookup(r.key)
-                        val (ref, compensated) = stored[step.name] ?: (null to false)
+                        val (text, compensated) = stored[step.name] ?: (null to false)
+                        val output = text?.let { Json.decodeFromString<Effect>(it) }
                         if (truth == null) problems += "${r.key}: COMPLETED but ${step.name} is not applied"
-                        if (ref != truth) problems += "${r.key}: stored ${step.name}=$ref, system has $truth"
+                        if (output != truth) problems += "${r.key}: stored ${step.name}=$output, system has $truth"
+                        if (truth != null && truth.customer != r.input.customer) {
+                            problems += "${r.key}: ${step.name} was applied for ${truth.customer}, the saga's input is ${r.input.customer}"
+                        }
                         if (compensated) problems += "${r.key}: COMPLETED but ${step.name} is marked compensated"
                     }
                 }
@@ -448,6 +472,11 @@ class SagaStressIT {
                 else -> problems += "${r.key}: not finished (${r.state} / ${r.stepStatus})"
             }
         }
+
+        // Inputs and outputs may hold personal data: none of it may reach the history or the errors.
+        val leaks = pg.long("SELECT count(*) FROM saga_log WHERE detail LIKE '%PII-%'") +
+            pg.long("SELECT count(*) FROM saga WHERE last_error LIKE '%PII-%'")
+        if (leaks > 0) problems += "$leaks log entries or errors contain an input or output value (PII-)"
 
         val known = setOf(
             SagaEvents.CREATED, SagaEvents.LOCK_EXPIRED, SagaEvents.LATE_RESULT_IGNORED, SagaEvents.RECORD_FAILED,

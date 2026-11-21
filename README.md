@@ -6,6 +6,7 @@ A small, generic saga engine for Kotlin services that call external systems **wh
 - The engine never calls an external system inside a database transaction.
 - When the outcome of a call is unknown (timeout, connection reset, `5xx`, crash), the engine **checks** whether the call was applied before it tries again. It never replays blindly.
 - When it cannot decide, it stops and waits for a human, instead of risking a duplicate.
+- A saga can carry a typed **input**, fixed at creation, and each step a typed **output**, read by the steps after it: stored as JSON through kotlinx.serialization.
 
 ---
 
@@ -20,7 +21,7 @@ A small, generic saga engine for Kotlin services that call external systems **wh
 7. [Operations and observability](#operations-and-observability)
 8. [Configuration](#configuration)
 9. [Testing your sagas](#testing-your-sagas)
-10. [Limits](#limits)
+10. [Known limitations](#known-limitations)
 
 ---
 
@@ -31,6 +32,8 @@ A small, generic saga engine for Kotlin services that call external systems **wh
 | **Saga** | One run of a definition for a business key, e.g. "set up item 42". One row in the `saga` table. |
 | **Definition** | A saga type (`"ITEM_SETUP"`), its ordered steps, and two hooks: `onCompleted`, `onFailed`. |
 | **Step** | One external call: `execute`, optionally `compensate` (undo) and `check` (was I applied?). |
+| **Input** | What the saga was asked to do (a customer, dates…), given at creation and never changed. Optional. |
+| **Output** | What a step's call returned (an id, a price…), read by the later steps, its own compensation and the hooks. Optional. |
 | **Business key** | What the saga is about (an item id, an order id…). At most **one unfinished saga per key**. |
 | **Compensation** | Undoing the completed steps, last to first, after a step was rejected. |
 
@@ -59,7 +62,7 @@ stateDiagram-v2
     IN_PROGRESS --> READY : done (next step) / not sent (retry later)
     IN_PROGRESS --> UNKNOWN : unknown outcome, or lock expired
     UNKNOWN --> IN_PROGRESS : check, after the settle delay
-    IN_PROGRESS --> STUCK : cannot tell / too many attempts
+    IN_PROGRESS --> STUCK : cannot tell / too many attempts / output not stored
     STUCK --> READY : manual retry
 ```
 
@@ -83,18 +86,11 @@ Copy [`src/main/resources/com/example/saga/schema.sql`](src/main/resources/com/e
 
 | Table | Content |
 |---|---|
-| `saga` | One row per saga: state, current step, attempts, lock, last error |
-| `saga_step_result` | The external reference returned by each completed step |
+| `saga` | One row per saga: state, current step, attempts, lock, last error, and its input |
+| `saga_step_result` | The output of each completed step |
 | `saga_log` | History: every call, check, compensation and manual action, with the trace id |
 
-There is no JSONB: a step finds its input from the business key and from earlier results.
-
-If you already applied an earlier version of the schema, add what it lacks in a new migration (the column holds the count of failed checks, the index serves `purgeFinished`):
-
-```sql
-ALTER TABLE saga ADD COLUMN check_failures int NOT NULL DEFAULT 0 CHECK (check_failures >= 0);
-CREATE INDEX saga_finished ON saga (updated_at) WHERE state IN ('COMPLETED', 'FAILED');
-```
+Inputs and outputs are stored as text (JSON), not JSONB: the engine never queries inside them.
 
 ---
 
@@ -103,11 +99,13 @@ CREATE INDEX saga_finished ON saga (updated_at) WHERE state IN ('COMPLETED', 'FA
 ### The step contract
 
 ```kotlin
-interface SagaStep {
+interface SagaStep<I, O> {                                        // I: the saga's input, O: this step's output
     val name: String
-    suspend fun execute(ctx: SagaContext): String?             // the call; returns a reference to keep
-    suspend fun compensate(ctx: SagaContext) {}                 // undo (default: nothing)
-    suspend fun check(ctx: SagaContext): CheckResult            // "was I applied?" (default: CannotTell)
+    val outputType: KType?                                        // typeOf<O>(), or null for no output
+    suspend fun execute(ctx: SagaContext<I>): O                    // the call; returns the step's output
+    suspend fun compensate(ctx: SagaContext<I>, own: O?) {}        // undo, given its own output (default: nothing)
+    suspend fun check(ctx: SagaContext<I>): CheckResult<O>         // "was I applied?" (default: CannotTell)
+    fun describe(output: O): String? = null                        // what saga_log may show: an id, never personal data
 }
 ```
 
@@ -115,53 +113,69 @@ interface SagaStep {
 
 | Your code | Meaning | Engine reaction |
 |---|---|---|
-| returns normally | Applied | Stores the reference, moves to the next step |
+| returns normally | Applied | Stores the output, moves to the next step |
 | throws `StepRejected` | Refused, **nothing was applied** (e.g. `400`, `422`, business refusal) | Undoes the completed steps |
 | throws `StepNotSent` | The request **never left** (connection refused, DNS, connect timeout, `429`) | Retries later, with backoff |
 | throws anything else | **Unknown**: it may have been applied (read timeout, reset, `5xx`) | Checks after the settle delay |
 
 Classify errors carefully in your HTTP clients. Throwing `StepNotSent` for a request that may have reached the server can create duplicates. When in doubt, let the exception through: unknown is the safe default.
 
-`check` answers `Done(ref)`, `NotDone` or `CannotTell`. Implement it with a **read** in the external system, for example "find the stock entry for this EPC". Without a `check`, an unknown outcome makes the saga stuck.
+`check` answers `Done(output)` (the output found, stored as if the call had returned it), `NotDone` or `CannotTell`. Implement it with a **read** in the external system, for example "find the stock entry for this EPC". Without a `check`, an unknown outcome makes the saga stuck.
 
 `compensate` **must be safe to run twice** ("move back to stock if it is still there", "delete if present"). The engine retries it on any error.
 
 ### Declaring a saga with the DSL
 
 ```kotlin
-fun itemSetupSaga(stockClient: StockClient, bookingClient: BookingClient, items: Items) = saga("ITEM_SETUP") {
+@Serializable data class SetupRequest(val epc: String, val storeId: String)
+@Serializable data class StockEntry(val id: String, val location: String)
 
-    val stock = step("stock") {
-        execute { stockClient.moveToTestStock(items.epcOf(key)) }             // returns the stock id
-        compensate { stockId -> stockClient.revertTestStockEntry(stockId!!) }  // no-op if already reverted
-        checkByLookup { stockClient.findTestStockEntries(items.epcOf(key)) }
+fun itemSetupSaga(stockClient: StockClient, bookingClient: BookingClient, items: Items) =
+    saga<SetupRequest>("ITEM_SETUP") {
+
+        val stock = step<StockEntry>("stock") {
+            execute { stockClient.moveToTestStock(input.epc, input.storeId) }      // returns a StockEntry
+            compensate { own -> own?.let { stockClient.revertTestStockEntry(it.id) } }  // no-op if already reverted
+            checkByLookup { stockClient.findTestStockEntries(input.epc) }          // a List<StockEntry>
+            logAs { it.id }                                                        // what saga_log shows
+        }
+
+        step<String>("booking") {
+            execute { bookingClient.createResource(input.epc, stockId = requireResult(stock).id) }   // the resource id
+            // Last step: never needs to be undone.
+            checkByLookup { bookingClient.findResources(input.epc) }
+        }
+
+        onCompleted { items.markAvailable(key, location = requireResult(stock).location) }  // same transaction as the end
+        onFailed { items.markSetupFailed(key) }
     }
-
-    step("booking") {
-        execute { bookingClient.createResource(items.epcOf(key), stockId = requireResult(stock)) }
-        // Last step: never needs to be undone.
-        checkByLookup { bookingClient.findResources(items.epcOf(key)) }
-    }
-
-    onCompleted { items.markAvailable(key) }      // same transaction as the end of the saga
-    onFailed { items.markSetupFailed(key) }
-}
 ```
 
-Inside every block, `this` is the `SagaContext`: `key` is the business key and `sagaId` the saga id.
+Inside every block, `this` is the `SagaContext`: `key` is the business key, `input` the saga's input and `sagaId` the saga id.
 
 | DSL | Meaning |
 |---|---|
-| `saga(type) { … }` | Declares a saga type. Returns a `SagaDefinition` to register in the engine. |
-| `step(name) { … }` | Declares the next step; steps run in declaration order. Returns a `StepRef`. |
-| `execute { … }` | Required. The call; returns the reference to keep, or null. |
-| `compensate { ownResult -> … }` | Optional. Undo, given the reference this step returned. Must be safe to repeat. |
-| `checkByLookup { … }` | Optional. Returns the matches found in the external system: none means not done, one means done (its reference is kept), several means cannot tell. |
-| `check { … }` | Optional. Same as above, when you need full control: return `CheckResult.Done(ref)`, `NotDone` or `CannotTell`. |
-| `result(stepRef)` / `requireResult(stepRef)` | Reference returned by an earlier step. |
+| `saga<I>(type) { … }` | Declares a saga type whose input is an `I`. `saga(type) { … }` declares one without input. Returns a `SagaDefinition` to register in the engine. |
+| `step<O>(name) { … }` | Declares the next step, whose call returns an `O`; steps run in declaration order. `step(name) { … }` declares one without output. Returns a `StepRef<O>`. |
+| `execute { … }` | Required. The call; returns the step's output. |
+| `compensate { own -> … }` | Optional. Undo, given this step's own output. Must be safe to repeat. |
+| `checkByLookup { … }` | Optional. Returns the matches found in the external system: none means not done, one means done (it becomes the step's output), several means cannot tell. |
+| `check { … }` | Optional. Same as above, when you need full control: return `CheckResult.Done(output)`, `NotDone` or `CannotTell`. |
+| `logAs { … }` | Optional. What `saga_log` shows about the output: an identifier, never personal data. Default: a `String` output itself, nothing for other types. |
+| `input` | The saga's input, fixed at creation. |
+| `result(stepRef)` / `requireResult(stepRef)` | Output of an earlier step, typed. |
 | `onCompleted { … }` / `onFailed { … }` | Business effects at the end, in the saga's last transaction. |
 
-The DSL builds plain `SagaDefinition` and `SagaStep` objects. You can also implement `SagaStep` yourself, for example to share a step between sagas or to inject dependencies through a constructor.
+The DSL builds plain `SagaDefinition` and `SagaStep` objects. You can also implement `SagaStep<I, O>` yourself, for example to share a step between sagas or to inject dependencies through a constructor: declare `outputType = typeOf<O>()`.
+
+### Saga data
+
+A saga's input and its steps' outputs are stored as text by the engine's `SagaSerializer`: JSON through kotlinx.serialization (`KotlinxJsonSagaSerializer`), so their types need `@Serializable`. The engine checks every declared type when it is built: a type it cannot serialize stops the engine at startup, not a saga in production.
+
+- **The input is fixed at creation.** Every step, check, compensation and hook sees the request as it was made, not business data as it is when the step runs.
+- **Size:** `SagaConfig.maxDataBytes`, 16 KB by default, per input and per output. Store identifiers and parameters; anything large belongs in a business table, referenced by id. An input over the limit is refused by `create`; an output over it makes the step `STUCK`, since the call has already happened.
+- **Personal data:** values are stored only in `saga.input` and `saga_step_result.output`, never in `saga_log` or `last_error`, and they are deleted with the saga by `purgeFinished`.
+- **Changing a type:** running sagas hold data written by the previous version of the code. The default JSON ignores unknown keys, so give added fields a default value and both versions read each other's data. For a breaking change (a field renamed, its meaning changed), declare a new saga type and keep the old one until its last saga has finished.
 
 `onCompleted` and `onFailed` run **inside** the transaction that ends the saga, so the business state and the saga state change together. They must not call external systems.
 
@@ -178,6 +192,7 @@ val engine = SagaEngine(
     transactions = ExposedSagaTransactions(database),
     repository = ExposedSagaRepository(),
     definitions = listOf(itemSetupSaga(stock, booking, items)),
+    serializer = KotlinxJsonSagaSerializer(),
     traceId = { Span.current().spanContext.traceId.takeIf { it != TraceId.getInvalid() } },
 )
 ```
@@ -192,7 +207,7 @@ Create the saga **in the same transaction** as the business change, then run it 
 suspend fun registerItem(epc: String, storeId: String): HttpStatusCode {
     val sagaId = db.tx {
         val item = items.insert(epc, storeId)                     // status SETTING_UP
-        engine.create("ITEM_SETUP", item.id.toString(), traceparent = currentTraceparent())
+        engine.create(itemSetup, key = item.id.toString(), input = SetupRequest(epc, storeId), traceparent = currentTraceparent())
     }
 
     val saga = engine.run(sagaId, deadline = Clock.System.now() + 8.seconds)
@@ -228,12 +243,14 @@ It picks up every saga with something to do: a retry that is due, an unknown out
 |---|---|
 | A step is **rejected** | Undoes the completed steps, last to first. The saga ends `FAILED`, then `onFailed` runs. |
 | The request was **not sent** | Retries after 1, 2, 4… minutes (capped at 1 hour). After 10 attempts, `STUCK`. |
-| The outcome is **unknown** | Waits for the settle delay (2 minutes), then calls `check`. `Done` keeps the reference and moves on, `NotDone` executes again (after 10 attempts, `STUCK`), `CannotTell` makes the saga `STUCK`. |
+| The outcome is **unknown** | Waits for the settle delay (2 minutes), then calls `check`. `Done` stores the output found and moves on, `NotDone` executes again (after 10 attempts, `STUCK`), `CannotTell` makes the saga `STUCK`. |
 | The **check fails** | Checks again later, with backoff (at least 1 minute, at most 1 hour). Failed checks are counted apart from executions. After `maxAttempts` failed checks in a row, `STUCK`, like a check that cannot tell: the call may have been applied, so look in the external system before `retry`. |
 | A step throws a JVM **`Error`** (a `TODO()`, an assertion) | Treated like any failed call. Only fatal JVM errors (out of memory, stack overflow) escape. |
 | The **pod dies** mid-call | The step stays `IN_PROGRESS` until its lock expires (35 s). Forward, it becomes `UNKNOWN` and is checked, never replayed blindly. During compensation it is simply replayed, since compensations are safe to repeat. |
 | A **compensation fails** | Retries with backoff, then `STUCK`. The same applies when the pod keeps dying during a compensation. |
-| The outcome **cannot be recorded** (`onCompleted` / `onFailed` throws, a constraint fails…) | The transaction is rolled back and the saga becomes `STUCK` on the step that ran. The outcome, including its reference, is kept in `last_error` and logged as `RECORD_FAILED`. Fix the cause, then use `markDone(id, ref, actor)` (or `retry` for a compensation). |
+| The outcome **cannot be recorded** (`onCompleted` / `onFailed` throws, a constraint fails…) | The transaction is rolled back and recorded again, alone. If that fails too, the saga becomes `STUCK` on the step that ran, logged as `RECORD_FAILED`; a successful call's output is saved with its result. Fix the cause, then use `markDone(id, null, actor)` to continue with it (or `retry` for a compensation). |
+| A call's **output cannot be stored** (it cannot be encoded, or is over `maxDataBytes`) | The call has happened, so it is never run again: the step becomes `STUCK`. Record an output with `markDone`, or undo the step with `abort(currentStepApplied = true)`. |
+| A saga's **data cannot be read** (written by another version of the code) | No call is made. The saga is postponed by `resumeFailureDelay` and logged as `RESUME_FAILED`, so that a version that can read it picks it up. |
 | A call runs **longer than `callLock`** | The engine cuts it at `callLock`: the outcome is unknown, and is checked. |
 | A result arrives **after** its lock expired and another instance took over | It is ignored and logged as `LATE_RESULT_IGNORED`. |
 | `resumeDue` **cannot run a saga** (database error, bug) | The error is returned in `result.failures`, and the saga is postponed by `resumeFailureDelay`. |
@@ -249,8 +266,8 @@ When a saga is `STUCK`, a human decides. Expose these from an admin screen:
 | Call | Use it when |
 |---|---|
 | `engine.retry(id, actor)` | The cause is fixed (service back up, data corrected). Forward, it **executes the step again without checking**: if the saga is stuck because a check could not tell, first confirm by hand that the step was not applied. |
-| `engine.markDone(id, ref, actor)` | You confirmed by hand that the step was applied, and you have its reference |
-| `engine.abort(id, actor, currentStepApplied, ref)` | You give up: completed steps are undone. Refused while a call is in flight or its outcome is unknown. For a stuck step, look in the external system first: with `currentStepApplied = true` the stuck step is undone too, and its compensation receives `ref`. |
+| `engine.markDone(id, output, actor)` | You confirmed by hand that the step was applied. `output` is the step's output as JSON, checked against the step's type before it is saved; `null` keeps the output already saved (after `RECORD_FAILED`), or means no output. |
+| `engine.abort(id, actor, currentStepApplied, output)` | You give up: completed steps are undone. Refused while a call is in flight or its outcome is unknown. For a stuck step, look in the external system first: with `currentStepApplied = true` the stuck step is undone too, and its compensation receives `output` (JSON, checked like `markDone`'s). |
 
 Every manual action is logged with its author in `saga_log`.
 
@@ -284,7 +301,7 @@ WHERE s.business_key = :key ORDER BY l.at;
 - oldest unfinished saga older than 30 minutes
 - rate of `EXECUTE:Unknown` events per step
 
-**Retention.** History grows by about 1.5 KB per saga. Keep one month by calling `purgeFinished` from the job runner, for example once a day:
+**Retention.** History grows by about 1.5 KB per saga, plus the size of its input and outputs. Keep one month by calling `purgeFinished` from the job runner, for example once a day:
 
 ```kotlin
 engine.purgeFinished(olderThan = 30.days)
@@ -319,9 +336,10 @@ The engine compares lock expiry times written by different instances, so their c
 
 ```kotlin
 val repository = InMemorySagaRepository()
-val engine = SagaEngine(InMemorySagaTransactions(repository), repository, listOf(itemSetupSaga(fakeStock, fakeBooking, fakeItems)), clock = clock)
+val itemSetup = itemSetupSaga(fakeStock, fakeBooking, fakeItems)
+val engine = SagaEngine(InMemorySagaTransactions(repository), repository, listOf(itemSetup), KotlinxJsonSagaSerializer(), clock = clock)
 
-val id = engine.create("ITEM_SETUP", "item-1")
+val id = engine.create(itemSetup, "item-1", SetupRequest(epc = "E-1", storeId = "S-1"))
 engine.run(id, clock.now() + 10.seconds)
 clock.advance(2.minutes)
 engine.resumeDue()
@@ -356,7 +374,9 @@ Two longer checks run against PostgreSQL in Docker. They are left out of `./grad
   - a completed saga matches the external systems exactly;
   - a failed saga left nothing behind;
   - each hook ran exactly once;
-  - each step saw the right reference from the previous one.
+  - each step saw the right output from the previous one, and every external effect was made with the saga's input;
+  - every stored output equals what the external system returned;
+  - no input or output value ever appears in `saga_log` or `last_error`.
 
 Concurrency makes runs non-deterministic: a seed reproduces the mix of failures, not the exact interleaving. A run that fails prints its seed and the violations.
 
@@ -364,10 +384,56 @@ Concurrency makes runs non-deterministic: a seed reproduces the mix of failures,
 
 ---
 
-## Limits
+## Known limitations
 
-- **Steps run one after the other.** No parallel steps.
-- **No timeout on a whole saga.** A saga waits as long as it takes; watch `STUCK` and old sagas.
-- **Duplicates are still possible** if an external system processes a request after the settle delay. Make external systems refuse duplicates where you can (for example a unique EPC), and reconcile periodically.
-- **Renaming or reordering steps** affects running sagas, which store the index and name of their current step. Let running sagas finish, or migrate them, before changing a definition.
+These are behaviours of the current code to design around. Each one says what happens and what to do about it.
+
+### Duplicates are rarer, not impossible
+
+The engine never replays a call blindly, but a duplicate can still happen in these cases:
+
+- **The external system applies a request late,** after `settleDelay`. The check finds nothing, the step runs again, and the late request lands too. Set `settleDelay` above the longest time the system may spend on a request, make the system refuse duplicates where you can (a unique EPC), and reconcile periodically.
+- **The lookup lags.** If the external system's search is eventually consistent, a check can answer "not done" for a call that was applied. A `check` must read from a source that already shows what was written.
+- **A step classifies an error wrongly.** Throwing `StepNotSent` for a request that may have left skips the check. When in doubt, let the exception through: unknown is the safe default.
+- **An operator runs `retry` on a step that was applied.** `retry` executes again without checking. Look in the external system first.
+
+### Calls must be cancellable
+
+The engine cuts each call shortly before its lock expires, by cancelling its coroutine. That only stops code that suspends: a **blocking** call (a JDBC query, `java.net.http.HttpClient.send`, `Thread.sleep`) runs to its end, and can still outlive its lock. Another instance may then check the step, or run a compensation again, while the call is still in flight. Use a suspending client (for example Ktor's), wrap blocking code in `runInterruptible`, and give every client its own timeout below `callLock`.
+
+### Compensations can run more than once
+
+A compensation runs again after any error, after its lock expired, and after a manual `retry`. It must be safe to repeat ("delete if present", "move back if still there"). There is no `markCompensated` action: if a step was undone by hand, `retry` runs the compensation again, which works only because it is safe to repeat.
+
+### No isolation
+
+Other systems and users see the intermediate state while a saga runs (stock moved, resource not yet created), and while it compensates. Business rules that must not see it need their own status, for example the item's `SETTING_UP`.
+
+### Timing
+
+- **The time budget of `run` is checked between calls, not during them.** An HTTP request that runs a saga inline can wait up to the budget plus one call (at most `callLock`) before it gets its answer.
+- **An unknown outcome takes at least `settleDelay`** (2 minutes) to resolve, since the check must wait for it. The caller gets a 202 meanwhile.
+- **No timeout on a whole saga.** Backoff can wait up to `maxBackoff` (1 hour) between attempts, and a step whose check keeps failing becomes `STUCK` only after about 4 hours with the defaults. Watch for old unfinished sagas, not only stuck ones.
+- **The clocks of the instances must agree** (NTP). Lock expiry compares times written by different instances: a drift of a few seconds is harmless next to `callLock`.
+
+### Data and definitions
+
+- **Steps run one after the other.** No parallel branches.
+- **Saga data is for parameters and identifiers,** at most `maxDataBytes` (16 KB) per value. An input up to about 2 KB is stored inside the saga row, which the engine updates about 4 times per saga: each update copies it, so it takes several times its size until PostgreSQL vacuums the old copies. Moving the input to a table written once is proposed.
+- **Data written by one version of the code must stay readable by the next.** Add fields with defaults; for anything else, declare a new saga type.
+- **Renaming or reordering steps** affects running sagas, which store the index and name of their current step. Let them finish, or migrate them, before changing a definition.
+- **Removing a saga type** leaves its unfinished sagas untouched for ever: `resumeDue` skips unknown types, manual actions fail on them, and their business keys stay blocked for new sagas. Finish or migrate them before removing the type.
+- **`onCompleted` and `onFailed` run inside the engine's transaction.** They must be quick and must not call external systems. One that throws makes the saga `STUCK` (`RECORD_FAILED`) after one more attempt.
+
+### Operations
+
+- **No API to read sagas for an admin screen,** apart from `find(id)`. Listing stuck sagas and reading a history is plain SQL, and the reason a saga is stuck is free text in `last_error`.
+- **A database outage postpones a whole `resumeDue` batch** by `resumeFailureDelay` (1 minute): each saga that failed to run waits that long before the next try.
+- **`resumeDue` holds up to `concurrency` connections at once** during their short transactions. Keep it well below the connection pool size.
+- **Retention deletes history for good.** `purgeFinished` removes finished sagas with their results and log. Export what you must keep longer.
+- **Fatal JVM errors** (out of memory, stack overflow) are never caught. The step stays `IN_PROGRESS` until its lock expires, then is checked.
+
+### Storage
+
+- **PostgreSQL only.** The Exposed repository uses `FOR UPDATE SKIP LOCKED`, `ON CONFLICT DO NOTHING` and partial indexes, and its transactions always run in READ COMMITTED. Another database needs its own `SagaRepository`.
 - **The in-memory repository is for tests only.** Build `InMemorySagaTransactions(repository)` on the same repository, so failed transactions are rolled back as in PostgreSQL.

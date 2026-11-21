@@ -1,15 +1,16 @@
 package com.example.saga.exposed
 
-import com.example.saga.SagaContext
-import com.example.saga.SagaDefinition
+import com.example.saga.KotlinxJsonSagaSerializer
+import com.example.saga.SagaConfig
 import com.example.saga.SagaEngine
-import com.example.saga.SagaStep
+import com.example.saga.saga
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Tag
@@ -35,14 +36,18 @@ class SagaBenchmarkIT {
     private val pg = PostgresFixture(durable = true)
     private val report = StringBuilder()
 
-    private val definition = SagaDefinition(
-        "ITEM_SETUP",
-        listOf(instantStep("stock"), instantStep("booking")),
-    )
+    /** Size of the saga's input and of each step's output, in bytes of text: -Dsaga.dataBytes=1024. */
+    private val dataBytes = System.getProperty("saga.dataBytes")?.toInt() ?: 0
+    // Random letters: real data barely compresses, and repeated characters would hide the cost of storing it.
+    private val payload = Payload(kotlin.random.Random(42).let { r -> String(CharArray(dataBytes) { 'a' + r.nextInt(26) }) })
 
-    private fun instantStep(name: String) = object : SagaStep {
-        override val name = name
-        override suspend fun execute(ctx: SagaContext) = "$name-${ctx.key}"
+    @Serializable
+    data class Payload(val data: String)
+
+    /** Steps that return at once: the input as their output, so each saga stores 3 values of dataBytes. */
+    private val definition = saga<Payload>("ITEM_SETUP") {
+        step<Payload>("stock") { execute { input } }
+        step<Payload>("booking") { execute { input } }
     }
 
     private lateinit var transactions: ExposedSagaTransactions
@@ -52,11 +57,17 @@ class SagaBenchmarkIT {
     fun start() {
         pg.start(poolSize = concurrency * 2 + 2)
         transactions = ExposedSagaTransactions(pg.database)
-        engine = SagaEngine(transactions, ExposedSagaRepository(), listOf(definition))
+        engine = SagaEngine(
+            transactions, ExposedSagaRepository(), listOf(definition), KotlinxJsonSagaSerializer(),
+            SagaConfig(maxDataBytes = maxOf(16 * 1024, dataBytes + 64)),
+        )
         pg.resetSchema()
         runBlocking { inline(count = 200, parallelism = concurrency, prefix = "warmup") }   // JIT, pool, caches
         report.appendLine("# Saga benchmark\n")
-        report.appendLine("$sagas sagas of ${definition.steps.size} instant steps per scenario, PostgreSQL 16 (fsync on), pool of ${concurrency * 2 + 2}.\n")
+        report.appendLine(
+            "$sagas sagas of ${definition.steps.size} instant steps per scenario, an input and outputs of $dataBytes bytes each, " +
+                "PostgreSQL 16 (fsync on), pool of ${concurrency * 2 + 2}.\n",
+        )
     }
 
     @AfterAll
@@ -79,7 +90,7 @@ class SagaBenchmarkIT {
 
     @Test
     fun `recovery through resumeDue`() = scenario("Recovery: resumeDue(concurrency = $concurrency)") {
-        val ids = (1..sagas).map { i -> transactions.inTransaction { engine.create("ITEM_SETUP", "rec-$i") } }
+        val ids = (1..sagas).map { i -> transactions.inTransaction { engine.create(definition, "rec-$i", payload) } }
         val start = System.nanoTime()
         do {
             val result = engine.resumeDue(limit = 100, concurrency = concurrency)
@@ -102,7 +113,7 @@ class SagaBenchmarkIT {
                 async {
                     permits.withPermit {
                         val t0 = System.nanoTime()
-                        val id = transactions.inTransaction { engine.create("ITEM_SETUP", "$prefix-$i") }
+                        val id = transactions.inTransaction { engine.create(definition, "$prefix-$i", payload) }
                         engine.run(id, Clock.System.now() + 10.seconds)
                         System.nanoTime() - t0
                     }

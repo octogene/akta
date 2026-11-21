@@ -1,14 +1,17 @@
 package com.example.saga.exposed
 
 import com.example.saga.DuplicateSagaException
+import com.example.saga.KotlinxJsonSagaSerializer
 import com.example.saga.SagaContext
 import com.example.saga.SagaDefinition
 import com.example.saga.SagaEngine
 import com.example.saga.SagaState
-import com.example.saga.SagaStep
 import com.example.saga.StepNotSent
 import com.example.saga.StepRejected
+
+import com.example.saga.saga
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.v1.core.DatabaseConfig
 import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
@@ -57,55 +60,68 @@ class ExposedSagaRepositoryIT {
         }
     }
 
-    private fun step(name: String, block: () -> String?) = object : SagaStep {
-        override val name = name
-        override suspend fun execute(ctx: SagaContext) = block()
-    }
+    @Serializable
+    data class Request(val customerId: String, val start: String)
 
-    private fun engine(vararg steps: SagaStep, onCompleted: (SagaContext) -> Unit = {}) = SagaEngine(
-        ExposedSagaTransactions(database), repository,
-        listOf(SagaDefinition("TEST", steps.toList(), onCompleted = onCompleted)),
-    )
+    @Serializable
+    data class Hold(val id: String, val warehouse: String)
+
+    private val serializer = KotlinxJsonSagaSerializer()
+
+    /** A saga of steps returning a reference each, by step name. */
+    private fun definition(vararg steps: Pair<String, () -> String>, onCompleted: SagaContext<Unit>.() -> Unit = {}) =
+        saga("TEST") {
+            for ((name, block) in steps) step<String>(name) { execute { block() } }
+            onCompleted(onCompleted)
+        }
+
+    private var current: SagaDefinition<Unit>? = null
+
+    private fun engine(vararg steps: Pair<String, () -> String>, onCompleted: SagaContext<Unit>.() -> Unit = {}): SagaEngine {
+        val definition = definition(*steps, onCompleted = onCompleted).also { current = it }
+        return SagaEngine(ExposedSagaTransactions(database), repository, listOf(definition), serializer)
+    }
 
     private fun SagaEngine.start(key: String) = runBlocking {
-        val id = ExposedSagaTransactions(database).inTransaction { create("TEST", key) }
+        val id = ExposedSagaTransactions(database).inTransaction { create(current!!, key) }
         run(id, Clock.System.now() + 10.seconds)
     }
+
+    private fun storedResults(id: kotlin.uuid.Uuid) =
+        runBlocking { ExposedSagaTransactions(database).inTransaction { repository.results(id) } }
 
     @Test
     fun `completes, stores results and runs the completion hook in the final transaction`() {
         var hookKey: String? = null
-        val saga = engine(step("stock") { "STK-1" }, step("booking") { "RES-1" }, onCompleted = { hookKey = it.key })
+        val saga = engine("stock" to { "STK-1" }, "booking" to { "RES-1" }, onCompleted = { hookKey = key })
             .start("item-1")
 
         assertEquals(SagaState.COMPLETED, saga.state)
         assertEquals("item-1", hookKey)
-        val results = runBlocking { ExposedSagaTransactions(database).inTransaction { repository.results(saga.id) } }
-        assertEquals(mapOf("stock" to "STK-1", "booking" to "RES-1"), results)
+        assertEquals(mapOf("stock" to "\"STK-1\"", "booking" to "\"RES-1\""), storedResults(saga.id))
     }
 
     @Test
     fun `compensation marks results as compensated`() {
-        val saga = engine(step("stock") { "STK-1" }, step("booking") { throw StepRejected("no") }).start("item-2")
+        val saga = engine("stock" to { "STK-1" }, "booking" to { throw StepRejected("no") }).start("item-2")
 
         assertEquals(SagaState.FAILED, saga.state)
-        val results = runBlocking { ExposedSagaTransactions(database).inTransaction { repository.results(saga.id) } }
-        assertEquals(emptyMap<String, String?>(), results)
+        assertEquals(emptyMap<String, String?>(), storedResults(saga.id))
     }
 
     @Test
     fun `refuses a second unfinished saga for the same key`() {
-        val engine = engine(step("stock") { throw StepNotSent("down") })
+        val engine = engine("stock" to { throw StepNotSent("down") })
         engine.start("item-3")
         assertFailsWith<DuplicateSagaException> { engine.start("item-3") }
     }
 
     @Test
     fun `a duplicate saga leaves the caller's transaction usable`() {
-        val engine = engine(step("stock") { throw StepNotSent("down") })
+        val engine = engine("stock" to { throw StepNotSent("down") })
         engine.start("item-5")
         val after = transaction(database) {
-            assertFailsWith<DuplicateSagaException> { engine.create("TEST", "item-5") }
+            assertFailsWith<DuplicateSagaException> { engine.create(current!!, "item-5") }
             exec("SELECT 42") { it.next(); it.getInt(1) }                       // still usable: no aborted transaction
         }
         assertEquals(42, after)
@@ -120,11 +136,9 @@ class ExposedSagaRepositoryIT {
                 defaultIsolationLevel = Connection.TRANSACTION_REPEATABLE_READ
             },
         )
-        val engine = SagaEngine(
-            ExposedSagaTransactions(repeatableRead), repository,
-            listOf(SagaDefinition("TEST", listOf(step("stock") { "STK-1" }))),
-        )
-        val id = transaction(repeatableRead) { engine.create("TEST", "item-6") }
+        val definition = definition("stock" to { "STK-1" })
+        val engine = SagaEngine(ExposedSagaTransactions(repeatableRead), repository, listOf(definition), serializer)
+        val id = transaction(repeatableRead) { engine.create(definition, "item-6") }
 
         // Another transaction locks and updates the saga row, then commits while run() waits for the lock.
         val locked = CountDownLatch(1)
@@ -145,15 +159,15 @@ class ExposedSagaRepositoryIT {
 
     @Test
     fun `purgeFinished deletes old finished sagas with their results and log, and keeps the rest`() {
-        val done = engine(step("stock") { "STK-1" }, step("booking") { "RES-1" }).start("item-7")
-        val pending = engine(step("stock") { throw StepNotSent("down") }).start("item-8")
-        val recent = engine(step("stock") { "STK-2" }).start("item-9")
+        val done = engine("stock" to { "STK-1" }, "booking" to { "RES-1" }).start("item-7")
+        val pending = engine("stock" to { throw StepNotSent("down") }).start("item-8")
+        val recent = engine("stock" to { "STK-2" }).start("item-9")
         // Age the first two by 40 days.
         transaction(database) {
             exec("UPDATE saga SET updated_at = updated_at - interval '40 days' WHERE id IN ('${done.id}', '${pending.id}')")
         }
 
-        val deleted = runBlocking { engine(step("stock") { null }).purgeFinished(olderThan = 30.days) }
+        val deleted = runBlocking { engine("stock" to { "unused" }).purgeFinished(olderThan = 30.days) }
 
         assertEquals(1, deleted)
         transaction(database) {
@@ -166,8 +180,32 @@ class ExposedSagaRepositoryIT {
     }
 
     @Test
+    fun `a typed input and typed outputs round-trip through PostgreSQL`() {
+        var confirmed: Pair<Request, Hold>? = null
+        val definition = saga<Request>("BOOKING") {
+            val hold = step<Hold>("hold") { execute { Hold("H-1", "north") } }
+            step<String>("booking") { execute { "${input.customerId}@${requireResult(hold).warehouse}" } }
+            onCompleted { confirmed = input to requireResult(hold) }
+        }
+        val engine = SagaEngine(ExposedSagaTransactions(database), repository, listOf(definition), serializer)
+        val id = runBlocking {
+            ExposedSagaTransactions(database).inTransaction { engine.create(definition, "item-10", Request("C-1", "2026-12-01")) }
+        }
+
+        val saga = runBlocking { engine.run(id, Clock.System.now() + 10.seconds) }
+
+        assertEquals(SagaState.COMPLETED, saga.state)
+        assertEquals(Request("C-1", "2026-12-01") to Hold("H-1", "north"), confirmed)
+        assertEquals("""{"customerId":"C-1","start":"2026-12-01"}""", saga.input)
+        assertEquals(
+            mapOf("hold" to """{"id":"H-1","warehouse":"north"}""", "booking" to "\"C-1@north\""),
+            storedResults(id),
+        )
+    }
+
+    @Test
     fun `skip locked ignores a saga locked by another transaction`() {
-        val saga = engine(step("stock") { throw StepNotSent("down") }).start("item-4")
+        val saga = engine("stock" to { throw StepNotSent("down") }).start("item-4")
         transaction(database) {
             assertNotNull(repository.lock(saga.id))                          // holds the row lock
             val other = Thread {

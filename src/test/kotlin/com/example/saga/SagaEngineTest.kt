@@ -29,6 +29,8 @@ import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
+import kotlinx.serialization.json.Json
+import kotlin.reflect.typeOf
 
 @Timeout(10)                // a step that never returns must fail the test, not hang the build
 class SagaEngineTest {
@@ -40,30 +42,36 @@ class SagaEngineTest {
         fun advance(d: Duration) { now += d }
     }
 
+    /** A step whose output is a reference string, logged as it is (like the DSL's step<String>). */
+    private abstract class RefStep(override val name: String) : SagaStep<Unit, String?> {
+        override val outputType = typeOf<String?>()
+        override fun describe(output: String?) = output
+    }
+
     /** A scripted step: each call pops the next behaviour; the last one repeats. */
     private class FakeStep(
-        override val name: String,
+        name: String,
         vararg behaviours: () -> String?,
-        private val checkResult: (() -> CheckResult)? = null,
+        private val checkResult: (() -> CheckResult<String?>)? = null,
         private val compensation: (() -> Unit)? = null,
-    ) : SagaStep {
+    ) : RefStep(name) {
         private val queue = ArrayDeque(behaviours.toList())
         var executions = 0
         var compensations = 0
         var checks = 0
 
-        override suspend fun execute(ctx: SagaContext): String? {
+        override suspend fun execute(ctx: SagaContext<Unit>): String? {
             executions++
             val next = if (queue.size > 1) queue.removeFirst() else queue.first()
             return next()
         }
 
-        override suspend fun compensate(ctx: SagaContext) {
+        override suspend fun compensate(ctx: SagaContext<Unit>, own: String?) {
             compensations++
             compensation?.invoke()
         }
 
-        override suspend fun check(ctx: SagaContext): CheckResult {
+        override suspend fun check(ctx: SagaContext<Unit>): CheckResult<String?> {
             checks++
             return checkResult?.invoke() ?: CheckResult.CannotTell
         }
@@ -74,15 +82,46 @@ class SagaEngineTest {
     private val completed = mutableListOf<String>()
     private val failed = mutableListOf<String>()
 
-    private fun engine(vararg steps: SagaStep, config: SagaConfig = SagaConfig()) = SagaEngine(
+    /** Definitions by type, so that the tests can create sagas by type name. */
+    private val registered = mutableMapOf<String, SagaDefinition<Unit>>()
+
+    private fun definition(
+        type: String,
+        steps: List<SagaStep<Unit, *>>,
+        onCompleted: SagaContext<Unit>.() -> Unit = {},
+        onFailed: SagaContext<Unit>.() -> Unit = {},
+    ) = SagaDefinition(type, inputType = null, steps, onCompleted, onFailed)
+
+    private fun newEngine(
+        transactions: SagaTransactions,
+        repository: SagaRepository,
+        definitions: List<SagaDefinition<Unit>>,
+        config: SagaConfig = SagaConfig(),
+        clock: Clock = this.clock,
+        traceId: () -> String? = { null },
+    ): SagaEngine {
+        definitions.forEach { registered[it.type] = it }
+        return SagaEngine(transactions, repository, definitions, KotlinxJsonSagaSerializer(), config, clock, traceId)
+    }
+
+    private fun SagaEngine.create(type: String, key: String) = create(registered.getValue(type), key)
+
+    /** The stored outputs, decoded: the references the steps returned. */
+    private fun results(id: Uuid): Map<String, String?> =
+        repository.results(id).mapValues { (_, v) -> v?.let { Json.decodeFromString<String?>(it) } }
+
+    /** A reference as an operator types it for markDone and abort: JSON. */
+    private fun json(ref: String) = Json.encodeToString(ref)
+
+    private fun engine(vararg steps: SagaStep<Unit, *>, config: SagaConfig = SagaConfig()) = newEngine(
         transactions = InMemorySagaTransactions(repository),
         repository = repository,
         definitions = listOf(
-            SagaDefinition(
+            definition(
                 type = "TEST",
                 steps = steps.toList(),
-                onCompleted = { completed += it.key },
-                onFailed = { failed += it.key },
+                onCompleted = { completed += key },
+                onFailed = { failed += key },
             ),
         ),
         config = config,
@@ -112,7 +151,7 @@ class SagaEngineTest {
         val saga = engine(stock, booking).start()
 
         assertEquals(SagaState.COMPLETED, saga.state)
-        assertEquals(mapOf("stock" to "STK-1", "booking" to "RES-1"), repository.results(saga.id))
+        assertEquals(mapOf("stock" to "STK-1", "booking" to "RES-1"), results(saga.id))
         assertEquals(listOf("item-1"), completed)
     }
 
@@ -120,9 +159,8 @@ class SagaEngineTest {
     fun `later steps see the references of earlier steps`() {
         var seen: String? = null
         val stock = FakeStep("stock", { "STK-1" })
-        val booking = object : SagaStep {
-            override val name = "booking"
-            override suspend fun execute(ctx: SagaContext): String? { seen = ctx.result("stock"); return "RES-1" }
+        val booking = object : RefStep("booking") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String? { seen = ctx.result(StepRef<String?>("stock")); return "RES-1" }
         }
         engine(stock, booking).start()
         assertEquals("STK-1", seen)
@@ -137,7 +175,7 @@ class SagaEngineTest {
         assertEquals(SagaState.FAILED, saga.state)
         assertEquals(1, stock.compensations)
         assertEquals(0, booking.compensations)
-        assertEquals(emptyMap<String, String?>(), repository.results(saga.id))
+        assertEquals(emptyMap<String, String?>(), results(saga.id))
         assertEquals(listOf("item-1"), failed)
     }
 
@@ -180,7 +218,7 @@ class SagaEngineTest {
         val done = engine.state(saga)
         assertEquals(SagaState.COMPLETED, done.state)
         assertEquals(1, stock.executions)                                 // never executed twice
-        assertEquals("STK-1", repository.results(saga.id)["stock"])
+        assertEquals("STK-1", results(saga.id)["stock"])
     }
 
     @Test
@@ -206,22 +244,21 @@ class SagaEngineTest {
         engine.resumeAfter(2.minutes)
         assertEquals(StepStatus.STUCK, engine.state(saga).stepStatus)
 
-        val after = runBlocking { engine.markDone(saga.id, "STK-9", actor = "alice") }
+        val after = runBlocking { engine.markDone(saga.id, json("STK-9"), actor = "alice") }
         assertEquals(SagaState.COMPLETED, after.state)
-        assertEquals("STK-9", repository.results(saga.id)["stock"])
+        assertEquals("STK-9", results(saga.id)["stock"])
         assertEquals("alice", repository.log.single { it.event == SagaEvents.MANUAL_DONE }.actor)
     }
 
     @Test
     fun `a call interrupted by a crash is treated as unknown when its lock expires`() {
         var executions = 0
-        val stock = object : SagaStep {
-            override val name = "stock"
-            override suspend fun execute(ctx: SagaContext): String? {
+        val stock = object : RefStep("stock") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String? {
                 if (++executions == 1) awaitCancellation()                // the pod stops mid-call
                 return "STK-2"
             }
-            override suspend fun check(ctx: SagaContext) = CheckResult.NotDone
+            override suspend fun check(ctx: SagaContext<Unit>) = CheckResult.NotDone
         }
         val engine = engine(stock)
         val id = runBlocking { InMemorySagaTransactions(repository).inTransaction { engine.create("TEST", "item-1") } }
@@ -237,9 +274,8 @@ class SagaEngineTest {
 
     @Test
     fun `a timeout inside a step is an unknown outcome, not a cancellation of the engine`() {
-        val stock = object : SagaStep {
-            override val name = "stock"
-            override suspend fun execute(ctx: SagaContext): String? = withTimeout(1) { awaitCancellation() }
+        val stock = object : RefStep("stock") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String? = withTimeout(1) { awaitCancellation() }
         }
         val saga = engine(stock).start()                                  // returns normally
 
@@ -295,7 +331,7 @@ class SagaEngineTest {
         assertEquals(3, stock.checks)
         assertEquals(1, stock.executions)
 
-        val after = runBlocking { engine.markDone(saga.id, "STK-7", actor = "alice") }   // found by hand
+        val after = runBlocking { engine.markDone(saga.id, json("STK-7"), actor = "alice") }   // found by hand
         assertEquals(SagaState.COMPLETED, after.state)
     }
 
@@ -341,9 +377,9 @@ class SagaEngineTest {
     fun `too many failed attempts make the step stuck, and a manual retry resumes it`() {
         var calls = 0
         val stock = FakeStep("stock", { if (++calls <= 3) throw StepNotSent("down") else "STK-1" })
-        val engine = SagaEngine(
+        val engine = newEngine(
             InMemorySagaTransactions(repository), repository,
-            listOf(SagaDefinition("TEST", listOf(stock))),
+            listOf(definition("TEST", listOf(stock))),
             config = SagaConfig(maxAttempts = 2), clock = clock,
         )
         val saga = engine.start()
@@ -372,17 +408,16 @@ class SagaEngineTest {
     fun `abort of a stuck step that was applied compensates it too, with its reference`() {
         var compensatedRef: String? = null
         val stock = FakeStep("stock", { "STK-1" })
-        val booking = object : SagaStep {
-            override val name = "booking"
-            override suspend fun execute(ctx: SagaContext): String? = throw RuntimeException("timeout")
-            override suspend fun compensate(ctx: SagaContext) { compensatedRef = ctx.result("booking") }
+        val booking = object : RefStep("booking") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String? = throw RuntimeException("timeout")
+            override suspend fun compensate(ctx: SagaContext<Unit>, own: String?) { compensatedRef = own }
         }
         val engine = engine(stock, booking)
         val saga = engine.start()
         engine.resumeAfter(2.minutes)                         // no check: cannot tell
         assertEquals(StepStatus.STUCK, engine.state(saga).stepStatus)
 
-        val after = runBlocking { engine.abort(saga.id, "carol", currentStepApplied = true, ref = "RES-7") }
+        val after = runBlocking { engine.abort(saga.id, "carol", currentStepApplied = true, output = json("RES-7")) }
         assertEquals(SagaState.FAILED, after.state)
         assertEquals("RES-7", compensatedRef)
         assertEquals(1, stock.compensations)
@@ -411,13 +446,13 @@ class SagaEngineTest {
     @Test
     fun `resumeDue leaves alone the types it does not know, as during a rolling deploy`() {
         val stock = FakeStep("stock", { "STK-1" })
-        fun definition(type: String) = SagaDefinition(type, listOf(stock))
-        val newPod = SagaEngine(InMemorySagaTransactions(repository), repository,
+        fun definition(type: String) = definition(type, listOf(stock))
+        val newPod = newEngine(InMemorySagaTransactions(repository), repository,
             listOf(definition("NEW"), definition("TEST")), clock = clock)
         val brandNew = newPod.create("NEW", "item-1")
         val current = newPod.create("TEST", "item-2")
 
-        val oldPod = SagaEngine(InMemorySagaTransactions(repository), repository, listOf(definition("TEST")), clock = clock)
+        val oldPod = newEngine(InMemorySagaTransactions(repository), repository, listOf(definition("TEST")), clock = clock)
         val result = runBlocking { oldPod.resumeDue() }
 
         assertEquals(1, result.sagas)
@@ -433,8 +468,8 @@ class SagaEngineTest {
             override fun results(sagaId: Uuid): Map<String, String?> =
                 if (sagaId == poison) throw IllegalStateException("corrupted row") else repository.results(sagaId)
         }
-        val definition = SagaDefinition("TEST", listOf(FakeStep("stock", { "STK-1" })))
-        val engine = SagaEngine(InMemorySagaTransactions(repository), failing, listOf(definition), clock = clock)
+        val definition = definition("TEST", listOf(FakeStep("stock", { "STK-1" })))
+        val engine = newEngine(InMemorySagaTransactions(repository), failing, listOf(definition), clock = clock)
         poison = engine.create("TEST", "item-1")
         clock.advance(1.seconds)
         val healthy = engine.create("TEST", "item-2")
@@ -455,14 +490,14 @@ class SagaEngineTest {
     }
 
     @Test
-    fun `a throwing onCompleted makes the saga stuck, keeping the reference, instead of looping`() {
+    fun `a throwing onCompleted makes the saga stuck, keeping the output, instead of looping`() {
         var hookFails = true
         val stock = FakeStep("stock", { "STK-1" })
-        val engine = SagaEngine(
+        val engine = newEngine(
             InMemorySagaTransactions(repository), repository,
-            listOf(SagaDefinition("TEST", listOf(stock), onCompleted = {
+            listOf(definition("TEST", listOf(stock), onCompleted = {
                 check(!hookFails) { "items table locked" }
-                completed += it.key
+                completed += key
             })),
             clock = clock,
         )
@@ -470,12 +505,12 @@ class SagaEngineTest {
 
         assertEquals(StepStatus.STUCK, saga.stepStatus)
         assertEquals(SagaState.RUNNING, saga.state)                       // rolled back, not COMPLETED
-        assertTrue(saga.lastError!!.contains("ref=STK-1"))
-        assertEquals(emptyMap<String, String?>(), repository.results(saga.id))
+        assertTrue(saga.lastError!!.contains("ref=STK-1"))                // what describe() logs, an id
+        assertEquals(mapOf("stock" to "STK-1"), results(saga.id))         // the output is kept with the result
         assertEquals(1, repository.log.count { it.event == SagaEvents.RECORD_FAILED })
 
         hookFails = false                                                 // the bug is fixed
-        val after = runBlocking { engine.markDone(saga.id, "STK-1", actor = "alice") }
+        val after = runBlocking { engine.markDone(saga.id, output = null, actor = "alice") }   // continue with it
         assertEquals(SagaState.COMPLETED, after.state)
         assertEquals(listOf("item-1"), completed)
         assertEquals(1, stock.executions)
@@ -483,11 +518,10 @@ class SagaEngineTest {
 
     @Test
     fun `a compensation that keeps outliving its lock gets stuck`() {
-        val stock = object : SagaStep {
-            override val name = "stock"
+        val stock = object : RefStep("stock") {
             var compensations = 0
-            override suspend fun execute(ctx: SagaContext) = "STK-1"
-            override suspend fun compensate(ctx: SagaContext) {
+            override suspend fun execute(ctx: SagaContext<Unit>) = "STK-1"
+            override suspend fun compensate(ctx: SagaContext<Unit>, own: String?) {
                 compensations++
                 awaitCancellation()                                       // the pod stops mid-call
             }
@@ -514,8 +548,8 @@ class SagaEngineTest {
             override suspend fun <T> inTransaction(block: () -> T): T =
                 withContext(Dispatchers.IO) { inMemory.inTransaction(block) }
         }
-        val engine = SagaEngine(
-            onAnotherThread, repository, listOf(SagaDefinition("TEST", listOf(FakeStep("stock", { "STK-1" })))),
+        val engine = newEngine(
+            onAnotherThread, repository, listOf(definition("TEST", listOf(FakeStep("stock", { "STK-1" })))),
             clock = clock, traceId = { currentTrace.get() },
         )
         currentTrace.set("trace-1")
@@ -532,9 +566,8 @@ class SagaEngineTest {
         // Each call waits until both sagas are in flight: this only finishes if they run at the same time.
         val inFlight = AtomicInteger()
         val bothInFlight = CompletableDeferred<Unit>()
-        val stock = object : SagaStep {
-            override val name = "stock"
-            override suspend fun execute(ctx: SagaContext): String {
+        val stock = object : RefStep("stock") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String {
                 if (inFlight.incrementAndGet() == 2) bothInFlight.complete(Unit)
                 bothInFlight.await()
                 return "STK-${ctx.key}"
@@ -555,8 +588,8 @@ class SagaEngineTest {
         val counting = object : SagaRepository by repository {
             override fun find(id: Uuid): SagaRecord? = repository.find(id).also { finds++ }
         }
-        val definition = SagaDefinition("TEST", listOf(FakeStep("stock", { "STK-1" }), FakeStep("booking", { "RES-1" })))
-        val engine = SagaEngine(InMemorySagaTransactions(repository), counting, listOf(definition), clock = clock)
+        val definition = definition("TEST", listOf(FakeStep("stock", { "STK-1" }), FakeStep("booking", { "RES-1" })))
+        val engine = newEngine(InMemorySagaTransactions(repository), counting, listOf(definition), clock = clock)
         val id = engine.create("TEST", "item-1")
 
         val saga = runBlocking { engine.run(id, clock.now + 10.seconds) }
@@ -570,9 +603,8 @@ class SagaEngineTest {
 
     @Test
     fun `a call that outlives its lock is cut, and its outcome is unknown`() {
-        val stock = object : SagaStep {
-            override val name = "stock"
-            override suspend fun execute(ctx: SagaContext): String? { delay(10.seconds); return "STK-1" }
+        val stock = object : RefStep("stock") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String? { delay(10.seconds); return "STK-1" }
         }
         val engine = engine(stock, config = SagaConfig(callLock = 2.seconds))
         val started = System.nanoTime()
@@ -587,9 +619,8 @@ class SagaEngineTest {
 
     @Test
     fun `an Error thrown by a step stays with its saga and does not stop the batch`() {
-        val stock = object : SagaStep {
-            override val name = "stock"
-            override suspend fun execute(ctx: SagaContext): String =
+        val stock = object : RefStep("stock") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String =
                 if (ctx.key == "stub") TODO("stock client not written yet") else { delay(50); "STK-1" }
         }
         val engine = engine(stock)
@@ -613,15 +644,15 @@ class SagaEngineTest {
             override fun results(sagaId: Uuid): Map<String, String?> =
                 if (++resultsCalls == 2) throw IllegalStateException("statement timeout") else repository.results(sagaId)
         }
-        val definition = SagaDefinition("TEST", listOf(FakeStep("stock", { "STK-1" }), FakeStep("booking", { "RES-1" })))
-        val engine = SagaEngine(InMemorySagaTransactions(repository), failingOnce, listOf(definition), clock = clock)
+        val definition = definition("TEST", listOf(FakeStep("stock", { "STK-1" }), FakeStep("booking", { "RES-1" })))
+        val engine = newEngine(InMemorySagaTransactions(repository), failingOnce, listOf(definition), clock = clock)
         val id = engine.create("TEST", "item-1")
 
         val saga = runBlocking { engine.run(id, clock.now + 10.seconds) }
 
         assertEquals(StepStatus.READY, saga.stepStatus)                   // before: STUCK on step 1, RECORD_FAILED
         assertEquals(1, saga.stepIndex)
-        assertEquals(mapOf("stock" to "STK-1"), repository.results(id))
+        assertEquals(mapOf("stock" to "STK-1"), results(id))
         assertTrue(repository.log.none { it.event == SagaEvents.RECORD_FAILED })
         assertEquals(SagaState.COMPLETED, runBlocking { engine.run(id, clock.now + 10.seconds) }.state)
     }
@@ -633,8 +664,8 @@ class SagaEngineTest {
         val counting = object : SagaTransactions {
             override suspend fun <T> inTransaction(block: () -> T): T { transactions++; return inMemory.inTransaction(block) }
         }
-        val definition = SagaDefinition("TEST", listOf(FakeStep("stock", { "STK-1" }), FakeStep("booking", { "RES-1" })))
-        val engine = SagaEngine(counting, repository, listOf(definition), clock = clock)
+        val definition = definition("TEST", listOf(FakeStep("stock", { "STK-1" }), FakeStep("booking", { "RES-1" })))
+        val engine = newEngine(counting, repository, listOf(definition), clock = clock)
         val id = engine.create("TEST", "item-1")
 
         val saga = runBlocking { engine.run(id, clock.now + 10.seconds) }
@@ -644,9 +675,8 @@ class SagaEngineTest {
 
     @Test
     fun `purgeFinished deletes finished sagas older than the retention, with their history, and nothing else`() {
-        val stock = object : SagaStep {
-            override val name = "stock"
-            override suspend fun execute(ctx: SagaContext): String = when (ctx.key) {
+        val stock = object : RefStep("stock") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String = when (ctx.key) {
                 "pending" -> throw StepNotSent("down")                     // stays RUNNING, retried later
                 "stuck" -> throw RuntimeException("timeout")              // no check: will get STUCK
                 "refused" -> throw StepRejected("no")                     // FAILED

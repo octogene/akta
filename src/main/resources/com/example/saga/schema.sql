@@ -14,6 +14,7 @@ CREATE TABLE saga (
     locked_until    timestamptz,
     last_error      text,
     traceparent     text,                                 -- W3C traceparent of the originating request
+    input           text,                                 -- the saga's input, encoded; written once
     created_at      timestamptz NOT NULL,
     updated_at      timestamptz NOT NULL,
     CONSTRAINT saga_lock CHECK ((step_status = 'IN_PROGRESS') = (locked_until IS NOT NULL))
@@ -37,7 +38,7 @@ CREATE TABLE saga_step_result (
     saga_id        uuid        NOT NULL REFERENCES saga (id),
     step_index     int         NOT NULL,
     step_name      text        NOT NULL,
-    external_ref   text,
+    output         text,                                  -- the step's output, encoded
     done_at        timestamptz NOT NULL,
     compensated_at timestamptz,
     PRIMARY KEY (saga_id, step_index)

@@ -21,10 +21,11 @@ interface SagaRepository {
     /** Unfinished, non-stuck sagas of the given [types] whose `nextAttemptAt` has passed, oldest first. */
     fun findDue(now: Instant, limit: Int, types: Collection<String>): List<Uuid>
 
-    /** References of the completed steps that were not compensated, by step name. */
+    /** Encoded outputs of the completed steps that were not compensated, by step name. */
     fun results(sagaId: Uuid): Map<String, String?>
 
-    fun saveResult(sagaId: Uuid, stepIndex: Int, stepName: String, ref: String?, now: Instant)
+    /** Saves a completed step's encoded output, replacing one already saved for that step. */
+    fun saveResult(sagaId: Uuid, stepIndex: Int, stepName: String, output: String?, now: Instant)
 
     fun markCompensated(sagaId: Uuid, stepIndex: Int, now: Instant)
 

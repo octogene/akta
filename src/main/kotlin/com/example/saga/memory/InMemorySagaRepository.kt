@@ -25,7 +25,7 @@ class InMemorySagaRepository : SagaRepository {
         val sagaId: Uuid,
         val stepIndex: Int,
         val stepName: String,
-        val ref: String?,
+        val output: String?,
         val doneAt: Instant,
         val compensatedAt: Instant? = null,
     )
@@ -58,11 +58,11 @@ class InMemorySagaRepository : SagaRepository {
             .map { it.id }
 
     override fun results(sagaId: Uuid): Map<String, String?> =
-        results.filter { it.sagaId == sagaId && it.compensatedAt == null }.associate { it.stepName to it.ref }
+        results.filter { it.sagaId == sagaId && it.compensatedAt == null }.associate { it.stepName to it.output }
 
-    override fun saveResult(sagaId: Uuid, stepIndex: Int, stepName: String, ref: String?, now: Instant) {
-        check(results.none { it.sagaId == sagaId && it.stepIndex == stepIndex }) { "Result already stored" }
-        results += StoredResult(sagaId, stepIndex, stepName, ref, now)
+    override fun saveResult(sagaId: Uuid, stepIndex: Int, stepName: String, output: String?, now: Instant) {
+        results.removeAll { it.sagaId == sagaId && it.stepIndex == stepIndex }
+        results += StoredResult(sagaId, stepIndex, stepName, output, now)
     }
 
     override fun markCompensated(sagaId: Uuid, stepIndex: Int, now: Instant) {

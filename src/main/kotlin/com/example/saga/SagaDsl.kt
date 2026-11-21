@@ -1,95 +1,114 @@
 package com.example.saga
 
+import kotlin.reflect.KType
+import kotlin.reflect.typeOf
+
 /*
  * Kotlin DSL on top of SagaDefinition / SagaStep. It builds exactly the same objects:
  * the engine does not know whether a saga was declared with the DSL or by hand.
  *
- *   val itemSetup = saga("ITEM_SETUP") {
- *       val stock = step("stock") {
- *           execute { stockClient.moveToTestStock(key) }            // returns the stock id
- *           compensate { stockId -> stockClient.revert(stockId!!) }  // receives this step's own result
- *           checkByLookup { stockClient.findByEpc(key) }
+ *   @Serializable data class BookingRequest(val customerId: String, val start: LocalDate, val end: LocalDate)
+ *   @Serializable data class Hold(val id: String, val warehouse: String)
+ *
+ *   val booking = saga<BookingRequest>("BOOKING") {
+ *       val hold = step<Hold>("hold-item") {
+ *           execute { stockClient.hold(key, until = input.end) }            // returns a Hold
+ *           compensate { own -> own?.let { stockClient.release(it.id) } }   // its own output
+ *           checkByLookup { stockClient.findHolds(key, input.start) }       // a List<Hold>
+ *           logAs { it.id }                                                  // what saga_log shows
  *       }
- *       step("booking") {
- *           execute { bookingClient.createResource(key, stockId = requireResult(stock)) }
- *           checkByLookup { bookingClient.findByEpc(key) }
+ *       step<String>("booking") {
+ *           execute { bookingClient.book(input.customerId, requireResult(hold).warehouse) }
  *       }
- *       onCompleted { items.markAvailable(key) }
- *       onFailed { items.markSetupFailed(key) }
+ *       onCompleted { bookings.confirm(key, input.start) }
  *   }
+ *
+ * Without a type argument there is no data: `saga("X") { … }` has no input, `step("x") { … }` no output.
  */
 
 @DslMarker
 annotation class SagaDslMarker
 
-/** Builds a saga definition. */
-fun saga(type: String, block: SagaBuilder.() -> Unit): SagaDefinition = SagaBuilder(type).apply(block).build()
+/** Builds a saga without input. */
+@JvmName("sagaWithoutInput")      // same JVM signature as the typed saga<I> below, once erased
+fun saga(type: String, block: SagaBuilder<Unit>.() -> Unit): SagaDefinition<Unit> =
+    SagaBuilder<Unit>(type, inputType = null).apply(block).build()
 
-/** Handle on a declared step, to read its result in a type-safe way: `result(stock)`. */
-class StepRef internal constructor(val name: String)
-
-/** Reference returned by [step], or null if it returned none or has not run. */
-fun SagaContext.result(step: StepRef): String? = result(step.name)
-
-/** Like [result], for a step that always returns a reference. */
-fun SagaContext.requireResult(step: StepRef): String =
-    result(step.name) ?: error("Step '${step.name}' has no result in saga $sagaId")
+/** Builds a saga whose input is an [I]: given to `create`, read by every step as `input`. */
+inline fun <reified I> saga(type: String, noinline block: SagaBuilder<I>.() -> Unit): SagaDefinition<I> =
+    SagaBuilder<I>(type, typeOf<I>()).apply(block).build()
 
 @SagaDslMarker
-class SagaBuilder internal constructor(private val type: String) {
-    private val steps = mutableListOf<SagaStep>()
-    private var onCompleted: (SagaContext) -> Unit = {}
-    private var onFailed: (SagaContext) -> Unit = {}
+class SagaBuilder<I> @PublishedApi internal constructor(
+    private val type: String,
+    private val inputType: KType?,
+) {
+    private val steps = mutableListOf<SagaStep<I, *>>()
+    private var onCompleted: SagaContext<I>.() -> Unit = {}
+    private var onFailed: SagaContext<I>.() -> Unit = {}
 
-    /** Declares the next step. Steps run in declaration order. */
-    fun step(name: String, block: StepBuilder.() -> Unit): StepRef {
-        steps += StepBuilder(name).apply(block).build()
+    /** Declares the next step, without output. Steps run in declaration order. */
+    @JvmName("stepWithoutOutput")  // same JVM signature as the typed step<O> below, once erased
+    fun step(name: String, block: StepBuilder<I, Unit>.() -> Unit): StepRef<Unit> = addStep(name, null, block)
+
+    /** Declares the next step, whose call returns an [O]. Steps run in declaration order. */
+    inline fun <reified O> step(name: String, noinline block: StepBuilder<I, O>.() -> Unit): StepRef<O> =
+        addStep(name, typeOf<O>(), block)
+
+    @PublishedApi
+    internal fun <O> addStep(name: String, outputType: KType?, block: StepBuilder<I, O>.() -> Unit): StepRef<O> {
+        steps += StepBuilder<I, O>(name, outputType).apply(block).build()
         return StepRef(name)
     }
 
     /** Runs INSIDE the transaction that completes the saga. No external calls. */
-    fun onCompleted(block: SagaContext.() -> Unit) {
+    fun onCompleted(block: SagaContext<I>.() -> Unit) {
         onCompleted = block
     }
 
     /** Runs INSIDE the transaction that ends the saga after compensation. No external calls. */
-    fun onFailed(block: SagaContext.() -> Unit) {
+    fun onFailed(block: SagaContext<I>.() -> Unit) {
         onFailed = block
     }
 
-    internal fun build() = SagaDefinition(type, steps.toList(), onCompleted, onFailed)
+    @PublishedApi
+    internal fun build() = SagaDefinition(type, inputType, steps.toList(), onCompleted, onFailed)
 }
 
 @SagaDslMarker
-class StepBuilder internal constructor(private val name: String) {
-    private var executeBlock: (suspend SagaContext.() -> String?)? = null
-    private var compensateBlock: suspend SagaContext.(ownResult: String?) -> Unit = {}
-    private var checkBlock: suspend SagaContext.() -> CheckResult = { CheckResult.CannotTell }
+class StepBuilder<I, O> @PublishedApi internal constructor(
+    private val name: String,
+    private val outputType: KType?,
+) {
+    private var executeBlock: (suspend SagaContext<I>.() -> O)? = null
+    private var compensateBlock: suspend SagaContext<I>.(own: O?) -> Unit = {}
+    private var checkBlock: suspend SagaContext<I>.() -> CheckResult<O> = { CheckResult.CannotTell }
+    private var describeBlock: ((O) -> String?)? = null
 
     /**
-     * The call. Return the external reference to keep, or null.
+     * The call. Returns the step's output.
      * Throw [StepRejected] or [StepNotSent] when you know nothing was applied.
      */
-    fun execute(block: suspend SagaContext.() -> String?) {
+    fun execute(block: suspend SagaContext<I>.() -> O) {
         check(executeBlock == null) { "execute already declared for step '$name'" }
         executeBlock = block
     }
 
-    /** Undo. Receives the reference this step returned. Must be safe to run more than once. */
-    fun compensate(block: suspend SagaContext.(ownResult: String?) -> Unit) {
+    /** Undo. Receives this step's own output. Must be safe to run more than once. */
+    fun compensate(block: suspend SagaContext<I>.(own: O?) -> Unit) {
         compensateBlock = block
     }
 
-    /** After an unknown outcome: was the step applied? */
-    fun check(block: suspend SagaContext.() -> CheckResult) {
+    /** After an unknown outcome: was the step applied? [CheckResult.Done] carries the output found. */
+    fun check(block: suspend SagaContext<I>.() -> CheckResult<O>) {
         checkBlock = block
     }
 
     /**
      * Shortcut for the usual check: look the effect up in the external system.
-     * No match → not done; one match → done (its reference is kept); several → cannot tell.
+     * No match → not done; one match → done (it becomes the step's output); several → cannot tell.
      */
-    fun checkByLookup(lookup: suspend SagaContext.() -> List<String>) {
+    fun checkByLookup(lookup: suspend SagaContext<I>.() -> List<O>) {
         checkBlock = {
             val found = lookup()
             when (found.size) {
@@ -100,16 +119,33 @@ class StepBuilder internal constructor(private val name: String) {
         }
     }
 
-    internal fun build(): SagaStep {
+    /**
+     * What `saga_log` records about the output: an identifier, never personal data.
+     * Default: the output itself for a `String` output, nothing for any other type.
+     */
+    fun logAs(block: (O) -> String?) {
+        describeBlock = block
+    }
+
+    @PublishedApi
+    internal fun build(): SagaStep<I, O> {
         val executeBlock = requireNotNull(executeBlock) { "Step '$name' has no execute block" }
         val compensateBlock = compensateBlock
         val checkBlock = checkBlock
+        val describeBlock = describeBlock ?: if (outputType?.classifier == String::class) {
+            { output: O -> output as String? }
+        } else {
+            { _: O -> null }
+        }
         val stepName = name
-        return object : SagaStep {
+        val type = outputType
+        return object : SagaStep<I, O> {
             override val name = stepName
-            override suspend fun execute(ctx: SagaContext): String? = ctx.executeBlock()
-            override suspend fun compensate(ctx: SagaContext) = ctx.compensateBlock(ctx.result(stepName))
-            override suspend fun check(ctx: SagaContext): CheckResult = ctx.checkBlock()
+            override val outputType = type
+            override suspend fun execute(ctx: SagaContext<I>): O = ctx.executeBlock()
+            override suspend fun compensate(ctx: SagaContext<I>, own: O?) = ctx.compensateBlock(own)
+            override suspend fun check(ctx: SagaContext<I>): CheckResult<O> = ctx.checkBlock()
+            override fun describe(output: O): String? = describeBlock(output)
             override fun toString() = "SagaStep($stepName)"
         }
     }

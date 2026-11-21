@@ -58,6 +58,8 @@ data class SagaRecord(
      * [SagaConfig.maxAttempts]: past it the step is STUCK, like a check that cannot tell.
      */
     val checkFailures: Int = 0,
+    /** The saga's input, as written by the engine's [SagaSerializer]. Null when the saga has none. Never changes. */
+    val input: String? = null,
 )
 
 /** One line of the saga history. */
@@ -83,7 +85,7 @@ object SagaEvents {
     const val LOCK_EXPIRED = "LOCK_EXPIRED"
     /** A call ended after its lock expired and another instance took over. */
     const val LATE_RESULT_IGNORED = "LATE_RESULT_IGNORED"
-    /** The outcome of a call could not be saved: the saga is STUCK, the outcome is in the detail. */
+    /** The outcome of a call could not be saved: the saga is STUCK; a successful call's output is kept with its result. */
     const val RECORD_FAILED = "RECORD_FAILED"
     /** resumeDue could not run the saga (database error, bug…): postponed by [SagaConfig.resumeFailureDelay]. */
     const val RESUME_FAILED = "RESUME_FAILED"
@@ -95,7 +97,9 @@ object SagaEvents {
      * Outcomes of a call are logged as "<action>:<outcome>":
      *   EXECUTE:Done, EXECUTE:Rejected, EXECUTE:NotSent, EXECUTE:Unknown,
      *   CHECK:Done, CHECK:NotDone, CHECK:CannotTell, CHECK:CheckFailed,
-     *   COMPENSATE:Compensated, COMPENSATE:CompensationFailed.
+     *   COMPENSATE:Compensated, COMPENSATE:CompensationFailed,
+     *   EXECUTE:OutputUnstorable, CHECK:OutputUnstorable (the call was made but its output could not be
+     *   encoded, or is over SagaConfig.maxDataBytes: the step is STUCK).
      */
 }
 
@@ -114,9 +118,15 @@ data class SagaConfig(
     val maxBackoff: Duration = 1.hours,
     /** Wait before resumeDue tries again a saga whose run threw, so that it does not block the others. */
     val resumeFailureDelay: Duration = 1.minutes,
+    /**
+     * Largest encoded input or step output, in UTF-8 bytes. Inputs and outputs are for parameters and
+     * identifiers: anything large belongs in a business table, referenced by id.
+     */
+    val maxDataBytes: Int = 16 * 1024,
 ) {
     init {
         require(maxAttempts >= 1) { "maxAttempts must be at least 1" }
+        require(maxDataBytes >= 1) { "maxDataBytes must be at least 1" }
     }
 
     /** 1, 2, 4… minutes, capped at [maxBackoff]. */

@@ -24,6 +24,7 @@ import org.jetbrains.exposed.v1.jdbc.insertIgnore
 import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.update
+import org.jetbrains.exposed.v1.jdbc.upsert
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import kotlin.time.Instant
@@ -46,6 +47,7 @@ object SagaTable : Table("saga") {
     val lockedUntil = timestampWithTimeZone("locked_until").nullable()
     val lastError = text("last_error").nullable()
     val traceparent = text("traceparent").nullable()
+    val input = text("input").nullable()
     val createdAt = timestampWithTimeZone("created_at")
     val updatedAt = timestampWithTimeZone("updated_at")
     override val primaryKey = PrimaryKey(id)
@@ -56,7 +58,7 @@ object SagaStepResultTable : Table("saga_step_result") {
     val sagaId = uuid("saga_id")
     val stepIndex = integer("step_index")
     val stepName = text("step_name")
-    val externalRef = text("external_ref").nullable()
+    val output = text("output").nullable()
     val doneAt = timestampWithTimeZone("done_at")
     val compensatedAt = timestampWithTimeZone("compensated_at").nullable()
     override val primaryKey = PrimaryKey(sagaId, stepIndex)
@@ -93,6 +95,7 @@ class ExposedSagaRepository : SagaRepository {
             it[type] = record.type
             it[businessKey] = record.key
             it[createdAt] = record.createdAt.utc()
+            it[input] = record.input                // written once: write() below never touches it
             write(it, record, now)
         }.insertedCount
         if (inserted == 0) throw DuplicateSagaException(record.key)
@@ -130,21 +133,16 @@ class ExposedSagaRepository : SagaRepository {
     override fun results(sagaId: Uuid): Map<String, String?> =
         SagaStepResultTable.selectAll()
             .where { (SagaStepResultTable.sagaId eq sagaId) and SagaStepResultTable.compensatedAt.isNull() }
-            .associate { it[SagaStepResultTable.stepName] to it[SagaStepResultTable.externalRef] }
+            .associate { it[SagaStepResultTable.stepName] to it[SagaStepResultTable.output] }
 
-    override fun saveResult(
-        sagaId: Uuid,
-        stepIndex: Int,
-        stepName: String,
-        ref: String?,
-        now: Instant
-    ) {
-        SagaStepResultTable.insert {
+    override fun saveResult(sagaId: Uuid, stepIndex: Int, stepName: String, output: String?, now: Instant) {
+        SagaStepResultTable.upsert {
             it[this.sagaId] = sagaId
             it[this.stepIndex] = stepIndex
             it[this.stepName] = stepName
-            it[externalRef] = ref
+            it[this.output] = output
             it[doneAt] = now.utc()
+            it[compensatedAt] = null
         }
     }
 
@@ -196,6 +194,7 @@ class ExposedSagaRepository : SagaRepository {
         lastError = this[SagaTable.lastError],
         traceparent = this[SagaTable.traceparent],
         createdAt = this[SagaTable.createdAt].toKotlin(),
+        input = this[SagaTable.input],
     )
 
     override fun purgeFinished(before: Instant, limit: Int): Int {
