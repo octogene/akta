@@ -389,13 +389,14 @@ class SagaEngine(
      * compensates at once. One with a call in flight, or an outcome still to check, compensates as soon
      * as that outcome is recorded, since the call may have been applied and must be undone too. A stuck
      * saga stays stuck until a human retries or aborts it. Refused for a finished saga: undoing it is a
-     * new saga.
+     * new saga. [reason] is kept in [SagaRecord.cancelReason]; a second cancellation is only logged.
      */
     suspend fun cancel(id: Uuid, reason: String, actor: String): SagaRecord =
         manual(id, actor, SagaEvents.CANCEL_REQUESTED) { r, now ->
             require(!r.state.isFinished) { "Saga $id is finished: undoing it is a new saga" }
             if (r.state != SagaState.RUNNING) return@manual ManualChange(r, detail = reason)   // already compensating
-            val requested = r.copy(cancelRequestedAt = r.cancelRequestedAt ?: now, lastError = "Cancelled: $reason")
+            // The first cancellation counts: a second one is only logged.
+            val requested = if (r.cancelRequestedAt != null) r else r.copy(cancelRequestedAt = now, cancelReason = reason)
             ManualChange(cancelIfRequested(requested, now), detail = reason)
         }
 

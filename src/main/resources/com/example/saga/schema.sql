@@ -16,9 +16,11 @@ CREATE TABLE saga (
     traceparent     text,                                 -- W3C traceparent of the originating request
     input           text,                                 -- the saga's input, encoded; written once
     cancel_requested_at timestamptz,                      -- set by cancel: compensate once no call is in flight
+    cancel_reason   text,                                 -- given to cancel; who cancelled is in saga_log
     created_at      timestamptz NOT NULL,
     updated_at      timestamptz NOT NULL,
-    CONSTRAINT saga_lock CHECK ((step_status = 'IN_PROGRESS') = (locked_until IS NOT NULL))
+    CONSTRAINT saga_lock CHECK ((step_status = 'IN_PROGRESS') = (locked_until IS NOT NULL)),
+    CONSTRAINT saga_cancel CHECK ((cancel_requested_at IS NULL) = (cancel_reason IS NULL))
 );
 
 -- At most one unfinished saga per business key.

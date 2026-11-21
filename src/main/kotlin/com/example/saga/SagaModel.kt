@@ -64,6 +64,11 @@ data class SagaRecord(
     val input: String? = null,
     /** Set by [SagaEngine.cancel]: the saga compensates as soon as no call of it is in flight. */
     val cancelRequestedAt: Instant? = null,
+    /**
+     * Why the saga was cancelled, as given to [SagaEngine.cancel]; set with [cancelRequestedAt] and never
+     * changed, unlike [lastError]. Who cancelled is in `saga_log` (`CANCEL_REQUESTED`).
+     */
+    val cancelReason: String? = null,
 )
 
 /** One line of the saga history. */

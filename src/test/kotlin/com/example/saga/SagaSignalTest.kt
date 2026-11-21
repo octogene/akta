@@ -255,6 +255,7 @@ class SagaSignalTest {
         val cancelled = runBlocking { engine.cancel(id, "customer cancelled", "support") }
 
         assertEquals(SagaState.FAILED, cancelled.state)
+        assertEquals("customer cancelled", cancelled.cancelReason)
         assertEquals(listOf<String?>("P-1"), released)
         assertEquals(SignalResult.Ignored(id), engine.pay(id))                  // too late now
         assertNull(repository.signal(id, "payment"))
@@ -279,6 +280,36 @@ class SagaSignalTest {
         assertTrue(calls.none { it.startsWith("confirm") })
         assertNull(repository.signal(id, "payment"))
         assertEquals("ignored: cancelled ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).single())
+    }
+
+    @Test
+    fun `the cancellation reason survives a stuck step and its retry`() {
+        lateinit var engine: SagaEngine
+        lateinit var id: Uuid
+        val definition = saga("STUCK") {
+            step<String>("create-payment") {
+                execute {
+                    runBlocking { engine.cancel(id, "customer cancelled", "support") }
+                    runBlocking { engine.cancel(id, "second click", "support") }   // only logged
+                    throw java.io.IOException("read timeout")                    // unknown outcome
+                }
+                check { CheckResult.CannotTell }                                 // a human must look
+            }
+        }
+        engine = engine(definition, SagaConfig(settleDelay = 1.seconds))
+        id = engine.create(definition, "R-1")
+        engine.run(id)
+        engine.resumeAfter(2.seconds)
+
+        val stuck = runBlocking { engine.find(id)!! }
+        assertEquals(StepStatus.STUCK, stuck.stepStatus)
+        assertEquals("customer cancelled", stuck.cancelReason)                  // lastError says why it is stuck
+
+        // The operator found it was not applied: retry. The saga compensates instead of executing it again.
+        val done = runBlocking { engine.retry(id, "operator") }
+        assertEquals(SagaState.FAILED, done.state)
+        assertEquals("customer cancelled", done.cancelReason)
+        assertEquals(listOf("customer cancelled", "second click"), details(SagaEvents.CANCEL_REQUESTED))
     }
 
     @Test

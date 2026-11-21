@@ -49,6 +49,7 @@ object SagaTable : Table("saga") {
     val traceparent = text("traceparent").nullable()
     val input = text("input").nullable()
     val cancelRequestedAt = timestampWithTimeZone("cancel_requested_at").nullable()
+    val cancelReason = text("cancel_reason").nullable()
     val createdAt = timestampWithTimeZone("created_at")
     val updatedAt = timestampWithTimeZone("updated_at")
     override val primaryKey = PrimaryKey(id)
@@ -184,6 +185,7 @@ class ExposedSagaRepository : SagaRepository {
         s[SagaTable.attempts] = r.attempts
         s[SagaTable.checkFailures] = r.checkFailures
         s[SagaTable.cancelRequestedAt] = r.cancelRequestedAt?.utc()
+        s[SagaTable.cancelReason] = r.cancelReason
         s[SagaTable.nextAttemptAt] = r.nextAttemptAt.utc()
         s[SagaTable.lockedUntil] = r.lockedUntil?.utc()
         s[SagaTable.lastError] = r.lastError?.take(MAX_TEXT)
@@ -207,6 +209,7 @@ class ExposedSagaRepository : SagaRepository {
         createdAt = this[SagaTable.createdAt].toKotlin(),
         input = this[SagaTable.input],
         cancelRequestedAt = this[SagaTable.cancelRequestedAt]?.toKotlin(),
+        cancelReason = this[SagaTable.cancelReason],
     )
 
     override fun purgeFinished(before: Instant, limit: Int): Int {
