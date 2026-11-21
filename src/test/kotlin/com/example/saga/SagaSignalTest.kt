@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Clock
 import kotlin.time.Duration
@@ -184,6 +185,7 @@ class SagaSignalTest {
         assertEquals("confirm P-9", calls.last())
         assertEquals(SignalResult.Ignored(id), engine.pay(id))                  // the event, too late
         assertEquals("ignored: too late ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).last())
+        assertNull(repository.signal(id, "payment"))                            // a late value is not kept
     }
 
     @Test
@@ -255,6 +257,7 @@ class SagaSignalTest {
         assertEquals(SagaState.FAILED, cancelled.state)
         assertEquals(listOf<String?>("P-1"), released)
         assertEquals(SignalResult.Ignored(id), engine.pay(id))                  // too late now
+        assertNull(repository.signal(id, "payment"))
     }
 
     @Test

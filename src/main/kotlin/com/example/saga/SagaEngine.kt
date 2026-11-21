@@ -314,26 +314,24 @@ class SagaEngine(
             val detail = listOfNotNull(what, describe(step, value)?.let { "ref=$it" }).joinToString(" ")
             log(r.id, index, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
         }
+        // Past the step (moved on, compensating or finished): the saga never goes back, so nothing would
+        // read the signal. Not stored: its value may hold personal data, kept for nothing until the purge.
+        if (r.state != SagaState.RUNNING || r.stepIndex > index) {
+            received("ignored: too late")
+            return SignalResult.Ignored(r.id)
+        }
         if (!repository.saveSignal(r.id, name, encoded, now)) {
             received("ignored: already received")
             return SignalResult.Ignored(r.id)
         }
-        val running = r.state == SagaState.RUNNING
-        return when {
-            running && r.stepIndex == index && r.stepStatus == StepStatus.WAITING -> {
-                received("delivered")
-                applySignal(r, def, step, context(r, def), value, encoded, now)
-                SignalResult.Delivered(r.id)
-            }
+        return if (r.stepIndex == index && r.stepStatus == StepStatus.WAITING) {
+            received("delivered")
+            applySignal(r, def, step, context(r, def), value, encoded, now)
+            SignalResult.Delivered(r.id)
+        } else {
             // Not waiting yet (an earlier step runs, or this one is ready, checking or stuck): kept for it.
-            running && r.stepIndex <= index -> {
-                received("stored")
-                SignalResult.Stored(r.id)
-            }
-            else -> {
-                received("ignored: too late")
-                SignalResult.Ignored(r.id)
-            }
+            received("stored")
+            SignalResult.Stored(r.id)
         }
     }
 
