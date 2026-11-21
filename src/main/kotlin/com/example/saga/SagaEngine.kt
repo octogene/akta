@@ -265,7 +265,7 @@ class SagaEngine(
                 "A call of saga $id may have been applied: wait for its outcome"
             }
             require(!currentStepApplied || r.stepStatus == StepStatus.STUCK) {
-                "The current step of saga $id is READY: it was not applied"
+                "The current step of saga $id is ${r.stepStatus}: it was not applied"
             }
             val updated = if (currentStepApplied) {
                 val step = definition(r.type).stepAt(r.stepIndex)
