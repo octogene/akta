@@ -320,6 +320,11 @@ class SagaEngine(
             received("ignored: too late")
             return SignalResult.Ignored(r.id)
         }
+        // Cancelled while a call is in flight: whatever its outcome, the saga compensates and never waits again.
+        if (r.cancelRequestedAt != null) {
+            received("ignored: cancelled")
+            return SignalResult.Ignored(r.id)
+        }
         if (!repository.saveSignal(r.id, name, encoded, now)) {
             received("ignored: already received")
             return SignalResult.Ignored(r.id)

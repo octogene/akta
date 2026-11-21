@@ -266,6 +266,7 @@ class SagaSignalTest {
         lateinit var id: Uuid
         val definition = reservation(pay = {
             runBlocking { engine.cancel(id, "customer cancelled", "support") }   // while the payment is created
+            assertEquals(SignalResult.Ignored(id), engine.pay(id))              // the saga will never wait for it
             "P-1"
         })
         engine = engine(definition)
@@ -276,6 +277,8 @@ class SagaSignalTest {
         assertEquals(SagaState.FAILED, done.state)
         assertEquals(listOf<String?>("P-1"), released)                          // the payment just made is undone
         assertTrue(calls.none { it.startsWith("confirm") })
+        assertNull(repository.signal(id, "payment"))
+        assertEquals("ignored: cancelled ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).single())
     }
 
     @Test
