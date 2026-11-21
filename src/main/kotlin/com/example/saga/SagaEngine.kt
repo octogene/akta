@@ -776,10 +776,8 @@ class SagaEngine(
     // ---- Transitions ------------------------------------------------------------------------
 
     /**
-     * Step done: move on to the next one, or complete the saga.
-     *
-     * The current step is done: on to the next one, or the saga is completed. A saga whose cancellation
-     * was requested compensates instead, this step included, even when it was the last one.
+     * Step done: move on to the next one, or complete the saga. A saga whose cancellation was requested
+     * compensates instead, this step included, even when it was the last one.
      */
     private fun next(r: SagaRecord, def: AnyDefinition, now: Instant): SagaRecord {
         if (r.cancelRequestedAt != null && r.state == SagaState.RUNNING) return compensateFrom(r, r.stepIndex, now)
