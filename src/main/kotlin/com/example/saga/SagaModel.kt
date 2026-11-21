@@ -31,8 +31,24 @@ enum class StepStatus {
     WAITING,
     /** The outcome of the last call is unknown: a check is scheduled at `nextAttemptAt`. */
     UNKNOWN,
-    /** Blocked: a human must step in (retry, mark as done, or abort). */
+    /** Blocked: a human must step in (retry, mark as done, or abort). Why: [SagaRecord.stuckReason]. */
     STUCK,
+}
+
+/** Why a saga is STUCK. What an operator should do depends on it. Stored: never rename one. */
+enum class StuckReason {
+    /** A check could not tell whether the step was applied. Look in the external system: `markDone` or `retry`. */
+    CANNOT_TELL,
+    /** A check kept throwing. As [CANNOT_TELL], once the lookup works again. */
+    CHECK_FAILING,
+    /** [SagaConfig.maxAttempts] reached (not sent, re-executed, failing compensations…). Fix the cause, then `retry`. */
+    TOO_MANY_ATTEMPTS,
+    /** The call was made, but its output could not be encoded or is too large. `markDone` with the output, or `abort`. */
+    OUTPUT_UNSTORABLE,
+    /** The outcome could not be recorded (a hook threw…). Fix it, then `markDone(id, null)`: the output is saved. */
+    RECORD_FAILED,
+    /** A signal step's timeout passed, and it has no check. Deliver the signal and `retry`, or `abort`. */
+    NO_SIGNAL,
 }
 
 /** The persisted state of a saga: one row. */
@@ -69,6 +85,30 @@ data class SagaRecord(
      * changed, unlike [lastError]. Who cancelled is in `saga_log` (`CANCEL_REQUESTED`).
      */
     val cancelReason: String? = null,
+    /** Why the saga is STUCK; null when it is not. */
+    val stuckReason: StuckReason? = null,
+    /** When the saga became STUCK; null when it is not. */
+    val stuckAt: Instant? = null,
+)
+
+/** Where [SagaEngine.findStuck] continues: after this saga. */
+data class StuckCursor(val stuckAt: Instant, val id: Uuid) {
+    companion object {
+        /** The cursor after [record], the last stuck saga of a page. */
+        fun after(record: SagaRecord) =
+            StuckCursor(checkNotNull(record.stuckAt) { "Saga ${record.id} is not stuck" }, record.id)
+    }
+}
+
+/** What [SagaEngine.stats] measures, for gauges and alerts. Finished sagas are not counted. */
+data class SagaStats(
+    /** Unfinished sagas by state and step status, e.g. (RUNNING, WAITING) to 12. */
+    val unfinished: Map<Pair<SagaState, StepStatus>, Long>,
+    val stuckByReason: Map<StuckReason, Long>,
+    /** When the oldest unfinished saga that is not stuck was created. Waiting sagas count. */
+    val oldestUnfinishedAt: Instant?,
+    /** The oldest `nextAttemptAt` already due: how far behind the recovery job is. Null when none is due. */
+    val oldestDueAt: Instant?,
 )
 
 /** One line of the saga history. */
@@ -101,6 +141,8 @@ object SagaEvents {
     const val MANUAL_RETRY = "MANUAL_RETRY"
     const val MANUAL_DONE = "MANUAL_DONE"
     const val MANUAL_ABORT = "MANUAL_ABORT"
+    /** A stuck compensation was done by hand ([SagaEngine.markCompensated]). */
+    const val MANUAL_COMPENSATED = "MANUAL_COMPENSATED"
     /** A signal step started waiting; the detail gives the signal and the deadline. */
     const val WAIT_STARTED = "WAIT_STARTED"
     /** A signal step's timeout passed without its signal: checked, or stuck. */

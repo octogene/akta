@@ -5,8 +5,17 @@ import com.example.saga.SagaLogEntry
 import com.example.saga.SagaRecord
 import com.example.saga.SagaRepository
 import com.example.saga.SagaState
+import com.example.saga.SagaStats
 import com.example.saga.StepStatus
+import com.example.saga.StuckCursor
+import com.example.saga.StuckReason
+import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.count
+import org.jetbrains.exposed.v1.core.greater
+import org.jetbrains.exposed.v1.core.min
+import org.jetbrains.exposed.v1.core.or
 import org.jetbrains.exposed.v1.core.Table
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
@@ -50,6 +59,8 @@ object SagaTable : Table("saga") {
     val input = text("input").nullable()
     val cancelRequestedAt = timestampWithTimeZone("cancel_requested_at").nullable()
     val cancelReason = text("cancel_reason").nullable()
+    val stuckReason = text("stuck_reason").nullable()
+    val stuckAt = timestampWithTimeZone("stuck_at").nullable()
     val createdAt = timestampWithTimeZone("created_at")
     val updatedAt = timestampWithTimeZone("updated_at")
     override val primaryKey = PrimaryKey(id)
@@ -186,6 +197,8 @@ class ExposedSagaRepository : SagaRepository {
         s[SagaTable.checkFailures] = r.checkFailures
         s[SagaTable.cancelRequestedAt] = r.cancelRequestedAt?.utc()
         s[SagaTable.cancelReason] = r.cancelReason
+        s[SagaTable.stuckReason] = r.stuckReason?.name
+        s[SagaTable.stuckAt] = r.stuckAt?.utc()
         s[SagaTable.nextAttemptAt] = r.nextAttemptAt.utc()
         s[SagaTable.lockedUntil] = r.lockedUntil?.utc()
         s[SagaTable.lastError] = r.lastError?.take(MAX_TEXT)
@@ -210,6 +223,19 @@ class ExposedSagaRepository : SagaRepository {
         input = this[SagaTable.input],
         cancelRequestedAt = this[SagaTable.cancelRequestedAt]?.toKotlin(),
         cancelReason = this[SagaTable.cancelReason],
+        stuckReason = this[SagaTable.stuckReason]?.let(StuckReason::valueOf),
+        stuckAt = this[SagaTable.stuckAt]?.toKotlin(),
+    )
+
+    private fun ResultRow.toEntry() = SagaLogEntry(
+        sagaId = this[SagaLogTable.sagaId],
+        at = this[SagaLogTable.at].toKotlin(),
+        stepIndex = this[SagaLogTable.stepIndex],
+        stepName = this[SagaLogTable.stepName],
+        event = this[SagaLogTable.event],
+        detail = this[SagaLogTable.detail],
+        actor = this[SagaLogTable.actor],
+        traceId = this[SagaLogTable.traceId],
     )
 
     override fun purgeFinished(before: Instant, limit: Int): Int {
@@ -241,6 +267,58 @@ class ExposedSagaRepository : SagaRepository {
             .where { (SagaSignalTable.sagaId eq sagaId) and (SagaSignalTable.signalName eq name) }
             .singleOrNull()
             ?.get(SagaSignalTable.value)
+
+    // ---- Reads for operators: each one on a partial index (saga_stuck, saga_due) or a log index ----------
+
+    override fun findStuck(limit: Int, types: Collection<String>?, after: StuckCursor?): List<SagaRecord> =
+        SagaTable.selectAll()
+            .where {
+                var op: Op<Boolean> = (SagaTable.stepStatus eq StepStatus.STUCK.name) and ofTypes(types)
+                if (after != null) {
+                    val at = after.stuckAt.utc()
+                    op = op and ((SagaTable.stuckAt greater at) or ((SagaTable.stuckAt eq at) and (SagaTable.id greater after.id)))
+                }
+                op
+            }
+            .orderBy(SagaTable.stuckAt to SortOrder.ASC, SagaTable.id to SortOrder.ASC)
+            .limit(limit)
+            .map { it.toRecord() }
+
+    override fun history(sagaId: Uuid): List<SagaLogEntry> =
+        SagaLogTable.selectAll()
+            .where { SagaLogTable.sagaId eq sagaId }
+            .orderBy(SagaLogTable.at to SortOrder.ASC, SagaLogTable.id to SortOrder.ASC)
+            .map { it.toEntry() }
+
+    override fun historyByTrace(traceId: String, limit: Int): List<SagaLogEntry> =
+        SagaLogTable.selectAll()
+            .where { SagaLogTable.traceId eq traceId }
+            .orderBy(SagaLogTable.at to SortOrder.ASC, SagaLogTable.id to SortOrder.ASC)
+            .limit(limit)
+            .map { it.toEntry() }
+
+    override fun stats(now: Instant, types: Collection<String>?): SagaStats {
+        val unfinished = (SagaTable.state inList UNFINISHED) and ofTypes(types)
+        val notStuck = SagaTable.stepStatus neq StepStatus.STUCK.name
+        val count = SagaTable.id.count()
+        val byStatus = SagaTable.select(SagaTable.state, SagaTable.stepStatus, count)
+            .where { unfinished }
+            .groupBy(SagaTable.state, SagaTable.stepStatus)
+            .associate { (SagaState.valueOf(it[SagaTable.state]) to StepStatus.valueOf(it[SagaTable.stepStatus])) to it[count] }
+        val byReason = SagaTable.select(SagaTable.stuckReason, count)
+            .where { unfinished and (SagaTable.stepStatus eq StepStatus.STUCK.name) }
+            .groupBy(SagaTable.stuckReason)
+            .associate { StuckReason.valueOf(checkNotNull(it[SagaTable.stuckReason])) to it[count] }
+        val oldestCreated = SagaTable.createdAt.min()
+        val oldestUnfinished = SagaTable.select(oldestCreated).where { unfinished and notStuck }.single()[oldestCreated]
+        val oldestNext = SagaTable.nextAttemptAt.min()
+        val oldestDue = SagaTable.select(oldestNext)
+            .where { unfinished and notStuck and (SagaTable.nextAttemptAt lessEq now.utc()) }
+            .single()[oldestNext]
+        return SagaStats(byStatus, byReason, oldestUnfinished?.toKotlin(), oldestDue?.toKotlin())
+    }
+
+    private fun ofTypes(types: Collection<String>?): Op<Boolean> = if (types == null) Op.TRUE else SagaTable.type inList types
 
     private companion object {
         const val MAX_TEXT = 2000

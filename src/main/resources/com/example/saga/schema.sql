@@ -17,10 +17,15 @@ CREATE TABLE saga (
     input           text,                                 -- the saga's input, encoded; written once
     cancel_requested_at timestamptz,                      -- set by cancel: compensate once no call is in flight
     cancel_reason   text,                                 -- given to cancel; who cancelled is in saga_log
+    stuck_reason    text        CHECK (stuck_reason IN ('CANNOT_TELL', 'CHECK_FAILING', 'TOO_MANY_ATTEMPTS',
+                                                        'OUTPUT_UNSTORABLE', 'RECORD_FAILED', 'NO_SIGNAL')),
+    stuck_at        timestamptz,                          -- when it became STUCK
     created_at      timestamptz NOT NULL,
     updated_at      timestamptz NOT NULL,
     CONSTRAINT saga_lock CHECK ((step_status = 'IN_PROGRESS') = (locked_until IS NOT NULL)),
-    CONSTRAINT saga_cancel CHECK ((cancel_requested_at IS NULL) = (cancel_reason IS NULL))
+    CONSTRAINT saga_cancel CHECK ((cancel_requested_at IS NULL) = (cancel_reason IS NULL)),
+    CONSTRAINT saga_stuck_reason CHECK ((step_status = 'STUCK') = (stuck_reason IS NOT NULL AND stuck_at IS NOT NULL)),
+    CONSTRAINT saga_stuck_at CHECK ((stuck_reason IS NULL) = (stuck_at IS NULL))
 );
 
 -- At most one unfinished saga per business key.
@@ -32,7 +37,7 @@ CREATE INDEX saga_due ON saga (next_attempt_at)
     WHERE state IN ('RUNNING', 'COMPENSATING') AND step_status <> 'STUCK';
 
 -- Monitoring: stuck sagas.
-CREATE INDEX saga_stuck ON saga (updated_at) WHERE step_status = 'STUCK';
+CREATE INDEX saga_stuck ON saga (stuck_at, id) WHERE step_status = 'STUCK';
 
 -- Retention (SagaEngine.purgeFinished): finished sagas, oldest first.
 CREATE INDEX saga_finished ON saga (updated_at) WHERE state IN ('COMPLETED', 'FAILED');

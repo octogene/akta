@@ -14,6 +14,9 @@ import com.example.saga.StepNotSent
 import com.example.saga.StepRejected
 import com.example.saga.KotlinxJsonSagaSerializer
 import com.example.saga.SagaTransactions
+import com.example.saga.SagaEvent
+import com.example.saga.SagaListener
+import com.example.saga.StuckCursor
 import com.example.saga.StepStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -96,6 +99,9 @@ class SagaStressIT {
     private val violations = ConcurrentHashMap.newKeySet<String>()
     private val crashes = AtomicInteger()
     private val manualActions = ConcurrentHashMap<String, AtomicInteger>()
+    private val stuckReasons = ConcurrentHashMap<String, AtomicInteger>()
+    /** Every event the listeners were told about, from every engine. */
+    private val reported = java.util.concurrent.ConcurrentLinkedQueue<SagaEvent>()
     private val deliveries = ConcurrentHashMap<String, AtomicInteger>()
     private val cancellations = ConcurrentHashMap<String, AtomicInteger>()
 
@@ -306,6 +312,7 @@ class SagaStressIT {
     private fun newEngine(types: Set<String> = stepsByType.keys) = SagaEngine(
         FlakyTransactions(ExposedSagaTransactions(pg.database)), ExposedSagaRepository(),
         definitions.filterKeys { it in types }.values.toList(), serializer, config,
+        listeners = listOf(SagaListener { reported += it }),
     )
 
     /** A database failure injected by [FlakyTransactions]. */
@@ -520,23 +527,30 @@ class SagaStressIT {
     /** A human: looks at stuck sagas and resolves them from what the external systems really hold. */
     private suspend fun operator(engine: SagaEngine) {
         while (true) {
-            val stuck = pg.sql {
-                SagaTable.selectAll().where { SagaTable.stepStatus eq StepStatus.STUCK.name }.map {
-                    Triple(it[SagaTable.id], SagaState.valueOf(it[SagaTable.state]), it[SagaTable.stepIndex]) to
-                        (it[SagaTable.type] to it[SagaTable.businessKey])
-                }
+            // As an admin screen does: page through the stuck sagas.
+            val stuck = try {
+                generateSequence(engine.findStuck(limit = 20)) { page ->
+                    if (page.size < 20) null else runBlocking { engine.findStuck(limit = 20, after = StuckCursor.after(page.last())) }
+                }.flatten().toList()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (!e.isInjected()) violations += "findStuck failed: $e"
+                emptyList()
             }
-            for ((saga, typeAndKey) in stuck) {
-                val (id, state, stepIndex) = saga
-                val (type, key) = typeAndKey
-                val step = definitions.getValue(type).steps[stepIndex]
+            for (saga in stuck) {
+                val (id, state, key) = Triple(saga.id, saga.state, saga.key)
+                if (saga.stuckReason == null || saga.stuckAt == null) violations += "$key: stuck without a reason"
+                stuckReasons.count(saga.stuckReason.toString())
+                val step = definitions.getValue(saga.type).steps[saga.stepIndex]
                 // The truth: what the step's system holds, or for the payment wait what the provider decided.
                 val (truth, json) = when (step) {
                     is ChaosStep -> step.system.lookup(key).let { it to it?.let { e -> Json.encodeToString(e) } }
                     else -> provider.lookup(key).let { it to it?.let { e -> Json.encodeToString(e) } }
                 }
                 val action = when {
-                    state == SagaState.COMPENSATING -> "retry"
+                    // A compensation stuck while its effect is already gone (removed, then the undo failed): done by hand.
+                    state == SagaState.COMPENSATING -> if (truth == null && dice.chance(0.6)) "markCompensated" else "retry"
                     truth is PaymentEvent && !truth.succeeded -> "abort"   // declined: the saga gives up
                     truth != null -> if (dice.chance(0.7)) "markDone" else "abort(applied)"
                     else -> if (dice.chance(0.7)) "retry" else "abort"
@@ -545,6 +559,7 @@ class SagaStressIT {
                 try {
                     when (action) {
                         "retry" -> engine.retry(id, "operator")
+                        "markCompensated" -> engine.markCompensated(id, "operator")
                         "markDone" -> engine.markDone(id, json, "operator")
                         "abort(applied)" -> engine.abort(id, "operator", currentStepApplied = true, output = json)
                         else -> engine.abort(id, "operator", currentStepApplied = false)
@@ -651,13 +666,26 @@ class SagaStressIT {
         val known = setOf(
             SagaEvents.CREATED, SagaEvents.LOCK_EXPIRED, SagaEvents.LATE_RESULT_IGNORED, SagaEvents.RECORD_FAILED,
             SagaEvents.RESUME_FAILED,
-            SagaEvents.MANUAL_RETRY, SagaEvents.MANUAL_DONE, SagaEvents.MANUAL_ABORT,
+            SagaEvents.MANUAL_RETRY, SagaEvents.MANUAL_DONE, SagaEvents.MANUAL_ABORT, SagaEvents.MANUAL_COMPENSATED,
             SagaEvents.WAIT_STARTED, SagaEvents.WAIT_TIMED_OUT, SagaEvents.SIGNAL_RECEIVED, SagaEvents.CANCEL_REQUESTED,
         )
         val outcome = Regex("(EXECUTE|CHECK|COMPENSATE):[A-Za-z]+")
         pg.query("SELECT DISTINCT event FROM saga_log") { it.getString(1) }
             .filterNot { it in known || outcome.matches(it) }
             .forEach { problems += "unknown event in saga_log: $it" }
+        // The listeners were told only what was committed: each event is a row of saga_log, at most once.
+        val logRows = pg.query("SELECT saga_id, at, step_index, event FROM saga_log") {
+            val at = it.getObject(2, java.time.OffsetDateTime::class.java).toInstant()
+            "${it.getString(1)}|${at.epochSecond * 1_000_000 + at.nano / 1_000}|${it.getInt(3)}|${it.getString(4)}"
+        }.groupingBy { it }.eachCount()
+        reported.map { e ->
+            "${e.entry.sagaId}|${e.entry.at.epochSeconds * 1_000_000 + e.entry.at.nanosecondsOfSecond / 1_000}|${e.entry.stepIndex}|${e.entry.event}"
+        }.groupingBy { it }.eachCount().forEach { (key, n) ->
+            if (n > (logRows[key] ?: 0)) problems += "reported $n times, but ${logRows[key] ?: 0} rows in saga_log: $key"
+        }
+        if (reported.any { "PII-" in it.entry.detail.orEmpty() }) problems += "a reported event contains a value (PII-)"
+        if (reported.any { it.entry.event == SagaEvents.CREATED }) problems += "a creation was reported"
+
         val created = pg.long("SELECT count(*) FROM saga_log WHERE event = 'CREATED'")
         if (created != sagaCount.toLong()) problems += "expected $sagaCount CREATED events, found $created"
 
@@ -687,6 +715,8 @@ class SagaStressIT {
                 appendLine("Calls that threw a JVM Error: " +
                     pg.long("SELECT count(*) FROM saga_log WHERE detail LIKE '%NotImplementedError%'"))
                 appendLine("Manual actions: ${manualActions.mapValues { it.value.get() }}")
+                appendLine("Stuck reasons seen by the operator: ${stuckReasons.mapValues { it.value.get() }}")
+                appendLine("Events reported to the listeners: ${reported.size} (saga_log: ${pg.long("SELECT count(*) FROM saga_log")})")
                 appendLine("Payment events: ${deliveries.mapValues { it.value.get() }}")
                 appendLine("Cancellations: ${cancellations.mapValues { it.value.get() }}")
                 appendLine("Events:")

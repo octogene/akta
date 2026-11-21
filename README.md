@@ -336,13 +336,25 @@ The settle delay matters. A request that timed out on our side may still be proc
 
 ## Manual actions
 
-When a saga is `STUCK`, a human decides. Expose these from an admin screen:
+When a saga is `STUCK`, a human decides. List them with `engine.findStuck()` (see [Operations and observability](#operations-and-observability)): each carries a `stuckReason`, which says what to do.
+
+| `stuckReason` | What happened | What to do |
+|---|---|---|
+| `CANNOT_TELL` | A check could not tell whether the step was applied (also at a signal's timeout) | Look in the external system: applied → `markDone` with the output found; not applied → `retry` |
+| `CHECK_FAILING` | A check kept throwing | Same as `CANNOT_TELL`, once the lookup works again |
+| `TOO_MANY_ATTEMPTS` | `maxAttempts` reached: requests not sent, re-executions, failing compensations | Fix the cause, then `retry` (or `markCompensated` for a compensation you did by hand) |
+| `OUTPUT_UNSTORABLE` | The call was made, but its output could not be encoded or is over `maxDataBytes` | `markDone` with the output, or `abort` |
+| `RECORD_FAILED` | The outcome could not be recorded (a hook threw…) | Fix the cause, then `markDone(id, null)`: a successful call's output is already saved |
+| `NO_SIGNAL` | A signal step's timeout passed, and it has no check | Deliver the signal with `engine.signal`, then `retry`; or `abort` |
+
+`last_error` gives the detail, and `stuckAt` when it happened. Expose these from an admin screen:
 
 | Call | Use it when |
 |---|---|
 | `engine.retry(id, actor)` | The cause is fixed (service back up, data corrected). Forward, it **executes the step again without checking**: if the saga is stuck because a check could not tell, first confirm by hand that the step was not applied. |
 | `engine.markDone(id, output, actor)` | You confirmed by hand that the step was applied. `output` is the step's output as JSON, checked against the step's type before it is saved; `null` keeps the output already saved (after `RECORD_FAILED`), or means no output. |
 | `engine.abort(id, actor, currentStepApplied, output)` | You give up: completed steps are undone. Works on a waiting saga too. Refused while a call is in flight or its outcome is unknown. For a stuck step, look in the external system first: with `currentStepApplied = true` the stuck step is undone too, and its compensation receives `output` (JSON, checked like `markDone`'s). |
+| `engine.markCompensated(id, actor)` | A compensation is stuck, and you undid the step by hand (or there was nothing to undo). The step is marked compensated and the saga goes on undoing the previous ones, or ends `FAILED`. Only for a stuck compensation. |
 
 For a signal step that got stuck at its timeout, `retry` waits again (and uses a signal received meanwhile), and `markDone` takes the signal's value as JSON. A lost event can also be delivered by hand with `engine.signal`, and `engine.cancel` abandons a saga at any time before it finishes.
 
@@ -352,31 +364,56 @@ Every manual action is logged with its author in `saga_log`.
 
 ## Operations and observability
 
-**Find what needs attention:**
+**Find what needs attention.** The engine has reads for an admin screen, each on an index:
 
-```sql
--- Stuck sagas
-SELECT id, type, business_key, step_index, last_error, updated_at
-FROM saga WHERE step_status = 'STUCK' ORDER BY updated_at;
+| Call | Returns |
+|---|---|
+| `engine.findStuck(limit, types, after)` | Stuck sagas, stuck longest first, with their `stuckReason` and `stuckAt`. Next page: `after = StuckCursor.after(lastOfThePage)` |
+| `engine.history(sagaId)` | Everything that happened to a saga, oldest first |
+| `engine.historyByTrace(traceId)` | What one request did, from its trace id in Datadog |
+| `engine.find(id)` | One saga |
 
--- Sagas running for more than 30 minutes
-SELECT id, type, business_key, state, step_status, last_error
-FROM saga WHERE state IN ('RUNNING', 'COMPENSATING') AND created_at < now() - interval '30 minutes';
+The records carry the saga's encoded input, which may hold personal data: decide who may see it on the screen. The log never carries values.
 
--- Full history of one business key
-SELECT l.at, s.type, l.step_name, l.event, l.detail, l.actor, l.trace_id
-FROM saga_log l JOIN saga s ON s.id = l.saga_id
-WHERE s.business_key = :key ORDER BY l.at;
+**Metrics.** Two sources, for two kinds of numbers:
+
+- **Gauges from `engine.stats()`**: unfinished sagas by state and status, stuck sagas by reason, the oldest unfinished saga (`oldestUnfinishedAt`) and how far behind the recovery job is (`now - oldestDueAt`). It reads partial indexes only; sample it about once a minute. It is always right, even after a restart.
+- **Counters from a `SagaListener`**, passed to the engine: it is told about each `saga_log` entry once its transaction commits (`EXECUTE:Done`, `LOCK_EXPIRED`, `WAIT_TIMED_OUT`…), with the saga's type and state. A change that rolls back is never reported; a crash right after a commit can lose events (`saga_log` stays the record). A listener that throws is ignored. Creations are not reported: `create` runs in your transaction, whose commit the engine cannot see.
+
+With OpenTelemetry (exported to Datadog):
+
+```kotlin
+val meter = GlobalOpenTelemetry.getMeter("saga-engine")
+val events = meter.counterBuilder("saga.events").build()
+val engine = SagaEngine(
+    transactions, repository, definitions, KotlinxJsonSagaSerializer(),
+    listeners = listOf(SagaListener { e ->
+        events.add(1, Attributes.of(stringKey("saga.type"), e.sagaType, stringKey("saga.event"), e.entry.event))
+    }),
+)
+
+val latest = AtomicReference<SagaStats?>(null)       // a gauge callback cannot suspend: sample in a ticker
+scope.launch { while (isActive) { latest.set(runCatching { engine.stats() }.getOrNull()); delay(60.seconds) } }
+meter.gaugeBuilder("saga.stuck").ofLongs().buildWithCallback { m ->
+    latest.get()?.stuckByReason?.forEach { (reason, n) -> m.record(n, Attributes.of(stringKey("reason"), reason.name)) }
+}
 ```
+
+Keep attributes low in cardinality (type, event, reason), never a saga id or a key. Every pod reports the same gauges: aggregate them with `max`, not `sum`.
 
 **Tracing.** Pass a `traceId` provider to the engine. Every `saga_log` line then carries the OpenTelemetry trace id of the call, so you can open the matching trace in Datadog from a database row. The engine reads it on the caller's coroutine (in `create`, `run` and the manual actions), before switching to the transaction dispatcher, so the coroutine must carry the OpenTelemetry context (for example with `Context.current().asContextElement()` from `opentelemetry-extension-kotlin`). Runs started by `resumeDue` carry whatever trace the job runner has. The `traceparent` of the request that started the saga is stored on the saga, so you can link recovery runs back to that request.
 
 `saga_log` is the durable record of every exchange. That matters when application logs only live as long as the pod.
 
-**Suggested alerts:**
-- `count(*) WHERE step_status = 'STUCK' > 0`
-- oldest unfinished saga older than 30 minutes
-- rate of `EXECUTE:Unknown` events per step
+**Suggested alerts** (thresholds to tune):
+
+| Alert | From | Threshold |
+|---|---|---|
+| Stuck sagas | `stats().stuckByReason` | > 0 for 5 minutes |
+| Recovery job behind | `now - stats().oldestDueAt` | > 5 minutes |
+| Old unfinished sagas | `now - stats().oldestUnfinishedAt` | above the longest signal timeout, plus an hour |
+| Sagas that cannot be read | `RESUME_FAILED` events | more than a few per 10 minutes |
+| Pods dying mid-call | `LOCK_EXPIRED` events | a rise against the usual rate |
 
 **Retention.** History grows by about 1.5 KB per saga, plus the size of its input and outputs. Keep one month by calling `purgeFinished` from the job runner, for example once a day:
 
@@ -443,7 +480,7 @@ Two longer checks run against PostgreSQL in Docker. They are left out of `./grad
 
 **`SagaStressIT`** runs hundreds of sagas while failures are injected at random, and checks every invariant at the end:
 - **Injected failures:** rejections, requests not sent, lost requests and lost responses, calls that outlive their lock, failing or undecided checks, failing compensations, hooks that throw after writing, and pods dying mid-call. Payment sagas wait for the provider's event, which arrives early, late (after the timeout), twice or never, and customers cancel sagas at random moments.
-- **Concurrent actors:** several pods resume sagas, a Kafka listener delivers payment events, and an operator resolves stuck sagas from what the external systems really hold.
+- **Concurrent actors:** several pods resume sagas, a Kafka listener delivers payment events, and an operator pages through `findStuck` and resolves stuck sagas from what the external systems really hold.
 - **Ground truth:** the simulated external systems record what was really applied.
 - **Invariants checked:**
   - every saga ends;
@@ -455,6 +492,8 @@ Two longer checks run against PostgreSQL in Docker. They are left out of `./grad
   - every stored output equals what the external system returned;
   - a completed payment saga holds the provider's payment, which succeeded;
   - a cancelled saga always ends failed, compensated;
+  - every stuck saga has a reason;
+  - the listeners were told only what `saga_log` holds, at most once, and never a value;
   - no input or output value ever appears in `saga_log` or `last_error`.
 
 Concurrency makes runs non-deterministic: a seed reproduces the mix of failures, not the exact interleaving. A run that fails prints its seed and the violations.
@@ -482,7 +521,7 @@ The engine cuts each call shortly before its lock expires, by cancelling its cor
 
 ### Compensations can run more than once
 
-A compensation runs again after any error, after its lock expired, and after a manual `retry`. It must be safe to repeat ("delete if present", "move back if still there"). There is no `markCompensated` action: if a step was undone by hand, `retry` runs the compensation again, which works only because it is safe to repeat.
+A compensation runs again after any error, after its lock expired, and after a manual `retry`. It must be safe to repeat ("delete if present", "move back if still there"). If a stuck compensation was done by hand, `markCompensated` records it; `retry` would run it again, which works only because it is safe to repeat.
 
 ### No isolation
 
@@ -507,7 +546,8 @@ Other systems and users see the intermediate state while a saga runs (stock move
 
 ### Operations
 
-- **No API to read sagas for an admin screen,** apart from `find(id)`. Listing stuck sagas and reading a history is plain SQL, and the reason a saga is stuck is free text in `last_error`.
+- **No admin screen or HTTP API in the library:** it gives the reads (`findStuck`, `history`, `stats`) and the actions; the application exposes them, with its own authentication.
+- **Listener events are at most once.** A crash, or a connection lost right after a commit, loses the events of that transaction. Counters can drift slightly; gauges from `stats()` do not.
 - **A database outage postpones a whole `resumeDue` batch** by `resumeFailureDelay` (1 minute): each saga that failed to run waits that long before the next try.
 - **`resumeDue` holds up to `concurrency` connections at once** during their short transactions. Keep it well below the connection pool size.
 - **Retention deletes history for good.** `purgeFinished` removes finished sagas with their results and log. Export what you must keep longer.

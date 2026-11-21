@@ -4,8 +4,10 @@ import com.example.saga.DuplicateSagaException
 import com.example.saga.SagaLogEntry
 import com.example.saga.SagaRecord
 import com.example.saga.SagaRepository
+import com.example.saga.SagaStats
 import com.example.saga.SagaTransactions
 import com.example.saga.StepStatus
+import com.example.saga.StuckCursor
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.time.Instant
@@ -93,6 +95,29 @@ class InMemorySagaRepository : SagaRepository {
         signals.putIfAbsent(sagaId to name, value) == null
 
     override fun signal(sagaId: Uuid, name: String): String? = signals[sagaId to name]
+
+    override fun findStuck(limit: Int, types: Collection<String>?, after: StuckCursor?): List<SagaRecord> =
+        sagas.values
+            .filter { it.stepStatus == StepStatus.STUCK && (types == null || it.type in types) }
+            .sortedWith(compareBy<SagaRecord> { it.stuckAt }.thenBy { it.id })
+            .filter { after == null || it.stuckAt!! > after.stuckAt || (it.stuckAt == after.stuckAt && it.id > after.id) }
+            .take(limit)
+
+    override fun history(sagaId: Uuid): List<SagaLogEntry> = logEntries.filter { it.sagaId == sagaId }
+
+    override fun historyByTrace(traceId: String, limit: Int): List<SagaLogEntry> =
+        logEntries.filter { it.traceId == traceId }.sortedBy { it.at }.take(limit)
+
+    override fun stats(now: Instant, types: Collection<String>?): SagaStats {
+        val unfinished = sagas.values.filter { !it.state.isFinished && (types == null || it.type in types) }
+        val (stuck, active) = unfinished.partition { it.stepStatus == StepStatus.STUCK }
+        return SagaStats(
+            unfinished = unfinished.groupingBy { it.state to it.stepStatus }.eachCount().mapValues { it.value.toLong() },
+            stuckByReason = stuck.groupingBy { it.stuckReason!! }.eachCount().mapValues { it.value.toLong() },
+            oldestUnfinishedAt = active.minOfOrNull { it.createdAt },
+            oldestDueAt = active.filter { it.nextAttemptAt <= now }.minOfOrNull { it.nextAttemptAt },
+        )
+    }
 
     internal class Snapshot(
         val sagas: Map<Uuid, SagaRecord>,

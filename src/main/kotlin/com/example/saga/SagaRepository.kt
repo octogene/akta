@@ -45,6 +45,18 @@ interface SagaRepository {
 
     /** The encoded value of the signal named [name] received for the saga, if any. */
     fun signal(sagaId: Uuid, name: String): String?
+
+    /** Stuck sagas of [types] (null: all), by `stuckAt` then id, after [after]. */
+    fun findStuck(limit: Int, types: Collection<String>?, after: StuckCursor?): List<SagaRecord>
+
+    /** The log of a saga, oldest first. */
+    fun history(sagaId: Uuid): List<SagaLogEntry>
+
+    /** The log entries of a trace, oldest first. */
+    fun historyByTrace(traceId: String, limit: Int): List<SagaLogEntry>
+
+    /** Counts and ages of the unfinished sagas of [types] (null: all). */
+    fun stats(now: Instant, types: Collection<String>?): SagaStats
 }
 
 /** Opens a short transaction. External calls are never made inside [inTransaction]. */

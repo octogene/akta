@@ -5,7 +5,11 @@ import com.example.saga.KotlinxJsonSagaSerializer
 import com.example.saga.SagaContext
 import com.example.saga.SagaDefinition
 import com.example.saga.SagaEngine
+import com.example.saga.SagaConfig
+import com.example.saga.SagaEvents
 import com.example.saga.SagaState
+import com.example.saga.StuckCursor
+import com.example.saga.StuckReason
 import com.example.saga.SignalResult
 import com.example.saga.StepStatus
 import com.example.saga.StepNotSent
@@ -234,6 +238,44 @@ class ExposedSagaRepositoryIT {
         assertEquals(1, runBlocking { engine.purgeFinished(olderThan = 30.days) })
         val signalsLeft = transaction(database) { exec("SELECT count(*) FROM saga_signal") { it.next(); it.getLong(1) } }
         assertEquals(0L, signalsLeft)
+    }
+
+    @Test
+    fun `operators list stuck sagas by page, read their history and the stats`() {
+        val notSent = saga("NOT_SENT") { step("call") { execute { throw StepNotSent("connection refused") } } }
+        val other = saga("OTHER") { step("call") { execute { throw StepNotSent("connection refused") } } }
+        val engine = SagaEngine(
+            ExposedSagaTransactions(database), repository, listOf(notSent, other), serializer, SagaConfig(maxAttempts = 1),
+        )
+        val tx = ExposedSagaTransactions(database)
+        val ids = (1..5).map { i ->
+            val id = runBlocking { tx.inTransaction { engine.create(if (i == 3) other else notSent, "K-$i") } }
+            runBlocking { engine.run(id, Clock.System.now() + 10.seconds) }
+            id
+        }
+
+        // Stuck at the same instant: the cursor must go on by id.
+        transaction(database) { exec("UPDATE saga SET stuck_at = (SELECT min(stuck_at) FROM saga)") }
+        val pages = generateSequence(runBlocking { engine.findStuck(limit = 2) }) { page ->
+            if (page.size < 2) null
+            else runBlocking { engine.findStuck(limit = 2, after = StuckCursor.after(page.last())) }.takeIf { it.isNotEmpty() }
+        }.toList()
+        assertEquals(ids.sorted(), pages.flatten().map { it.id })
+        assertEquals(StuckReason.TOO_MANY_ATTEMPTS, pages.first().first().stuckReason)
+        assertEquals(ids.sorted() - ids[2], runBlocking { engine.findStuck(types = listOf("NOT_SENT")) }.map { it.id })
+
+        assertEquals(listOf(SagaEvents.CREATED, "EXECUTE:NotSent"), runBlocking { engine.history(ids[0]) }.map { it.event })
+
+        val stats = runBlocking { engine.stats() }
+        assertEquals(mapOf((SagaState.RUNNING to StepStatus.STUCK) to 5L), stats.unfinished)
+        assertEquals(mapOf(StuckReason.TOO_MANY_ATTEMPTS to 5L), stats.stuckByReason)
+        assertNull(stats.oldestUnfinishedAt)                                    // stuck sagas are counted apart
+        assertNull(stats.oldestDueAt)
+
+        // The schema refuses a stuck saga without a reason.
+        assertFailsWith<Exception> {
+            transaction(database) { exec("UPDATE saga SET stuck_reason = NULL WHERE id = '${ids[0]}'") }
+        }
     }
 
     @Test

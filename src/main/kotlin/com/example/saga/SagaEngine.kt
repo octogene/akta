@@ -38,6 +38,8 @@ class SagaEngine(
      * (in [create], [run] and the manual actions), never inside [SagaTransactions.inTransaction].
      */
     private val traceId: () -> String? = { null },
+    /** Told about every log entry, after its transaction commits: for metrics and hooks. See [SagaListener]. */
+    private val listeners: List<SagaListener> = emptyList(),
 ) {
     @Suppress("UNCHECKED_CAST")
     private val definitions: Map<String, AnyDefinition> = definitions.associateBy { it.type } as Map<String, AnyDefinition>
@@ -101,7 +103,7 @@ class SagaEngine(
     suspend fun run(id: Uuid, deadline: Instant, skipLocked: Boolean = false): SagaRecord {
         val trace = traceId()      // here, on the caller's coroutine: transactions may switch threads
         var cycle = if (currentTime() < deadline) {
-            transactions.inTransaction { claim(id, skipLocked, trace) }
+            tx { claim(id, skipLocked, trace) }
         } else {
             Cycle(saga = null, next = null)
         }
@@ -110,14 +112,14 @@ class SagaEngine(
             val outcome = perform(work)
             cycle = try {
                 // Records this outcome and, in the same transaction, claims the next step if it is due.
-                transactions.inTransaction { record(work, outcome, claimUntil = deadline) }
+                tx { record(work, outcome, claimUntil = deadline) }
             } catch (e: Throwable) {
                 if (e is CancellationException || e.isFatal()) throw e
                 recordAfterFailure(work, outcome, e)
             }
         }
         // Read again only when no transaction gave us the saga (deadline already passed, row locked elsewhere).
-        return cycle.saga ?: transactions.inTransaction { repository.find(id) } ?: error("Saga $id not found")
+        return cycle.saga ?: tx { repository.find(id) } ?: error("Saga $id not found")
     }
 
     /**
@@ -128,10 +130,10 @@ class SagaEngine(
      */
     private suspend fun recordAfterFailure(work: Work, outcome: Outcome, error: Throwable): Cycle =
         try {
-            Cycle(transactions.inTransaction { record(work, outcome, claimUntil = null) }.saga, next = null)
+            Cycle(tx { record(work, outcome, claimUntil = null) }.saga, next = null)
         } catch (e: Throwable) {
             if (e is CancellationException || e.isFatal()) throw e
-            Cycle(transactions.inTransaction { recordFailed(work, outcome, error) }, next = null)
+            Cycle(tx { recordFailed(work, outcome, error) }, next = null)
         }
 
     /**
@@ -151,7 +153,7 @@ class SagaEngine(
     ): ResumeResult {
         require(concurrency >= 1) { "concurrency must be at least 1" }
         // Only the types this engine knows: during a rolling deploy, old pods leave new types to new pods.
-        val ids = transactions.inTransaction { repository.findDue(currentTime(), limit, definitions.keys) }
+        val ids = tx { repository.findDue(currentTime(), limit, definitions.keys) }
         val permits = Semaphore(concurrency)
         val failures = coroutineScope {
             ids.map { id ->
@@ -181,14 +183,14 @@ class SagaEngine(
      */
     private suspend fun postpone(id: Uuid, error: Throwable) {
         try {
-            transactions.inTransaction {
-                val r = repository.lock(id, skipLocked = true) ?: return@inTransaction
+            tx {
+                val r = lock(id, skipLocked = true) ?: return@tx
                 val now = currentTime()
                 val inFlight = r.stepStatus == StepStatus.IN_PROGRESS && r.lockedUntil?.let { it > now } == true
-                if (r.state.isFinished || r.stepStatus == StepStatus.STUCK || inFlight) return@inTransaction
+                if (r.state.isFinished || r.stepStatus == StepStatus.STUCK || inFlight) return@tx
                 // lastError keeps the step's own error: the resume failure goes to the log only.
                 val postponed = r.copy(nextAttemptAt = maxOf(r.nextAttemptAt, now + config.resumeFailureDelay))
-                repository.save(postponed, now)
+                save(postponed, now)
                 log(r.id, r.stepIndex, null, SagaEvents.RESUME_FAILED, error.toString(), now, trace = null)
             }
         } catch (e: CancellationException) {
@@ -201,7 +203,34 @@ class SagaEngine(
     /** What [resumeDue] did: how many sagas it looked at, and the ones that threw. */
     data class ResumeResult(val sagas: Int, val failures: Map<Uuid, Throwable>)
 
-    suspend fun find(id: Uuid): SagaRecord? = transactions.inTransaction { repository.find(id) }
+    suspend fun find(id: Uuid): SagaRecord? = tx { repository.find(id) }
+
+    // ---- Reads for operators ----------------------------------------------------------------
+
+    /**
+     * Stuck sagas, stuck longest first: what an admin screen lists. Each carries its [SagaRecord.stuckReason],
+     * which says what to do. For the next page, pass `StuckCursor.after(lastOfThePage)` as [after].
+     */
+    suspend fun findStuck(limit: Int = 100, types: Collection<String>? = null, after: StuckCursor? = null): List<SagaRecord> {
+        require(limit >= 1) { "limit must be at least 1" }
+        return tx { repository.findStuck(limit, types, after) }
+    }
+
+    /** Everything that happened to a saga, oldest first. */
+    suspend fun history(sagaId: Uuid): List<SagaLogEntry> = tx { repository.history(sagaId) }
+
+    /** What the request with this trace id did to sagas, oldest first. */
+    suspend fun historyByTrace(traceId: String, limit: Int = 200): List<SagaLogEntry> {
+        require(limit >= 1) { "limit must be at least 1" }
+        return tx { repository.historyByTrace(traceId, limit) }
+    }
+
+    /**
+     * Counts and ages of the unfinished sagas, for gauges and alerts: stuck sagas by reason, the oldest
+     * unfinished saga, and how far behind the recovery job is (`now - oldestDueAt`). Sample it about once
+     * a minute; it reads partial indexes only.
+     */
+    suspend fun stats(types: Collection<String>? = null): SagaStats = tx { repository.stats(currentTime(), types) }
 
     // ---- Retention --------------------------------------------------------------------------
 
@@ -217,7 +246,7 @@ class SagaEngine(
         val before = currentTime() - olderThan
         var total = 0
         do {
-            val deleted = transactions.inTransaction { repository.purgeFinished(before, batchSize) }
+            val deleted = tx { repository.purgeFinished(before, batchSize) }
             total += deleted
         } while (deleted == batchSize)
         return total
@@ -232,7 +261,12 @@ class SagaEngine(
      */
     suspend fun retry(id: Uuid, actor: String): SagaRecord = manual(id, actor, SagaEvents.MANUAL_RETRY) { r, now ->
         require(r.stepStatus == StepStatus.STUCK) { "Saga $id is not stuck" }
-        ManualChange(r.copy(stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now, lastError = null))
+        ManualChange(
+            r.copy(
+                stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now, lastError = null,
+                stuckReason = null, stuckAt = null,
+            ),
+        )
     }
 
     /**
@@ -277,6 +311,18 @@ class SagaEngine(
             ManualChange(updated, detail = "currentStepApplied=$currentStepApplied")
         }
 
+    /**
+     * The stuck compensation was done by hand, or there was nothing to undo: the step is marked
+     * compensated, and the saga goes on undoing the previous steps (or ends FAILED). Used wrongly, it
+     * leaves an effect in the external system, as [markDone] would.
+     */
+    suspend fun markCompensated(id: Uuid, actor: String): SagaRecord =
+        manual(id, actor, SagaEvents.MANUAL_COMPENSATED) { r, now ->
+            require(r.state == SagaState.COMPENSATING && r.stepStatus == StepStatus.STUCK) { "Saga $id has no stuck compensation" }
+            repository.markCompensated(r.id, r.stepIndex, now)
+            ManualChange(compensateFrom(r, r.stepIndex - 1, now))
+        }
+
     // ---- Signals and cancellation -----------------------------------------------------------
 
     /**
@@ -295,11 +341,11 @@ class SagaEngine(
     @PublishedApi
     internal suspend fun signal(sagaId: Uuid, name: String, value: Any?, type: KType): SignalResult {
         val trace = traceId()
-        return transactions.inTransaction { deliver(sagaId, name, value, type, trace) }
+        return tx { deliver(sagaId, name, value, type, trace) }
     }
 
     private fun deliver(sagaId: Uuid, name: String, value: Any?, type: KType, trace: String?): SignalResult {
-        val r = repository.lock(sagaId) ?: return SignalResult.NoSaga
+        val r = lock(sagaId) ?: return SignalResult.NoSaga
         val now = currentTime()
         val def = definition(r.type)
         val index = def.steps.indexOfFirst { it is SignalStep<*, *> && it.signal == name }
@@ -330,8 +376,8 @@ class SagaEngine(
             return SignalResult.Ignored(r.id)
         }
         return if (r.stepIndex == index && r.stepStatus == StepStatus.WAITING) {
-            received("delivered")
             applySignal(r, def, step, context(r, def), value, encoded, now)
+            received("delivered")
             SignalResult.Delivered(r.id)
         } else {
             // Not waiting yet (an earlier step runs, or this one is ready, checking or stuck): kept for it.
@@ -357,7 +403,7 @@ class SagaEngine(
         }
         val deadline = now + step.timeout
         val waiting = r.copy(stepStatus = StepStatus.WAITING, nextAttemptAt = deadline, attempts = 0, lastError = null)
-        repository.save(waiting, now)
+        save(waiting, now)
         log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_STARTED, "signal '${step.signal}' until $deadline", now, trace)
         return Cycle(waiting, next = null)
     }
@@ -379,7 +425,7 @@ class SagaEngine(
         } catch (e: StepRejected) {
             compensateFrom(r.copy(lastError = e.toString()), r.stepIndex - 1, now)
         }
-        repository.save(updated, now)
+        save(updated, now)
         finishIfNeeded(r, updated)
         return updated
     }
@@ -419,11 +465,11 @@ class SagaEngine(
         change: (SagaRecord, Instant) -> ManualChange,
     ): SagaRecord {
         val trace = traceId()
-        transactions.inTransaction {
-            val r = repository.lock(id) ?: throw NoSuchElementException("Saga $id not found")
+        tx {
+            val r = lock(id) ?: throw NoSuchElementException("Saga $id not found")
             val now = currentTime()
             val (updated, detail) = change(r, now).let { it.record to it.detail }
-            repository.save(updated, now)
+            save(updated, now)
             // r: logged on the step the action was taken on
             log(r.id, r.stepIndex, null, event, detail, now, trace, actor)
             finishIfNeeded(r, updated)
@@ -505,7 +551,7 @@ class SagaEngine(
 
     /** Transaction 1: claims the current step, if there is something to do now. */
     private fun claim(id: Uuid, skipLocked: Boolean, trace: String?): Cycle {
-        val r = repository.lock(id, skipLocked) ?: return Cycle(saga = null, next = null)
+        val r = lock(id, skipLocked) ?: return Cycle(saga = null, next = null)
         return claimLocked(r, trace)
     }
 
@@ -518,8 +564,8 @@ class SagaEngine(
         if (r.stepStatus == StepStatus.IN_PROGRESS) {
             val lockedUntil = checkNotNull(r.lockedUntil) { "Saga ${r.id} is IN_PROGRESS without a lock" }
             if (lockedUntil > now) return Cycle(r, next = null) // a call is in flight elsewhere
-            r = lockExpired(r, lockedUntil)                      // the process died during the call
-            repository.save(r, now)
+            r = lockExpired(r, lockedUntil, now)                 // the process died during the call
+            save(r, now)
             log(r.id, r.stepIndex, null, SagaEvents.LOCK_EXPIRED, r.lastError, now, trace)
         }
         if (r.stepStatus == StepStatus.STUCK || r.nextAttemptAt > now) return Cycle(r, next = null)
@@ -531,7 +577,7 @@ class SagaEngine(
         // A cancellation that waited for a call to end: compensate now that none is in flight.
         val cancelled = cancelIfRequested(r, now)
         if (cancelled !== r) {
-            repository.save(cancelled, now)
+            save(cancelled, now)
             finishIfNeeded(r, cancelled)
             return claimLocked(cancelled, trace)
         }
@@ -542,13 +588,14 @@ class SagaEngine(
             when (r.stepStatus) {
                 StepStatus.READY -> return enterWait(r, def, signalStep, ctx, now, trace)
                 StepStatus.WAITING -> {                  // its timeout passed without the signal
-                    log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
                     val noSignal = "No signal '${signalStep.signal}' before the timeout"
                     if (!signalStep.checksOnTimeout) {
-                        val stuck = r.copy(stepStatus = StepStatus.STUCK, lastError = noSignal)
-                        repository.save(stuck, now)
-                        return Cycle(stuck, next = null)
+                        val blocked = stuck(r, StuckReason.NO_SIGNAL, noSignal, now)
+                        save(blocked, now)
+                        log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
+                        return Cycle(blocked, next = null)
                     }
+                    log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
                     r = r.copy(stepStatus = StepStatus.UNKNOWN, lastError = noSignal)   // the check decides, below
                 }
                 else -> Unit                              // UNKNOWN: its timeout check, claimed below
@@ -566,7 +613,7 @@ class SagaEngine(
             lockedUntil = lockedUntil,
             nextAttemptAt = lockedUntil,      // the recovery job looks again when the lock expires
         )
-        repository.save(claimed, now)
+        save(claimed, now)
         return Cycle(claimed, Work(claimed, def.stepAt(r.stepIndex), action, ctx, trace))
     }
 
@@ -662,7 +709,7 @@ class SagaEngine(
      * With [claimUntil] null, it only records.
      */
     private fun record(work: Work, outcome: Outcome, claimUntil: Instant?): Cycle {
-        val current = repository.lock(work.saga.id) ?: return Cycle(saga = null, next = null)
+        val current = lock(work.saga.id) ?: return Cycle(saga = null, next = null)
         val now = currentTime()
         if (!stillClaimedBy(current, work)) {
             log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, outcome), now)
@@ -677,10 +724,11 @@ class SagaEngine(
                 repository.saveResult(r.id, r.stepIndex, work.step.name, outcome.output, now)
                 next(r, def, now)
             }
-            is Outcome.OutputUnstorable -> r.copy(
-                stepStatus = StepStatus.STUCK,
-                lastError = "The call was made, but its output could not be stored (${outcome.reason}): " +
+            is Outcome.OutputUnstorable -> stuck(
+                r, StuckReason.OUTPUT_UNSTORABLE,
+                "The call was made, but its output could not be stored (${outcome.reason}): " +
                     "record it with markDone, or undo the step with abort",
+                now,
             )
             is Outcome.Rejected -> compensateFrom(r.copy(lastError = outcome.error), r.stepIndex - 1, now)
             is Outcome.NotSent -> retryLater(r, outcome.error, now)
@@ -691,24 +739,21 @@ class SagaEngine(
             )
             // Not applied: safe to execute again, or to stop here if the step keeps failing.
             Outcome.NotDone -> if (r.attempts >= config.maxAttempts) {
-                r.copy(stepStatus = StepStatus.STUCK, lastError = "Too many attempts: ${r.lastError}")
+                stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: ${r.lastError}", now)
             } else {
                 r.copy(stepStatus = StepStatus.READY, nextAttemptAt = now)
             }
-            Outcome.CannotTell -> r.copy(
-                stepStatus = StepStatus.STUCK,
-                lastError = "Cannot tell whether step '${work.step.name}' was applied",
-            )
+            Outcome.CannotTell -> stuck(r, StuckReason.CANNOT_TELL, "Cannot tell whether step '${work.step.name}' was applied", now)
             // Counted apart from attempts (a lookup outage must not use up the executions), with backoff.
             // Past maxAttempts: STUCK, as when a check cannot tell, so that alerts see it and a human
             // can decide (markDone, abort, or retry once the step is known not to be applied).
             is Outcome.CheckFailed -> {
                 val failures = current.checkFailures + 1
                 if (failures >= config.maxAttempts) {
-                    r.copy(
-                        stepStatus = StepStatus.STUCK, checkFailures = failures,
-                        lastError = "Check keeps failing, step '${work.step.name}' may have been applied: ${outcome.error}",
-                    )
+                    stuck(
+                        r, StuckReason.CHECK_FAILING,
+                        "Check keeps failing, step '${work.step.name}' may have been applied: ${outcome.error}", now,
+                    ).copy(checkFailures = failures)
                 } else {
                     r.copy(
                         stepStatus = StepStatus.UNKNOWN, checkFailures = failures,
@@ -725,7 +770,7 @@ class SagaEngine(
         }
         // Cancelled while the call was in flight: the call's outcome is recorded, now compensate (it included).
         val updated = cancelIfRequested(decided, now)
-        repository.save(updated, now)
+        save(updated, now)
         // The new lastError when it changed (it may add "Too many attempts"), else the outcome's own
         // detail: a repeated error is logged every time, not only the first.
         val detail = when (outcome) {
@@ -749,7 +794,7 @@ class SagaEngine(
      * step's result, never in lastError (it may hold personal data): `markDone(id, null)` continues with it.
      */
     private fun recordFailed(work: Work, outcome: Outcome, error: Throwable): SagaRecord? {
-        val current = repository.lock(work.saga.id) ?: return null
+        val current = lock(work.saga.id) ?: return null
         val now = currentTime()
         if (!stillClaimedBy(current, work)) {
             log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, outcome), now)
@@ -757,14 +802,11 @@ class SagaEngine(
         }
         if (outcome is Outcome.Done) repository.saveResult(current.id, current.stepIndex, work.step.name, outcome.output, now)
         val kept = if (outcome is Outcome.Done) ". The output is saved: markDone(id, null) continues with it" else ""
-        val stuck = current.copy(
-            stepStatus = StepStatus.STUCK,
-            lockedUntil = null,
-            lastError = "Could not record ${describe(work, outcome)}: $error$kept",
-        )
-        repository.save(stuck, now)
-        log(work, SagaEvents.RECORD_FAILED, stuck.lastError, now)
-        return stuck
+        val blocked = stuck(current, StuckReason.RECORD_FAILED, "Could not record ${describe(work, outcome)}: $error$kept", now)
+            .copy(lockedUntil = null)
+        save(blocked, now)
+        log(work, SagaEvents.RECORD_FAILED, blocked.lastError, now)
+        return blocked
     }
 
     /** False when the lock expired during the call and another instance took over. */
@@ -783,26 +825,29 @@ class SagaEngine(
         if (r.cancelRequestedAt != null && r.state == SagaState.RUNNING) return compensateFrom(r, r.stepIndex, now)
         val index = r.stepIndex + 1
         return if (index == def.steps.size) {
-            r.copy(state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null)
+            r.copy(state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null, stuckReason = null, stuckAt = null)
         } else {
-            r.copy(stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, nextAttemptAt = now, lastError = null)
+            r.copy(
+                stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, nextAttemptAt = now, lastError = null,
+                stuckReason = null, stuckAt = null,
+            )
         }
     }
 
     /** Undoes the completed steps, from [index] down to the first one. */
     private fun compensateFrom(r: SagaRecord, index: Int, now: Instant): SagaRecord =
         if (index < 0) {
-            r.copy(state = SagaState.FAILED, stepStatus = StepStatus.READY)
+            r.copy(state = SagaState.FAILED, stepStatus = StepStatus.READY, stuckReason = null, stuckAt = null)
         } else {
             r.copy(
                 state = SagaState.COMPENSATING, stepIndex = index, stepStatus = StepStatus.READY,
-                attempts = 0, nextAttemptAt = now,
+                attempts = 0, nextAttemptAt = now, stuckReason = null, stuckAt = null,
             )
         }
 
     private fun retryLater(r: SagaRecord, error: String, now: Instant): SagaRecord =
         if (r.attempts >= config.maxAttempts) {
-            r.copy(stepStatus = StepStatus.STUCK, lastError = "Too many attempts: $error")
+            stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
         } else {
             r.copy(stepStatus = StepStatus.READY, nextAttemptAt = now + config.backoff(r.attempts), lastError = error)
         }
@@ -811,23 +856,25 @@ class SagaEngine(
      * Lock expired. Forward: the call may have left, so the outcome is unknown and will be checked.
      * Compensation: compensations are safe to repeat, so it simply runs again, up to [SagaConfig.maxAttempts].
      */
-    private fun lockExpired(r: SagaRecord, since: Instant): SagaRecord =
+    private fun lockExpired(r: SagaRecord, since: Instant, now: Instant): SagaRecord =
         if (r.state == SagaState.RUNNING) {
             r.copy(
                 stepStatus = StepStatus.UNKNOWN, lockedUntil = null, nextAttemptAt = since + config.settleDelay,
                 lastError = "Lock expired during the call",
             )
         } else if (r.attempts >= config.maxAttempts) {
-            r.copy(
-                stepStatus = StepStatus.STUCK, lockedUntil = null,
-                lastError = "Too many attempts: lock expired during the compensation",
-            )
+            stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the compensation", now)
+                .copy(lockedUntil = null)
         } else {
             r.copy(
                 stepStatus = StepStatus.READY, lockedUntil = null, nextAttemptAt = since,
                 lastError = "Lock expired during the compensation",
             )
         }
+
+    /** The saga stops for a human, for [reason]. Leaving STUCK clears both (see [next], [compensateFrom], [retry]). */
+    private fun stuck(r: SagaRecord, reason: StuckReason, error: String?, now: Instant): SagaRecord =
+        r.copy(stepStatus = StepStatus.STUCK, stuckReason = reason, stuckAt = now, lastError = error)
 
     /** Business effects of the end of the saga, in the same transaction. */
     private fun finishIfNeeded(before: SagaRecord, after: SagaRecord) {
@@ -888,7 +935,66 @@ class SagaEngine(
         trace: String?,
         actor: String? = null,
     ) {
-        repository.log(SagaLogEntry(sagaId, now, stepIndex, stepName, event, detail, actor, trace))
+        val entry = SagaLogEntry(sagaId, now, stepIndex, stepName, event, detail, actor, trace)
+        repository.log(entry)
+        // Reported after commit, with the saga as this transaction last read or wrote it. None from create(),
+        // which runs in the caller's transaction.
+        val pending = txEvents.get() ?: return
+        val r = pending.latest[sagaId] ?: return
+        pending.events += SagaEvent(entry, r.type, r.state, r.stepStatus, r.stuckReason)
+    }
+
+    // ---- Transactions, and the events they report after commit ---------------------------------
+
+    /** The log entries of the transaction running on this thread, and the sagas it touched. */
+    private class PendingEvents {
+        val latest = HashMap<Uuid, SagaRecord>()
+        val events = ArrayList<SagaEvent>()
+    }
+
+    /**
+     * Set while the engine's transaction block runs. The block is plain blocking code on one thread
+     * ([SagaTransactions.inTransaction] takes a non-suspending block), so a thread local is safe here.
+     */
+    private val txEvents = ThreadLocal<PendingEvents?>()
+
+    /** One transaction; its events go to the listeners once it has committed. A retried attempt starts afresh. */
+    private suspend fun <T> tx(block: () -> T): T {
+        var committed: PendingEvents? = null
+        val result = transactions.inTransaction {
+            val pending = PendingEvents()
+            committed = pending
+            val outer = txEvents.get()
+            txEvents.set(pending)
+            try {
+                block()
+            } finally {
+                txEvents.set(outer)
+            }
+        }
+        committed?.let { emit(it.events) }
+        return result
+    }
+
+    private fun emit(events: List<SagaEvent>) {
+        for (event in events) for (listener in listeners) {
+            try {
+                listener.onEvent(event)
+            } catch (e: Throwable) {
+                if (e.isFatal()) throw e        // anything else: ignored, the saga is not affected
+            }
+        }
+    }
+
+    private fun lock(id: Uuid, skipLocked: Boolean = false): SagaRecord? =
+        repository.lock(id, skipLocked)?.also { txEvents.get()?.latest?.put(it.id, it) }
+
+    private fun save(r: SagaRecord, now: Instant) {
+        check((r.stepStatus == StepStatus.STUCK) == (r.stuckReason != null && r.stuckAt != null)) {
+            "Saga ${r.id}: ${r.stepStatus} with stuck reason ${r.stuckReason}"
+        }
+        repository.save(r, now)
+        txEvents.get()?.latest?.put(r.id, r)
     }
 
     /** Logs an event on the step that [work] ran. */
