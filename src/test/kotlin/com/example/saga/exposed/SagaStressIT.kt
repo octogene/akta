@@ -17,6 +17,8 @@ import com.example.saga.SagaTransactions
 import com.example.saga.SagaEvent
 import com.example.saga.SagaListener
 import com.example.saga.StuckCursor
+import com.example.saga.StuckReason
+import com.example.saga.Idempotency
 import com.example.saga.StepStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -143,16 +145,25 @@ class SagaStressIT {
     @Serializable
     data class Effect(val ref: String, val customer: String)
 
-    /** An external system without idempotency keys. It knows what is really applied, for each item. */
-    private inner class ExternalSystem(val name: String) {
+    /**
+     * An external system. It knows what is really applied, for each item. With [keys], it accepts an
+     * idempotency key: a request with a key it remembers returns the first result, applying nothing.
+     */
+    private inner class ExternalSystem(val name: String, val keys: Boolean = false) {
         private val applied = HashMap<String, Effect>()
+        private val remembered = HashMap<String, Effect>()
         private var counter = 0
 
-        @Synchronized fun apply(key: String, request: ItemRequest): Effect {
+        @Synchronized fun apply(key: String, request: ItemRequest, idempotencyKey: String? = null): Effect {
+            if (keys) remembered[checkNotNull(idempotencyKey)]?.let { return it }
             applied[key]?.let { violations += "$name: applied a second time for $key (already ${it.ref}): duplicate" }
-            return Effect("$name-${++counter}", request.customer).also { applied[key] = it }
+            return Effect("$name-${++counter}", request.customer).also {
+                applied[key] = it
+                if (keys) remembered[idempotencyKey!!] = it
+            }
         }
         @Synchronized fun remove(key: String) { applied.remove(key) }
+        @Synchronized fun remembers(idempotencyKey: String) = keys && idempotencyKey in remembered
         @Synchronized fun lookup(key: String): Effect? = applied[key]
     }
 
@@ -188,6 +199,11 @@ class SagaStressIT {
     private inner class ChaosStep(val system: ExternalSystem, private val previous: ChaosStep?) : SagaStep<ItemRequest, Effect> {
         override val name = system.name
         override val outputType = typeOf<Effect>()
+        // A short window (3 calls' locks): retries after crashes and slow calls sometimes outlive it.
+        override val idempotency = if (system.keys) Idempotency(keyRetention = 3.seconds) else null
+
+        private fun apply(ctx: SagaContext<ItemRequest>) =
+            system.apply(ctx.key, ctx.input, if (system.keys) ctx.idempotencyKey else null)
         override fun describe(output: Effect) = output.ref        // never the customer
 
         override suspend fun execute(ctx: SagaContext<ItemRequest>): Effect {
@@ -198,15 +214,16 @@ class SagaStressIT {
             }
             pause()
             return when (dice.pick(callWeights)) {
-                Call.OK -> system.apply(ctx.key, ctx.input).also { pause() }
-                Call.REJECTED -> throw StepRejected("refused")
+                Call.OK -> apply(ctx).also { pause() }
+                // A service that remembers the key answers a replay with its first result: never a refusal.
+                Call.REJECTED -> if (system.remembers(ctx.idempotencyKey)) apply(ctx) else throw StepRejected("refused")
                 Call.NOT_SENT -> throw StepNotSent("connection refused")
                 Call.LOST_REQUEST -> throw IOException("read timeout (request lost, not applied)")
-                Call.LOST_RESPONSE -> { system.apply(ctx.key, ctx.input); pause(); throw IOException("read timeout (applied)") }
-                Call.OUTLIVES_LOCK -> system.apply(ctx.key, ctx.input).also { delay(config.callLock + 200.milliseconds) }
-                Call.CRASH -> { if (dice.chance(0.5)) system.apply(ctx.key, ctx.input); crash() }
+                Call.LOST_RESPONSE -> { apply(ctx); pause(); throw IOException("read timeout (applied)") }
+                Call.OUTLIVES_LOCK -> apply(ctx).also { delay(config.callLock + 200.milliseconds) }
+                Call.CRASH -> { if (dice.chance(0.5)) apply(ctx); crash() }
                 // A JVM Error, not an Exception (a TODO() or an assertion in a client), applied or not.
-                Call.JVM_ERROR -> { if (dice.chance(0.5)) system.apply(ctx.key, ctx.input); throw NotImplementedError("client bug") }
+                Call.JVM_ERROR -> { if (dice.chance(0.5)) apply(ctx); throw NotImplementedError("client bug") }
             }
         }
 
@@ -233,11 +250,13 @@ class SagaStressIT {
     }
 
     /** Steps calling one system each; each step checks the reference of the one before it. */
+    /** Steps calling one system each; a name ending with `+keys` is a system that accepts idempotency keys. */
     private fun chain(vararg systems: String) =
-        systems.map(::ExternalSystem).fold(emptyList<ChaosStep>()) { acc, s -> acc + ChaosStep(s, acc.lastOrNull()) }
+        systems.map { ExternalSystem(it.removeSuffix("+keys"), keys = it.endsWith("+keys")) }
+            .fold(emptyList<ChaosStep>()) { acc, s -> acc + ChaosStep(s, acc.lastOrNull()) }
 
     private val stepsByType = mapOf(
-        "ITEM_SETUP" to chain("stock", "booking", "promo"),
+        "ITEM_SETUP" to chain("stock", "booking+keys", "promo"),     // booking: replayed, never checked
         "ITEM_EXIT" to chain("unstock", "archive"),      // the type an old pod does not know (rolling deploy)
         "ITEM_PAY" to chain("charge", "ship"),           // with a wait for the payment between them
     )
@@ -552,6 +571,8 @@ class SagaStressIT {
                     // A compensation stuck while its effect is already gone (removed, then the undo failed): done by hand.
                     state == SagaState.COMPENSATING -> if (truth == null && dice.chance(0.6)) "markCompensated" else "retry"
                     truth is PaymentEvent && !truth.succeeded -> "abort"   // declined: the saga gives up
+                    // The key may be forgotten: not applied → a fresh key; applied → as any applied step, below.
+                    saga.stuckReason == StuckReason.KEY_EXPIRED && truth == null -> "retry(newKey)"
                     truth != null -> if (dice.chance(0.7)) "markDone" else "abort(applied)"
                     else -> if (dice.chance(0.7)) "retry" else "abort"
                 }
@@ -559,6 +580,7 @@ class SagaStressIT {
                 try {
                     when (action) {
                         "retry" -> engine.retry(id, "operator")
+                        "retry(newKey)" -> engine.retry(id, "operator", newKey = true)
                         "markCompensated" -> engine.markCompensated(id, "operator")
                         "markDone" -> engine.markDone(id, json, "operator")
                         "abort(applied)" -> engine.abort(id, "operator", currentStepApplied = true, output = json)
@@ -668,6 +690,7 @@ class SagaStressIT {
             SagaEvents.RESUME_FAILED,
             SagaEvents.MANUAL_RETRY, SagaEvents.MANUAL_DONE, SagaEvents.MANUAL_ABORT, SagaEvents.MANUAL_COMPENSATED,
             SagaEvents.WAIT_STARTED, SagaEvents.WAIT_TIMED_OUT, SagaEvents.SIGNAL_RECEIVED, SagaEvents.CANCEL_REQUESTED,
+            SagaEvents.KEY_EXPIRED,
         )
         val outcome = Regex("(EXECUTE|CHECK|COMPENSATE):[A-Za-z]+")
         pg.query("SELECT DISTINCT event FROM saga_log") { it.getString(1) }
@@ -689,6 +712,12 @@ class SagaStressIT {
         val created = pg.long("SELECT count(*) FROM saga_log WHERE event = 'CREATED'")
         if (created != sagaCount.toLong()) problems += "expected $sagaCount CREATED events, found $created"
 
+        // To investigate a failed run: the history of the first sagas that broke an invariant.
+        problems.mapNotNull { Regex("^(ITEM_[A-Z]+-[0-9]+):").find(it)?.groupValues?.get(1) }.distinct().take(2).forEach { k ->
+            println("History of $k:\n" + pg.query(
+                "SELECT l.at, l.step_index, l.event, l.detail, l.actor FROM saga_log l JOIN saga s ON s.id = l.saga_id WHERE s.business_key = '$k' ORDER BY l.id",
+            ) { "  ${it.getString(2)} ${it.getString(3)} ${it.getString(5) ?: ""} ${it.getString(4)?.take(150)}" }.joinToString("\n"))
+        }
         if (problems.isNotEmpty()) {
             fail("${problems.size} invariant violations (seed $seed):\n" + problems.take(50).joinToString("\n"))
         }

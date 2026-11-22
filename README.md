@@ -253,6 +253,35 @@ The external system must carry our saga id, for example as the payment's referen
 
 **Cancelling.** `engine.cancel(sagaId, reason, actor)` abandons a saga, a customer who cancels for example: everything done so far is compensated. A saga that waits or is ready compensates at once. One with a call in flight, or an outcome still to check, compensates as soon as that outcome is recorded, the call included. A finished saga cannot be cancelled. The saga keeps `cancel_requested_at` and the `reason` given (`cancel_reason`), which nothing overwrites, unlike `last_error`; who cancelled is in `saga_log` (`CANCEL_REQUESTED`).
 
+### Steps with an idempotency key
+
+When a step's service accepts an idempotency key, mark the step `idempotent` and send the engine's key. After an unknown outcome, the engine then **replays the call with the same key** instead of waiting `settleDelay` and checking: the service answers a replay with its first result, so nothing is applied twice, and the step needs no `check`.
+
+```kotlin
+val payment = step<Payment>("create-payment") {
+    idempotent(keyRetention = 24.hours)                  // how long the service remembers a key: its documented minimum
+    execute { payments.create(input.amount, idempotencyKey = idempotencyKey) }
+    compensate { own -> own?.let { payments.refund(it.id, idempotencyKey = idempotencyKey) } }
+}
+```
+
+- **The key** is `<saga id>/<step name>/execute` for every attempt of the call, on every pod (`/compensate` for the undo). `idempotencyUuid` gives it as a UUID (version 5) for services that want one. It holds no saga data.
+- **Until a replay answers, the step stays `UNKNOWN`:** it may have been applied. `abort` is refused and `cancel` waits, then undoes the step too if the replay returns it done. A replay that is not sent (`StepNotSent`) keeps it `UNKNOWN`.
+- **Replays use the usual backoff** and `maxAttempts`; past them, the step is stuck (`TOO_MANY_ATTEMPTS`). `retry` replays with the same key: safe without looking first.
+- **The key's window.** The engine never sends a key the service may have forgotten: each call must end before `keyRetention` has passed since the key was first used. Otherwise the step is stuck with `KEY_EXPIRED`, and no call is made. If the step was not applied, `retry(id, actor, newKey = true)` sends a fresh key.
+- **Mixed sagas.** Idempotent and other steps mix freely. A step may also send the key without being marked idempotent: it gets the service's protection, and the engine keeps checking. Do that until the service's guarantees are confirmed.
+
+Before marking a step idempotent, confirm with the service's team:
+
+| Question | What the step does |
+|---|---|
+| How long is a key remembered? | That is `keyRetention`; take the documented minimum |
+| Does a replay of an applied request always return its first result? | Required. A replay must never answer a refusal for a request that was applied: the engine would take it as not applied and compensate the earlier steps only |
+| Same key with a different request? | Build the request only from the input and earlier outputs, which never change |
+| A replay while the first request is still running? | Map the "in progress" answer (often 409) to `StepNotSent` |
+| Is a failure remembered for the key? | A remembered refusal is a `StepRejected`; for a temporary one, an operator uses `retry(newKey = true)` |
+| Format and length? | `idempotencyKey` is about 70 characters (step names are limited to 100); `idempotencyUuid` is 36 |
+
 ---
 
 ## Running sagas
@@ -346,12 +375,13 @@ When a saga is `STUCK`, a human decides. List them with `engine.findStuck()` (se
 | `OUTPUT_UNSTORABLE` | The call was made, but its output could not be encoded or is over `maxDataBytes` | `markDone` with the output, or `abort` |
 | `RECORD_FAILED` | The outcome could not be recorded (a hook threw…) | Fix the cause, then `markDone(id, null)`: a successful call's output is already saved |
 | `NO_SIGNAL` | A signal step's timeout passed, and it has no check | Deliver the signal with `engine.signal`, then `retry`; or `abort` |
+| `KEY_EXPIRED` | An idempotent step's service may have forgotten its key: a replay could duplicate | Look in the service: applied → `markDone`; not applied → `retry(id, actor, newKey = true)`; or `abort` |
 
 `last_error` gives the detail, and `stuckAt` when it happened. Expose these from an admin screen:
 
 | Call | Use it when |
 |---|---|
-| `engine.retry(id, actor)` | The cause is fixed (service back up, data corrected). Forward, it **executes the step again without checking**: if the saga is stuck because a check could not tell, first confirm by hand that the step was not applied. |
+| `engine.retry(id, actor)` | The cause is fixed (service back up, data corrected). Forward, it **executes the step again without checking**: if the saga is stuck because a check could not tell, first confirm by hand that the step was not applied. An idempotent step is replayed with the same key instead, which is safe; `newKey = true` sends a fresh key, once you know the step was not applied. |
 | `engine.markDone(id, output, actor)` | You confirmed by hand that the step was applied. `output` is the step's output as JSON, checked against the step's type before it is saved; `null` keeps the output already saved (after `RECORD_FAILED`), or means no output. |
 | `engine.abort(id, actor, currentStepApplied, output)` | You give up: completed steps are undone. Works on a waiting saga too. Refused while a call is in flight or its outcome is unknown. For a stuck step, look in the external system first: with `currentStepApplied = true` the stuck step is undone too, and its compensation receives `output` (JSON, checked like `markDone`'s). |
 | `engine.markCompensated(id, actor)` | A compensation is stuck, and you undid the step by hand (or there was nothing to undo). The step is marked compensated and the saga goes on undoing the previous ones, or ends `FAILED`. Only for a stuck compensation. |
@@ -479,7 +509,7 @@ Two longer checks run against PostgreSQL in Docker. They are left out of `./grad
 ```
 
 **`SagaStressIT`** runs hundreds of sagas while failures are injected at random, and checks every invariant at the end:
-- **Injected failures:** rejections, requests not sent, lost requests and lost responses, calls that outlive their lock, failing or undecided checks, failing compensations, hooks that throw after writing, and pods dying mid-call. Payment sagas wait for the provider's event, which arrives early, late (after the timeout), twice or never, and customers cancel sagas at random moments.
+- **Injected failures:** rejections, requests not sent, lost requests and lost responses, calls that outlive their lock, failing or undecided checks, failing compensations, hooks that throw after writing, and pods dying mid-call. Payment sagas wait for the provider's event, which arrives early, late (after the timeout), twice or never, and customers cancel sagas at random moments. The booking system accepts idempotency keys, with a 3-second window: its step is replayed, never checked, and sometimes outlives its key.
 - **Concurrent actors:** several pods resume sagas, a Kafka listener delivers payment events, and an operator pages through `findStuck` and resolves stuck sagas from what the external systems really hold.
 - **Ground truth:** the simulated external systems record what was really applied.
 - **Invariants checked:**
@@ -514,6 +544,8 @@ The engine never replays a call blindly, but a duplicate can still happen in the
 - **The lookup lags.** If the external system's search is eventually consistent, a check can answer "not done" for a call that was applied. A `check` must read from a source that already shows what was written.
 - **A step classifies an error wrongly.** Throwing `StepNotSent` for a request that may have left skips the check. When in doubt, let the exception through: unknown is the safe default.
 - **An operator runs `retry` on a step that was applied.** `retry` executes again without checking. Look in the external system first.
+- **An idempotent step's service breaks its contract:** it forgets a key before `keyRetention`, or answers a replay of an applied request with a refusal. The engine trusts what the service documents; confirm it, and declare the shortest retention.
+- **An operator sends a fresh key** (`retry(newKey = true)`) for a step that was applied. Look in the service first.
 
 ### Calls must be cancellable
 

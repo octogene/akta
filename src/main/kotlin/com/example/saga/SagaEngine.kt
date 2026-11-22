@@ -57,6 +57,12 @@ class SagaEngine(
                     "Saga ${def.type}, step ${step.name}: cannot serialize its output $type (missing @Serializable?)"
                 }
             }
+            for (step in def.steps) step.idempotency?.let { idempotency ->
+                // A single call, which may last callLock, must end while the service still knows the key.
+                require(idempotency.keyRetention > config.callLock) {
+                    "Saga ${def.type}, step ${step.name}: keyRetention (${idempotency.keyRetention}) must exceed callLock (${config.callLock})"
+                }
+            }
         }
     }
 
@@ -258,16 +264,32 @@ class SagaEngine(
      * Retries the stuck step. Forward, this EXECUTES the step again without checking first:
      * when the saga is stuck because a check could not tell, only use it once you have confirmed
      * by hand that the step was not applied (otherwise use [markDone] or [abort]).
+     *
+     * For an idempotent step, a retry replays with the same key: safe without looking first, while the service
+     * remembers the key. [newKey] sends a fresh key instead: only once you have confirmed in the service that
+     * the step was not applied (after [StuckReason.KEY_EXPIRED], or when the service keeps answering a failure
+     * it remembered for the old key).
      */
-    suspend fun retry(id: Uuid, actor: String): SagaRecord = manual(id, actor, SagaEvents.MANUAL_RETRY) { r, now ->
-        require(r.stepStatus == StepStatus.STUCK) { "Saga $id is not stuck" }
-        ManualChange(
-            r.copy(
-                stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now, lastError = null,
-                stuckReason = null, stuckAt = null,
-            ),
-        )
-    }
+    suspend fun retry(id: Uuid, actor: String, newKey: Boolean = false): SagaRecord =
+        manual(id, actor, SagaEvents.MANUAL_RETRY) { r, now ->
+            require(r.stepStatus == StepStatus.STUCK) { "Saga $id is not stuck" }
+            require(newKey || r.stuckReason != StuckReason.KEY_EXPIRED) {
+                "The idempotency key of saga $id may be forgotten by its service: confirm the step was not applied, " +
+                    "then retry with newKey = true (or markDone, or abort)"
+            }
+            val generation = if (newKey) r.keyGeneration + 1 else r.keyGeneration
+            // An idempotent step whose key was used may be applied: it is replayed, and stays UNKNOWN meanwhile.
+            val idempotent = r.state == SagaState.RUNNING && definition(r.type).stepAt(r.stepIndex).idempotency != null
+            val replay = idempotent && !newKey && r.keySince != null
+            ManualChange(
+                r.copy(
+                    stepStatus = if (replay) StepStatus.UNKNOWN else StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now, lastError = null,
+                    stuckReason = null, stuckAt = null,
+                    keySince = if (newKey) null else r.keySince, keyGeneration = generation,
+                ),
+                detail = if (newKey) "newKey: generation $generation" else null,
+            )
+        }
 
     /**
      * The stuck step was found done by hand: move on to the next one. [output] is the step's output as
@@ -518,6 +540,8 @@ class SagaEngine(
         val action: Action,
         val ctx: SagaContext<Any?>,
         val trace: String?,
+        /** An idempotent step whose key was already used: an earlier attempt may have been applied. */
+        val replay: Boolean = false,
     )
 
     /** [event]: the second half of the logged event (see [SagaEvents]). Stored: never change it. */
@@ -601,10 +625,31 @@ class SagaEngine(
                 else -> Unit                              // UNKNOWN: its timeout check, claimed below
             }
         }
+        val current = def.stepAt(r.stepIndex)
+        val idempotency = current.idempotency.takeIf { r.state == SagaState.RUNNING }
         val action = when {
-            r.stepStatus == StepStatus.UNKNOWN -> Action.CHECK
+            // An idempotent step's unknown outcome is replayed with the same key, never checked.
+            r.stepStatus == StepStatus.UNKNOWN && idempotency == null -> Action.CHECK
             r.state == SagaState.RUNNING -> Action.EXECUTE
             else -> Action.COMPENSATE
+        }
+        var keySince = r.keySince
+        val replay = idempotency != null && keySince != null
+        if (idempotency != null) {
+            val since = keySince ?: now
+            // The whole call must end while the service still knows the key: past that, a replay could duplicate.
+            if (now + config.callLock >= since + idempotency.keyRetention) {
+                val expired = stuck(
+                    r, StuckReason.KEY_EXPIRED,
+                    "The idempotency key of step '${current.name}', first used at $since, may be forgotten by its " +
+                        "service (kept ${idempotency.keyRetention}): a replay could duplicate",
+                    now,
+                )
+                save(expired, now)
+                log(r.id, r.stepIndex, current.name, SagaEvents.KEY_EXPIRED, expired.lastError, now, trace)
+                return Cycle(expired, next = null)
+            }
+            keySince = since
         }
         val lockedUntil = now + config.callLock
         val claimed = r.copy(
@@ -612,9 +657,10 @@ class SagaEngine(
             attempts = if (action == Action.CHECK) r.attempts else r.attempts + 1,
             lockedUntil = lockedUntil,
             nextAttemptAt = lockedUntil,      // the recovery job looks again when the lock expires
+            keySince = keySince,
         )
         save(claimed, now)
-        return Cycle(claimed, Work(claimed, def.stepAt(r.stepIndex), action, ctx, trace))
+        return Cycle(claimed, Work(claimed, current, action, ctx.forCall(keyOf(claimed, current, action)), trace, replay))
     }
 
     /**
@@ -731,12 +777,16 @@ class SagaEngine(
                 now,
             )
             is Outcome.Rejected -> compensateFrom(r.copy(lastError = outcome.error), r.stepIndex - 1, now)
-            is Outcome.NotSent -> retryLater(r, outcome.error, now)
-            is Outcome.Unknown -> r.copy(
-                stepStatus = StepStatus.UNKNOWN,
-                nextAttemptAt = now + config.settleDelay,
-                lastError = outcome.error,
-            )
+            // A replay that never left says nothing of the earlier attempt, which may be applied: still UNKNOWN.
+            is Outcome.NotSent -> if (work.replay) replayLater(r, "${outcome.error} (an earlier attempt may be applied)", now) else retryLater(r, outcome.error, now)
+            is Outcome.Unknown -> when {
+                work.step.idempotency == null -> r.copy(
+                    stepStatus = StepStatus.UNKNOWN,
+                    nextAttemptAt = now + config.settleDelay,
+                    lastError = outcome.error,
+                )
+                else -> replayLater(r, outcome.error, now)
+            }
             // Not applied: safe to execute again, or to stop here if the step keeps failing.
             Outcome.NotDone -> if (r.attempts >= config.maxAttempts) {
                 stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: ${r.lastError}", now)
@@ -825,11 +875,14 @@ class SagaEngine(
         if (r.cancelRequestedAt != null && r.state == SagaState.RUNNING) return compensateFrom(r, r.stepIndex, now)
         val index = r.stepIndex + 1
         return if (index == def.steps.size) {
-            r.copy(state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null, stuckReason = null, stuckAt = null)
+            r.copy(
+                state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null, stuckReason = null, stuckAt = null,
+                keySince = null, keyGeneration = 0,
+            )
         } else {
             r.copy(
                 stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, nextAttemptAt = now, lastError = null,
-                stuckReason = null, stuckAt = null,
+                stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0,
             )
         }
     }
@@ -837,12 +890,24 @@ class SagaEngine(
     /** Undoes the completed steps, from [index] down to the first one. */
     private fun compensateFrom(r: SagaRecord, index: Int, now: Instant): SagaRecord =
         if (index < 0) {
-            r.copy(state = SagaState.FAILED, stepStatus = StepStatus.READY, stuckReason = null, stuckAt = null)
+            r.copy(state = SagaState.FAILED, stepStatus = StepStatus.READY, stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0)
         } else {
             r.copy(
                 state = SagaState.COMPENSATING, stepIndex = index, stepStatus = StepStatus.READY,
-                attempts = 0, nextAttemptAt = now, stuckReason = null, stuckAt = null,
+                attempts = 0, nextAttemptAt = now, stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0,
             )
+        }
+
+    /**
+     * An idempotent step that may have been applied: it stays UNKNOWN (abort is refused, cancel waits) and is
+     * replayed with the same key after backoff, until a replay answers. No settle delay: the service answers
+     * a replay with the first result.
+     */
+    private fun replayLater(r: SagaRecord, error: String, now: Instant): SagaRecord =
+        if (r.attempts >= config.maxAttempts) {
+            stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
+        } else {
+            r.copy(stepStatus = StepStatus.UNKNOWN, nextAttemptAt = now + config.backoff(r.attempts), lastError = "$error; retrying with the same key")
         }
 
     private fun retryLater(r: SagaRecord, error: String, now: Instant): SagaRecord =
@@ -857,7 +922,17 @@ class SagaEngine(
      * Compensation: compensations are safe to repeat, so it simply runs again, up to [SagaConfig.maxAttempts].
      */
     private fun lockExpired(r: SagaRecord, since: Instant, now: Instant): SagaRecord =
-        if (r.state == SagaState.RUNNING) {
+        if (r.state == SagaState.RUNNING && definition(r.type).stepAt(r.stepIndex).idempotency != null) {
+            // Idempotent: replayed with the same key from the lock's expiry, as after an unknown outcome.
+            if (r.attempts >= config.maxAttempts) {
+                stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the call", now).copy(lockedUntil = null)
+            } else {
+                r.copy(
+                    stepStatus = StepStatus.UNKNOWN, lockedUntil = null, nextAttemptAt = since,
+                    lastError = "Lock expired during the call; retrying with the same key",
+                )
+            }
+        } else if (r.state == SagaState.RUNNING) {
             r.copy(
                 stepStatus = StepStatus.UNKNOWN, lockedUntil = null, nextAttemptAt = since + config.settleDelay,
                 lastError = "Lock expired during the call",
@@ -871,6 +946,15 @@ class SagaEngine(
                 lastError = "Lock expired during the compensation",
             )
         }
+
+    /**
+     * The idempotency key of a call: `<saga id>/<step>/execute` (a check shares it, so that it may replay), or
+     * `/compensate`; `/<generation>` added after `retry(newKey = true)`. Derived, so every pod computes it.
+     */
+    private fun keyOf(r: SagaRecord, step: AnyStep, action: Action): String {
+        val base = "${r.id}/${step.name}/${if (action == Action.COMPENSATE) "compensate" else "execute"}"
+        return if (r.keyGeneration > 0) "$base/${r.keyGeneration}" else base
+    }
 
     /** The saga stops for a human, for [reason]. Leaving STUCK clears both (see [next], [compensateFrom], [retry]). */
     private fun stuck(r: SagaRecord, reason: StuckReason, error: String?, now: Instant): SagaRecord =

@@ -109,6 +109,16 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
     private var compensateBlock: suspend SagaContext<I>.(own: O?) -> Unit = {}
     private var checkBlock: suspend SagaContext<I>.() -> CheckResult<O> = { CheckResult.CannotTell }
     private var describeBlock: ((O) -> String?)? = null
+    private var idempotency: Idempotency? = null
+
+    /**
+     * The step's service accepts an idempotency key, sent from `idempotencyKey`, and remembers it for
+     * [keyRetention] (what the service documents; take its minimum). After an unknown outcome, the call is
+     * replayed with the same key instead of checked. Confirm the service's guarantees first (see the README).
+     */
+    fun idempotent(keyRetention: Duration) {
+        idempotency = Idempotency(keyRetention)
+    }
 
     /**
      * The call. Returns the step's output.
@@ -164,9 +174,11 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
         }
         val stepName = name
         val type = outputType
+        val stepIdempotency = idempotency
         return object : SagaStep<I, O> {
             override val name = stepName
             override val outputType = type
+            override val idempotency = stepIdempotency
             override suspend fun execute(ctx: SagaContext<I>): O = ctx.executeBlock()
             override suspend fun compensate(ctx: SagaContext<I>, own: O?) = ctx.compensateBlock(own)
             override suspend fun check(ctx: SagaContext<I>): CheckResult<O> = ctx.checkBlock()

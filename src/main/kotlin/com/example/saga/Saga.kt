@@ -1,5 +1,6 @@
 package com.example.saga
 
+import java.security.MessageDigest
 import kotlin.reflect.KType
 import kotlin.time.Duration
 import kotlin.uuid.Uuid
@@ -66,6 +67,48 @@ class SagaContext<out I>(
     }
 
     internal fun output(stepName: String): Any? = outputs[stepName]
+
+    private var callKey: String? = null
+
+    /**
+     * The idempotency key of this call, for a service that accepts one: the same for every attempt of
+     * the call, on every pod, for the life of the saga (`<saga id>/<step name>/execute`, or `/compensate`
+     * for an undo; a check gets its step's execute key). Only inside execute, check and compensate.
+     */
+    val idempotencyKey: String
+        get() = callKey ?: throw IllegalStateException("No idempotency key outside a step's execute, check or compensate")
+
+    /** [idempotencyKey] as a name-based UUID (version 5), for a service that wants a UUID. Stable as the key. */
+    val idempotencyUuid: Uuid
+        get() = nameUuid(sagaId, idempotencyKey)
+
+    /** This context, for one call with [key]. */
+    internal fun forCall(key: String): SagaContext<I> =
+        SagaContext(sagaId, this.key, input, outputs).also { it.callKey = key }
+}
+
+/** RFC 9562 version 5: SHA-1 of the namespace's bytes and the name, with the version and variant bits set. */
+private fun nameUuid(namespace: Uuid, name: String): Uuid {
+    val digest = MessageDigest.getInstance("SHA-1").run {
+        update(namespace.toByteArray())
+        digest(name.encodeToByteArray())
+    }
+    val bytes = digest.copyOf(16)
+    bytes[6] = ((bytes[6].toInt() and 0x0f) or 0x50).toByte()
+    bytes[8] = ((bytes[8].toInt() and 0x3f) or 0x80).toByte()
+    return Uuid.fromByteArray(bytes)
+}
+
+/**
+ * A step whose service accepts an idempotency key: replaying a call with the same key returns the first
+ * result instead of applying it twice. The engine then replays it after an unknown outcome, instead of
+ * waiting and checking. [keyRetention] is how long the service remembers a key: the engine never sends a
+ * key it may have outlived (the step becomes stuck with [StuckReason.KEY_EXPIRED]).
+ */
+data class Idempotency(val keyRetention: Duration) {
+    init {
+        require(keyRetention.isPositive()) { "keyRetention must be positive" }
+    }
 }
 
 /**
@@ -78,6 +121,12 @@ interface SagaStep<I, O> {
 
     /** The type of the output, for the engine's serializer. Null when the step has no output (O is Unit). */
     val outputType: KType?
+
+    /**
+     * Set when the step's service accepts an idempotency key, which the step sends from
+     * [SagaContext.idempotencyKey]. Default: none, an unknown outcome is checked.
+     */
+    val idempotency: Idempotency? get() = null
 
     /**
      * Performs the call and returns its output.
@@ -170,5 +219,10 @@ class SagaDefinition<I>(
         val duplicateSignals = signals.groupBy { it.signal }.filterValues { it.size > 1 }.keys
         require(duplicateSignals.isEmpty()) { "Signal names used by several steps in saga $type: $duplicateSignals" }
         signals.forEach { require(it.outputType != null) { "Signal step '${it.name}' of saga $type needs a value type" } }
+        signals.forEach { require(it.idempotency == null) { "Signal step '${it.name}' of saga $type makes no call: it cannot be idempotent" } }
+        // The name is part of the idempotency key, which services limit in length.
+        steps.forEach { require(it.name.length <= MAX_STEP_NAME) { "Step name '${it.name}' of saga $type is over $MAX_STEP_NAME characters" } }
     }
 }
+
+private const val MAX_STEP_NAME = 100

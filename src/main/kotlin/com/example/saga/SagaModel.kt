@@ -49,6 +49,11 @@ enum class StuckReason {
     RECORD_FAILED,
     /** A signal step's timeout passed, and it has no check. Deliver the signal and `retry`, or `abort`. */
     NO_SIGNAL,
+    /**
+     * An idempotent step's key may be forgotten by its service: a replay could duplicate. Look in the
+     * service: applied → `markDone`; not applied → `retry(newKey = true)`; or `abort`.
+     */
+    KEY_EXPIRED,
 }
 
 /** The persisted state of a saga: one row. */
@@ -89,6 +94,10 @@ data class SagaRecord(
     val stuckReason: StuckReason? = null,
     /** When the saga became STUCK; null when it is not. */
     val stuckAt: Instant? = null,
+    /** First use of the current step's idempotency key, for an idempotent step: its retention starts here. */
+    val keySince: Instant? = null,
+    /** Bumped by `retry(newKey = true)`: part of the current step's key. Reset when the saga moves to another step. */
+    val keyGeneration: Int = 0,
 )
 
 /** Where [SagaEngine.findStuck] continues: after this saga. */
@@ -149,6 +158,8 @@ object SagaEvents {
     const val WAIT_TIMED_OUT = "WAIT_TIMED_OUT"
     /** A signal arrived; the detail says delivered, stored, consumed (stored earlier) or ignored. */
     const val SIGNAL_RECEIVED = "SIGNAL_RECEIVED"
+    /** An idempotent step's key may be forgotten by its service: STUCK ([StuckReason.KEY_EXPIRED]), no call made. */
+    const val KEY_EXPIRED = "KEY_EXPIRED"
     /** [SagaEngine.cancel] was called; the detail gives the reason. */
     const val CANCEL_REQUESTED = "CANCEL_REQUESTED"
 
