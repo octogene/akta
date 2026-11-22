@@ -1057,7 +1057,8 @@ class SagaEngine(
             try {
                 block()
             } finally {
-                txEvents.set(outer)
+                // remove(), not set(null): pooled threads are left exactly as they were found.
+                if (outer == null) txEvents.remove() else txEvents.set(outer)
             }
         }
         committed?.let { emit(it.events) }
