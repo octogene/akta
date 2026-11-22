@@ -1,6 +1,6 @@
-site_name: saga-engine
+site_name: akta
 site_description: A small saga engine for Kotlin services that call external systems, with state in PostgreSQL.
-copyright: saga-engine documentation
+copyright: akta documentation
 
 theme:
   name: material

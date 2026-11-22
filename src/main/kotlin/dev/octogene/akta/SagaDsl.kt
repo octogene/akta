@@ -1,4 +1,4 @@
-package com.example.saga
+package dev.octogene.akta
 
 import kotlin.reflect.KType
 import kotlin.reflect.typeOf

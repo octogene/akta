@@ -1,4 +1,4 @@
-package com.example.saga
+package dev.octogene.akta
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll

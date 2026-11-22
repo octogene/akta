@@ -1,1 +1,1 @@
-rootProject.name = "saga-engine"
+rootProject.name = "akta"

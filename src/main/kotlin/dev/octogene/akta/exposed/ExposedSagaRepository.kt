@@ -1,14 +1,14 @@
-package com.example.saga.exposed
+package dev.octogene.akta.exposed
 
-import com.example.saga.DuplicateSagaException
-import com.example.saga.SagaLogEntry
-import com.example.saga.SagaRecord
-import com.example.saga.SagaRepository
-import com.example.saga.SagaState
-import com.example.saga.SagaStats
-import com.example.saga.StepStatus
-import com.example.saga.StuckCursor
-import com.example.saga.StuckReason
+import dev.octogene.akta.DuplicateSagaException
+import dev.octogene.akta.SagaLogEntry
+import dev.octogene.akta.SagaRecord
+import dev.octogene.akta.SagaRepository
+import dev.octogene.akta.SagaState
+import dev.octogene.akta.SagaStats
+import dev.octogene.akta.StepStatus
+import dev.octogene.akta.StuckCursor
+import dev.octogene.akta.StuckReason
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
@@ -104,7 +104,7 @@ object SagaLogTable : Table("saga_log") {
 
 /**
  * PostgreSQL implementation with Exposed (DSL). Uses the current Exposed transaction, so
- * [com.example.saga.SagaEngine.create] can run inside the application's own transaction.
+ * [dev.octogene.akta.SagaEngine.create] can run inside the application's own transaction.
  */
 class ExposedSagaRepository : SagaRepository {
 

@@ -1,4 +1,4 @@
-package com.example.saga
+package dev.octogene.akta
 
 /**
  * Told what the engine wrote to `saga_log`, once the transaction that wrote it has committed: for

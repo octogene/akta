@@ -1,4 +1,4 @@
-package com.example.saga.exposed
+package dev.octogene.akta.exposed
 
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
@@ -41,7 +41,7 @@ class PostgresFixture(private val durable: Boolean) : AutoCloseable {
 
     /** Drops and recreates the engine's tables, plus [extraDdl] (e.g. a business table used by hooks). */
     fun resetSchema(extraDdl: String = "") {
-        val schema = javaClass.getResource("/com/example/saga/schema.sql")!!.readText()
+        val schema = javaClass.getResource("/dev/octogene/akta/schema.sql")!!.readText()
         sql {
             exec("DROP TABLE IF EXISTS saga_log, saga_signal, saga_step_result, saga, item")
             exec(schema)

@@ -1,4 +1,4 @@
-package com.example.saga
+package dev.octogene.akta
 
 import java.security.MessageDigest
 import kotlin.reflect.KType

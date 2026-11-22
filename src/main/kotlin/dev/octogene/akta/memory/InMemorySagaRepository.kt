@@ -1,13 +1,13 @@
-package com.example.saga.memory
+package dev.octogene.akta.memory
 
-import com.example.saga.DuplicateSagaException
-import com.example.saga.SagaLogEntry
-import com.example.saga.SagaRecord
-import com.example.saga.SagaRepository
-import com.example.saga.SagaStats
-import com.example.saga.SagaTransactions
-import com.example.saga.StepStatus
-import com.example.saga.StuckCursor
+import dev.octogene.akta.DuplicateSagaException
+import dev.octogene.akta.SagaLogEntry
+import dev.octogene.akta.SagaRecord
+import dev.octogene.akta.SagaRepository
+import dev.octogene.akta.SagaStats
+import dev.octogene.akta.SagaTransactions
+import dev.octogene.akta.StepStatus
+import dev.octogene.akta.StuckCursor
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.time.Instant

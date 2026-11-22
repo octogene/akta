@@ -1,21 +1,21 @@
-package com.example.saga.exposed
+package dev.octogene.akta.exposed
 
-import com.example.saga.DuplicateSagaException
-import com.example.saga.KotlinxJsonSagaSerializer
-import com.example.saga.SagaContext
-import com.example.saga.SagaDefinition
-import com.example.saga.SagaEngine
-import com.example.saga.SagaConfig
-import com.example.saga.SagaEvents
-import com.example.saga.SagaState
-import com.example.saga.StuckCursor
-import com.example.saga.StuckReason
-import com.example.saga.SignalResult
-import com.example.saga.StepStatus
-import com.example.saga.StepNotSent
-import com.example.saga.StepRejected
+import dev.octogene.akta.DuplicateSagaException
+import dev.octogene.akta.KotlinxJsonSagaSerializer
+import dev.octogene.akta.SagaContext
+import dev.octogene.akta.SagaDefinition
+import dev.octogene.akta.SagaEngine
+import dev.octogene.akta.SagaConfig
+import dev.octogene.akta.SagaEvents
+import dev.octogene.akta.SagaState
+import dev.octogene.akta.StuckCursor
+import dev.octogene.akta.StuckReason
+import dev.octogene.akta.SignalResult
+import dev.octogene.akta.StepStatus
+import dev.octogene.akta.StepNotSent
+import dev.octogene.akta.StepRejected
 
-import com.example.saga.saga
+import dev.octogene.akta.saga
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -63,7 +63,7 @@ class ExposedSagaRepositoryIT {
 
     @BeforeEach
     fun resetSchema() {
-        val schema = javaClass.getResource("/com/example/saga/schema.sql")!!.readText()
+        val schema = javaClass.getResource("/dev/octogene/akta/schema.sql")!!.readText()
         transaction(database) {
             exec("DROP TABLE IF EXISTS saga_log, saga_signal, saga_step_result, saga")
             exec(schema)

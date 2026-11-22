@@ -1,6 +1,6 @@
-package com.example.saga.exposed
+package dev.octogene.akta.exposed
 
-import com.example.saga.SagaTransactions
+import dev.octogene.akta.SagaTransactions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jetbrains.exposed.v1.jdbc.Database

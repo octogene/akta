@@ -23,7 +23,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.example:saga-engine:0.1.0")
+    implementation("dev.octogene:akta:0.1.0")
 }
 ```
 

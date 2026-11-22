@@ -5,7 +5,7 @@ plugins {
     `maven-publish`
 }
 
-group = "com.example"
+group = "dev.octogene"
 version = "0.1.0"
 
 repositories {
@@ -24,7 +24,7 @@ dependencies {
     api(libs.kotlinx.coroutines.core)
     // The format of saga inputs and step outputs (SagaSerializer).
     api(libs.kotlinx.serialization.json)
-    // Exposed is only used by the com.example.saga.exposed package.
+    // Exposed is only used by the dev.octogene.akta.exposed package.
     api(libs.exposed.core)
     api(libs.exposed.jdbc)
     implementation(libs.exposed.kotlin.datetime)
@@ -64,7 +64,7 @@ registerTaggedTest("stressTest", "stress", "Runs many sagas with random failures
 publishing {
     publications {
         create<MavenPublication>("maven") {
-            artifactId = "saga-engine"
+            artifactId = "akta"
             from(components["java"])
         }
     }

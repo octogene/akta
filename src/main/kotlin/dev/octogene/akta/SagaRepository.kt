@@ -1,4 +1,4 @@
-package com.example.saga
+package dev.octogene.akta
 
 import kotlin.time.Instant
 import kotlin.uuid.Uuid

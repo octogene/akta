@@ -1,4 +1,4 @@
-# saga-engine
+# akta
 
 A small, generic saga engine for Kotlin services that call external systems **which do not accept idempotency keys**. State lives in PostgreSQL (through Exposed), so a saga survives restarts, timeouts and crashes, and every call leaves a trace you can investigate.
 
@@ -109,7 +109,7 @@ The library targets Kotlin 2.x on JVM 17+, Exposed 1.x and PostgreSQL 12+.
 
 ```kotlin
 dependencies {
-    implementation("com.example:saga-engine:0.1.0")
+    implementation("dev.octogene:akta:0.1.0")
 }
 ```
 
@@ -117,7 +117,7 @@ Publish it locally while it has no repository: `./gradlew publishToMavenLocal`, 
 
 ### Database schema
 
-Copy [`src/main/resources/com/example/saga/schema.sql`](src/main/resources/com/example/saga/schema.sql) into one of your Flyway migrations (for example `V5__saga.sql`). It creates four tables:
+Copy [`src/main/resources/dev/octogene/akta/schema.sql`](src/main/resources/dev/octogene/akta/schema.sql) into one of your Flyway migrations (for example `V5__saga.sql`). It creates four tables:
 
 | Table | Content |
 |---|---|
@@ -420,7 +420,7 @@ The records carry the saga's encoded input, which may hold personal data: decide
 With OpenTelemetry (exported to Datadog):
 
 ```kotlin
-val meter = GlobalOpenTelemetry.getMeter("saga-engine")
+val meter = GlobalOpenTelemetry.getMeter("akta")
 val events = meter.counterBuilder("saga.events").build()
 val engine = SagaEngine(
     transactions, repository, definitions, KotlinxJsonSagaSerializer(),

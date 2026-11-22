@@ -1,9 +1,9 @@
-package com.example.saga.exposed
+package dev.octogene.akta.exposed
 
-import com.example.saga.KotlinxJsonSagaSerializer
-import com.example.saga.SagaConfig
-import com.example.saga.SagaEngine
-import com.example.saga.saga
+import dev.octogene.akta.KotlinxJsonSagaSerializer
+import dev.octogene.akta.SagaConfig
+import dev.octogene.akta.SagaEngine
+import dev.octogene.akta.saga
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope

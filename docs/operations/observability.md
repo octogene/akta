@@ -30,7 +30,7 @@ A listener is told about each history entry **after its transaction commits**, w
 ## With OpenTelemetry
 
 ```kotlin
-val meter = GlobalOpenTelemetry.getMeter("saga-engine")
+val meter = GlobalOpenTelemetry.getMeter("akta")
 val events = meter.counterBuilder("saga.events").build()
 
 val engine = SagaEngine(

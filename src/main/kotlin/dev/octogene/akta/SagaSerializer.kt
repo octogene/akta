@@ -1,4 +1,4 @@
-package com.example.saga
+package dev.octogene.akta
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer

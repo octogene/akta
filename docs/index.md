@@ -1,4 +1,4 @@
-# saga-engine
+# akta
 
 **A small saga engine for Kotlin services that call external systems.** A saga runs an ordered list of steps, each one a call to another system. If a step is refused, the engine undoes the steps already done. Its state lives in PostgreSQL, so a saga survives timeouts, restarts and pods that die mid-call.
 

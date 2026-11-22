@@ -1,7 +1,7 @@
-package com.example.saga
+package dev.octogene.akta
 
-import com.example.saga.memory.InMemorySagaRepository
-import com.example.saga.memory.InMemorySagaTransactions
+import dev.octogene.akta.memory.InMemorySagaRepository
+import dev.octogene.akta.memory.InMemorySagaTransactions
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.Test
