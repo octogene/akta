@@ -19,6 +19,6 @@ Indexes worth knowing:
 | `saga_one_running_per_key` (unique, partial: unfinished) | One unfinished saga per business key |
 | `saga_log_saga`, `saga_log_trace` | `history`, `historyByTrace` |
 
-```sql title="src/main/resources/dev/octogene/akta/schema.sql"
---8<-- "src/main/resources/dev/octogene/akta/schema.sql"
+```sql title="akta-exposed/src/main/resources/dev/octogene/akta/schema.sql"
+--8<-- "akta-exposed/src/main/resources/dev/octogene/akta/schema.sql"
 ```

@@ -8,7 +8,7 @@ A small, generic saga engine for Kotlin services that call external systems **wh
 - When it cannot decide, it stops and waits for a human, instead of risking a duplicate.
 - A saga can carry a typed **input**, fixed at creation, and each step a typed **output**, read by the steps after it: stored as JSON through kotlinx.serialization.
 
-**Documentation site** (Material for MkDocs: getting started, use cases, how it works, operations), from `docs/`:
+**Documentation site** (Material for MkDocs: getting started, use cases, a guide to clean architecture with Ktor, how it works, operations), from `docs/`:
 
 ```bash
 pipx run --spec mkdocs-material==9.6.14 mkdocs serve      # http://127.0.0.1:8000, reloads on edit
@@ -107,17 +107,26 @@ stateDiagram-v2
 
 The library targets Kotlin 2.x on JVM 17+, Exposed 1.x and PostgreSQL 12+.
 
+It comes in two modules:
+
+| Module | Content | Depends on |
+|---|---|---|
+| `akta-core` | The engine, the DSL, the model, and an in-memory store for tests | kotlinx.coroutines, kotlinx.serialization |
+| `akta-exposed` | The PostgreSQL store (`ExposedSagaRepository`, `ExposedSagaTransactions`) and its schema | `akta-core`, Exposed |
+
 ```kotlin
 dependencies {
-    implementation("dev.octogene:akta:0.1.0")
+    implementation("dev.octogene:akta-exposed:0.1.0")      // brings akta-core
 }
 ```
+
+A module that only declares sagas (an application layer, say) can depend on `akta-core` alone, with no database library on its classpath.
 
 Publish it locally while it has no repository: `./gradlew publishToMavenLocal`, and add `mavenLocal()` to the consumer's repositories.
 
 ### Database schema
 
-Copy [`src/main/resources/dev/octogene/akta/schema.sql`](src/main/resources/dev/octogene/akta/schema.sql) into one of your Flyway migrations (for example `V5__saga.sql`). It creates four tables:
+Copy [`akta-exposed/src/main/resources/dev/octogene/akta/schema.sql`](akta-exposed/src/main/resources/dev/octogene/akta/schema.sql) into one of your Flyway migrations (for example `V5__saga.sql`). It creates four tables:
 
 | Table | Content |
 |---|---|
@@ -498,7 +507,7 @@ engine.resumeDue()
 assertEquals(SagaState.COMPLETED, repository.find(id)!!.state)
 ```
 
-`SagaEngineTest` covers the engine itself, `SagaDslTest` the DSL. `ExposedSagaRepositoryIT` runs it against PostgreSQL with Testcontainers, so it needs Docker.
+In `akta-core`, `SagaEngineTest` covers the engine itself, `SagaDslTest` the DSL, and the other suites signals, idempotency and operations, all in memory. In `akta-exposed`, `ExposedSagaRepositoryIT` runs it against PostgreSQL with Testcontainers, so it needs Docker.
 
 ```bash
 ./gradlew test
@@ -511,7 +520,7 @@ Two longer checks run against PostgreSQL in Docker. They are left out of `./grad
 ```bash
 ./gradlew stressTest                                   # about 20 s
 ./gradlew stressTest -Dsaga.sagas=1000 -Dsaga.pods=5 -Dsaga.seed=42
-./gradlew benchmark                                    # about 40 s, report in build/reports/saga-benchmark.md
+./gradlew benchmark                                    # about 40 s, report in akta-exposed/build/reports/saga-benchmark.md
 ./gradlew benchmark -Dsaga.sagas=2000 -Dsaga.concurrency=16
 ```
 

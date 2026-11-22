@@ -74,6 +74,8 @@ nav:
       - Setting up an item in two systems: use-cases/item-setup.md
       - A reservation that waits for a payment: use-cases/reservation-payment.md
       - Services with idempotency keys: use-cases/idempotent-services.md
+  - Guides:
+      - Clean architecture with Ktor: guides/clean-architecture.md
   - How it works:
       - how-it-works/index.md
       - Saga lifecycle: how-it-works/lifecycle.md

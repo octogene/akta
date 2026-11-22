@@ -64,7 +64,7 @@ val engine = SagaEngine(
 ```bash
 ./gradlew test          # unit tests, and PostgreSQL integration tests (Docker, through Testcontainers)
 ./gradlew stressTest    # hundreds of sagas under random failures, every invariant checked (Docker)
-./gradlew benchmark     # the engine's own cost (Docker); report in build/reports/saga-benchmark.md
+./gradlew benchmark     # the engine's own cost (Docker); report in akta-exposed/build/reports/saga-benchmark.md
 ```
 
 The stress test simulates the external systems and records what they really applied. While it runs, it injects failures at random:

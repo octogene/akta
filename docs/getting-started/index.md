@@ -23,11 +23,16 @@ repositories {
 }
 
 dependencies {
-    implementation("dev.octogene:akta:0.1.0")
+    implementation("dev.octogene:akta-exposed:0.1.0")      // the PostgreSQL store; brings akta-core
 }
 ```
 
-The library brings kotlinx.serialization JSON with it (an `api` dependency), since your saga data types use its annotations.
+| Module | Content | Depends on |
+|---|---|---|
+| `akta-core` | The engine, the DSL, the model, and an in-memory store for tests | kotlinx.coroutines, kotlinx.serialization |
+| `akta-exposed` | The PostgreSQL store and its schema | `akta-core`, Exposed |
+
+A module that only declares sagas can depend on `akta-core` alone, with no database library on its classpath: see [Clean architecture with Ktor](../guides/clean-architecture.md). `akta-core` brings kotlinx.serialization JSON with it (an `api` dependency), since your saga data types use its annotations.
 
 ## The database schema
 
