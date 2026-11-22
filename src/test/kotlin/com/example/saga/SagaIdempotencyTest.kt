@@ -213,6 +213,26 @@ class SagaIdempotencyTest {
     }
 
     @Test
+    fun `requests that never left do not use the key`() {
+        val down = StepNotSent("connection refused")
+        val definition = payment(down, down, down, keyRetention = 2.minutes, check = null)
+        val engine = engine(definition, SagaConfig(maxAttempts = 3))
+        val id = engine.create(definition, "R-1")
+
+        val first = engine.run(id)
+        assertEquals(StepStatus.READY to null, first.stepStatus to first.keySince)   // not a used key
+        engine.resumeAfter(1.minutes)
+        assertEquals(StepStatus.READY, engine.stored(id).stepStatus)            // not UNKNOWN: abort is allowed
+        engine.resumeAfter(2.minutes)                                           // 3 minutes after the first: no KEY_EXPIRED
+
+        val stuck = engine.stored(id)
+        assertEquals(StuckReason.TOO_MANY_ATTEMPTS, stuck.stuckReason)
+        val retried = runBlocking { engine.retry(id, "operator") }              // a fresh start, not a replay
+        assertEquals(SagaState.COMPLETED, retried.state)
+        assertTrue(repository.log.none { it.event == SagaEvents.KEY_EXPIRED })
+    }
+
+    @Test
     fun `too many unknown outcomes make the step stuck, and a retry keeps the key`() {
         val definition = payment(IOException("timeout"), IOException("timeout"), check = null)
         val engine = engine(definition, SagaConfig(maxAttempts = 2))

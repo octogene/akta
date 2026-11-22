@@ -782,7 +782,12 @@ class SagaEngine(
             )
             is Outcome.Rejected -> compensateFrom(r.copy(lastError = outcome.error), r.stepIndex - 1, now)
             // A replay that never left says nothing of the earlier attempt, which may be applied: still UNKNOWN.
-            is Outcome.NotSent -> if (work.replay) replayLater(r, "${outcome.error} (an earlier attempt may be applied)", now) else retryLater(r, outcome.error, now)
+            // A first attempt that never left did not use the key: its window has not started (keySince cleared).
+            is Outcome.NotSent -> if (work.replay) {
+                replayLater(r, "${outcome.error} (an earlier attempt may be applied)", now)
+            } else {
+                retryLater(r.copy(keySince = null), outcome.error, now)
+            }
             is Outcome.Unknown -> when {
                 work.step.idempotency == null -> r.copy(
                     stepStatus = StepStatus.UNKNOWN,
