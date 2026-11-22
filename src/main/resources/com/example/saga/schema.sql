@@ -22,7 +22,7 @@ CREATE TABLE saga (
                                                         'KEY_EXPIRED')),
     stuck_at        timestamptz,                          -- when it became STUCK
     key_since       timestamptz,                          -- first use of the current step's idempotency key
-    key_generation  int         NOT NULL DEFAULT 0,       -- bumped by retry(newKey = true); reset at each step
+    key_generation  int         NOT NULL DEFAULT 0 CHECK (key_generation >= 0), -- bumped by retry(newKey = true); reset at each step
     created_at      timestamptz NOT NULL,
     updated_at      timestamptz NOT NULL,
     CONSTRAINT saga_lock CHECK ((step_status = 'IN_PROGRESS') = (locked_until IS NOT NULL)),
