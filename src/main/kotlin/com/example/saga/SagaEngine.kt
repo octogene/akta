@@ -629,8 +629,7 @@ class SagaEngine(
                 else -> Unit                              // UNKNOWN: its timeout check, claimed below
             }
         }
-        val current = def.stepAt(r.stepIndex)
-        val idempotency = current.idempotency.takeIf { r.state == SagaState.RUNNING }
+        val idempotency = step.idempotency.takeIf { r.state == SagaState.RUNNING }
         val action = when {
             // An idempotent step's unknown outcome is replayed with the same key, never checked.
             r.stepStatus == StepStatus.UNKNOWN && idempotency == null -> Action.CHECK
@@ -645,12 +644,12 @@ class SagaEngine(
             if (now + config.callLock >= since + idempotency.keyRetention) {
                 val expired = stuck(
                     r, StuckReason.KEY_EXPIRED,
-                    "The idempotency key of step '${current.name}', first used at $since, may be forgotten by its " +
+                    "The idempotency key of step '${step.name}', first used at $since, may be forgotten by its " +
                         "service (kept ${idempotency.keyRetention}): a replay could duplicate",
                     now,
                 )
                 save(expired, now)
-                log(r.id, r.stepIndex, current.name, SagaEvents.KEY_EXPIRED, expired.lastError, now, trace)
+                log(r.id, r.stepIndex, step.name, SagaEvents.KEY_EXPIRED, expired.lastError, now, trace)
                 return Cycle(expired, next = null)
             }
             keySince = since
@@ -664,7 +663,7 @@ class SagaEngine(
             keySince = keySince,
         )
         save(claimed, now)
-        return Cycle(claimed, Work(claimed, current, action, ctx.forCall(keyOf(claimed, current, action)), trace, replay))
+        return Cycle(claimed, Work(claimed, step, action, ctx.forCall(keyOf(claimed, step, action)), trace, replay))
     }
 
     /**
