@@ -8,6 +8,13 @@ A small, generic saga engine for Kotlin services that call external systems **wh
 - When it cannot decide, it stops and waits for a human, instead of risking a duplicate.
 - A saga can carry a typed **input**, fixed at creation, and each step a typed **output**, read by the steps after it: stored as JSON through kotlinx.serialization.
 
+**Documentation site** (Material for MkDocs: getting started, use cases, how it works, operations), from `docs/`:
+
+```bash
+pipx run --spec mkdocs-material==9.6.14 mkdocs serve      # http://127.0.0.1:8000, reloads on edit
+pipx run --spec mkdocs-material==9.6.14 mkdocs build --strict   # static site in site/
+```
+
 ---
 
 ## Contents
@@ -249,7 +256,7 @@ when (val result = engine.signal(Uuid.parse(event.reference), "payment", Payment
 | Does not exist, or expects another type | `IllegalArgumentException`, nothing stored |
 | (no saga with that id) | `NoSaga` |
 
-The external system must carry our saga id, for example as the payment's reference, so that its events lead back to the saga. `run` returns a saga that waits with `stepStatus = WAITING`: an HTTP handler answers 202, with what earlier steps returned (`requireResult(payment).url`).
+The external system must carry our saga id, for example as the payment's reference, so that its events lead back to the saga. `run` returns a saga that waits with `stepStatus = WAITING`: an HTTP handler answers 202. Step outputs are read inside the saga (`requireResult`), not from outside it, so the handler finds what it shows another way, for example the payment by its reference (our saga id).
 
 **Cancelling.** `engine.cancel(sagaId, reason, actor)` abandons a saga, a customer who cancels for example: everything done so far is compensated. A saga that waits or is ready compensates at once. One with a call in flight, or an outcome still to check, compensates as soon as that outcome is recorded, the call included. A finished saga cannot be cancelled. The saga keeps `cancel_requested_at` and the `reason` given (`cancel_reason`), which nothing overwrites, unlike `last_error`; who cancelled is in `saga_log` (`CANCEL_REQUESTED`).
 
