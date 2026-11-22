@@ -162,6 +162,12 @@ object SagaEvents {
     const val KEY_EXPIRED = "KEY_EXPIRED"
     /** [SagaEngine.cancel] was called; the detail gives the reason. */
     const val CANCEL_REQUESTED = "CANCEL_REQUESTED"
+    /**
+     * A cancellation that waited took effect when the saga was next claimed (after a manual retry, for
+     * example): it compensates. The detail gives the reason. A cancellation applied at once, or when a
+     * call's outcome is recorded, shows in that entry instead (CANCEL_REQUESTED, or the call's outcome).
+     */
+    const val CANCELLED = "CANCELLED"
 
     /*
      * Outcomes of a call are logged as "<action>:<outcome>":

@@ -99,7 +99,7 @@ class SagaSignalTest {
         val done = engine.run(id)
 
         assertEquals(SagaState.COMPLETED, done.state)                           // no wait at all
-        assertEquals("consumed (stored earlier)", details(SagaEvents.SIGNAL_RECEIVED).last())
+        assertEquals("consumed (stored earlier) ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).last())
     }
 
     @Test

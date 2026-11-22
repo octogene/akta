@@ -690,7 +690,7 @@ class SagaStressIT {
             SagaEvents.RESUME_FAILED,
             SagaEvents.MANUAL_RETRY, SagaEvents.MANUAL_DONE, SagaEvents.MANUAL_ABORT, SagaEvents.MANUAL_COMPENSATED,
             SagaEvents.WAIT_STARTED, SagaEvents.WAIT_TIMED_OUT, SagaEvents.SIGNAL_RECEIVED, SagaEvents.CANCEL_REQUESTED,
-            SagaEvents.KEY_EXPIRED,
+            SagaEvents.KEY_EXPIRED, SagaEvents.CANCELLED,
         )
         val outcome = Regex("(EXECUTE|CHECK|COMPENSATE):[A-Za-z]+")
         pg.query("SELECT DISTINCT event FROM saga_log") { it.getString(1) }

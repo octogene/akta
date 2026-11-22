@@ -219,6 +219,42 @@ class SagaOperationsTest {
     }
 
     @Test
+    fun `a stored signal that ends the saga is reported with the saga's final state`() {
+        val paid = saga("PAID") { awaitSignal<String>("wait", signal = "payment", timeout = 1.minutes) { logAs { it } } }
+        val declined = saga("DECLINED") {
+            awaitSignal<String>("wait", signal = "payment", timeout = 1.minutes) { onSignal { throw StepRejected("declined") } }
+        }
+        val engine = engine(paid, declined)
+        for ((definition, expected) in listOf(paid to SagaState.COMPLETED, declined to SagaState.FAILED)) {
+            val id = engine.create(definition, "K-${definition.type}")
+            assertEquals(SignalResult.Stored(id), runBlocking { engine.signal(id, "payment", "P-1") })   // before it waits
+
+            assertEquals(expected, engine.run(id).state)
+
+            val last = events.last { it.entry.sagaId == id }
+            assertEquals(SagaEvents.SIGNAL_RECEIVED, last.entry.event)
+            assertEquals(expected, last.state)                                  // not RUNNING, as before the signal
+            assertTrue(last.entry.detail!!.startsWith("consumed (stored earlier)"))
+        }
+    }
+
+    @Test
+    fun `a cancellation that waited is logged when it takes effect`() {
+        val definition = notSent()
+        val engine = engine(definition, config = once)
+        val id = engine.create(definition, "K-1")
+        engine.run(id)                                                          // stuck
+        runBlocking { engine.cancel(id, "customer cancelled", "support") }      // waits: the saga stays stuck
+
+        val failed = runBlocking { engine.retry(id, "operator") }               // the claim applies it
+
+        assertEquals(SagaState.FAILED, failed.state)
+        val cancelled = repository.log.single { it.event == SagaEvents.CANCELLED }
+        assertEquals("customer cancelled", cancelled.detail)
+        assertEquals(SagaState.FAILED, events.single { it.entry == cancelled }.state)
+    }
+
+    @Test
     fun `a transaction that rolls back reports nothing`() {
         val definition = saga("T") { step("call") { execute { } } }
         val engine = engine(definition)

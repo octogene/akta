@@ -420,8 +420,11 @@ class SagaEngine(
         val stored = repository.signal(r.id, step.signal)
         if (stored != null) {
             val value = decode(stored, checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
-            log(r.id, r.stepIndex, step.name, SagaEvents.SIGNAL_RECEIVED, "consumed (stored earlier)", now, trace)
-            return claimLocked(applySignal(r, def, step, ctx, value, stored, now), trace)
+            val updated = applySignal(r, def, step, ctx, value, stored, now)
+            // Logged after the change, as in deliver(): the event shows the saga as the signal left it.
+            val detail = listOfNotNull("consumed (stored earlier)", describe(step, value)?.let { "ref=$it" }).joinToString(" ")
+            log(r.id, r.stepIndex, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
+            return claimLocked(updated, trace)
         }
         val deadline = now + step.timeout
         val waiting = r.copy(stepStatus = StepStatus.WAITING, nextAttemptAt = deadline, attempts = 0, lastError = null)
@@ -602,6 +605,7 @@ class SagaEngine(
         val cancelled = cancelIfRequested(r, now)
         if (cancelled !== r) {
             save(cancelled, now)
+            log(r.id, r.stepIndex, null, SagaEvents.CANCELLED, cancelled.cancelReason, now, trace)
             finishIfNeeded(r, cancelled)
             return claimLocked(cancelled, trace)
         }
