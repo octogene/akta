@@ -6,8 +6,15 @@ import kotlin.uuid.Uuid
 /**
  * Storage for sagas. Every method is called INSIDE a transaction opened by [SagaTransactions].
  * The saga row is the lock of the whole saga: steps are never locked on their own.
+ *
+ * A saga's `lastError` and a log entry's `detail` are kept up to [MAX_TEXT] characters: longer text is cut.
  */
 interface SagaRepository {
+    companion object {
+        /** The longest `lastError` or log `detail` a repository keeps, in characters. */
+        const val MAX_TEXT = 2000
+    }
+
     /** Fails if another unfinished saga exists for the same key. */
     fun insert(record: SagaRecord, now: Instant)
 
@@ -49,10 +56,10 @@ interface SagaRepository {
     /** Stuck sagas of [types] (null: all), by `stuckAt` then id, after [after]. */
     fun findStuck(limit: Int, types: Collection<String>?, after: StuckCursor?): List<SagaRecord>
 
-    /** The log of a saga, oldest first. */
+    /** The log of a saga, oldest first; entries of the same instant in the order they were written. */
     fun history(sagaId: Uuid): List<SagaLogEntry>
 
-    /** The log entries of a trace, oldest first. */
+    /** The log entries of a trace, oldest first; entries of the same instant in the order they were written. */
     fun historyByTrace(traceId: String, limit: Int): List<SagaLogEntry>
 
     /** Counts and ages of the unfinished sagas of [types] (null: all). */

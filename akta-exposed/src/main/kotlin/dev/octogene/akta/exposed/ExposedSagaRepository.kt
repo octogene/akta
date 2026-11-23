@@ -185,7 +185,7 @@ class ExposedSagaRepository : SagaRepository {
             it[stepIndex] = entry.stepIndex
             it[stepName] = entry.stepName
             it[event] = entry.event
-            it[detail] = entry.detail?.take(MAX_TEXT)
+            it[detail] = entry.detail?.take(SagaRepository.MAX_TEXT)
             it[actor] = entry.actor
             it[traceId] = entry.traceId
         }
@@ -205,7 +205,7 @@ class ExposedSagaRepository : SagaRepository {
         s[SagaTable.keyGeneration] = r.keyGeneration
         s[SagaTable.nextAttemptAt] = r.nextAttemptAt.utc()
         s[SagaTable.lockedUntil] = r.lockedUntil?.utc()
-        s[SagaTable.lastError] = r.lastError?.take(MAX_TEXT)
+        s[SagaTable.lastError] = r.lastError?.take(SagaRepository.MAX_TEXT)
         s[SagaTable.traceparent] = r.traceparent
         s[SagaTable.updatedAt] = now.utc()
     }
@@ -347,7 +347,6 @@ class ExposedSagaRepository : SagaRepository {
     private fun ofTypes(types: Collection<String>?): Op<Boolean> = if (types == null) Op.TRUE else SagaTable.type inList types
 
     private companion object {
-        const val MAX_TEXT = 2000
         val UNFINISHED = listOf(SagaState.RUNNING.name, SagaState.COMPENSATING.name)
         val FINISHED = listOf(SagaState.COMPLETED.name, SagaState.FAILED.name)
     }

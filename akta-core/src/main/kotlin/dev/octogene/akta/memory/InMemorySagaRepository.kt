@@ -40,7 +40,7 @@ class InMemorySagaRepository : SagaRepository {
 
     override fun insert(record: SagaRecord, now: Instant) {
         if (sagas.values.any { it.key == record.key && !it.state.isFinished }) throw DuplicateSagaException(record.key)
-        sagas[record.id] = record
+        sagas[record.id] = record.truncated()
         updatedAt[record.id] = now
     }
 
@@ -49,9 +49,12 @@ class InMemorySagaRepository : SagaRepository {
     override fun find(id: Uuid): SagaRecord? = sagas[id]
 
     override fun save(record: SagaRecord, now: Instant) {
-        sagas[record.id] = record
+        sagas[record.id] = record.truncated()
         updatedAt[record.id] = now
     }
+
+    /** As a database column would keep it: see [SagaRepository.MAX_TEXT]. */
+    private fun SagaRecord.truncated() = copy(lastError = lastError?.take(SagaRepository.MAX_TEXT))
 
     override fun findDue(now: Instant, limit: Int, types: Collection<String>): List<Uuid> =
         sagas.values
@@ -74,7 +77,7 @@ class InMemorySagaRepository : SagaRepository {
     }
 
     override fun log(entry: SagaLogEntry) {
-        logEntries += entry
+        logEntries += entry.copy(detail = entry.detail?.take(SagaRepository.MAX_TEXT))
     }
 
     override fun purgeFinished(before: Instant, limit: Int): Int {
@@ -103,7 +106,10 @@ class InMemorySagaRepository : SagaRepository {
             .filter { after == null || it.stuckAt!! > after.stuckAt || (it.stuckAt == after.stuckAt && it.id > after.id) }
             .take(limit)
 
-    override fun history(sagaId: Uuid): List<SagaLogEntry> = logEntries.filter { it.sagaId == sagaId }
+    // By time, then in the order written, like the database's (at, id): sortedBy is stable, and
+    // logEntries is in the order written.
+    override fun history(sagaId: Uuid): List<SagaLogEntry> =
+        logEntries.filter { it.sagaId == sagaId }.sortedBy { it.at }
 
     override fun historyByTrace(traceId: String, limit: Int): List<SagaLogEntry> =
         logEntries.filter { it.traceId == traceId }.sortedBy { it.at }.take(limit)
