@@ -1,0 +1,51 @@
+name: Tests
+
+# The unit tests, the PostgreSQL integration tests (Testcontainers, on the runner's Docker) and the
+# stress test, on every push to master and every pull request. The benchmark only measures: run it by hand.
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - docs/**
+      - mkdocs.yml
+      - "**/*.md"
+      - LICENSE
+      - .github/workflows/docs.yml
+  pull_request:
+    paths-ignore:
+      - docs/**
+      - mkdocs.yml
+      - "**/*.md"
+      - LICENSE
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"                      # the modules' jvmToolchain
+      # Caches Gradle and its dependencies, and checks the wrapper jar against Gradle's published checksums.
+      - uses: gradle/actions/setup-gradle@v4
+      # --continue: a failure in one module still runs the others' tests.
+      - run: ./gradlew test stressTest --continue
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            */build/reports/tests/
+            */build/test-results/
+          retention-days: 7
