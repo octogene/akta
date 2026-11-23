@@ -30,7 +30,7 @@ flowchart TD
     L -->|yes| I1[Ignored, not stored]
     L -->|no| D{a signal of this name already received?}
     D -->|yes| I2[Ignored]
-    D -->|no| W{the step is WAITING?}
+    D -->|no| W{the step is WAITING, or between two timeout checks?}
     W -->|yes| DL[Delivered: onSignal accepts or rejects it]
     W -->|no| ST[Stored: used when the step waits]
 ```
@@ -52,7 +52,7 @@ At the timeout, the recovery job claims the step (`WAIT_TIMED_OUT` in the histor
 | A check that cannot tell | The saga stops (`CANNOT_TELL`) |
 | No check | The saga stops (`NO_SIGNAL`). A human delivers the event by hand, then `retry` waits again |
 
-A signal that arrives while the timeout check runs is stored, but the check decides.
+A signal that arrives while the timeout check runs is stored, but the check decides. If that check fails (it throws), it is not tried again: the stored signal is used instead. A check that failed is retried later, with backoff; a signal that arrives before that retry is delivered at once, as to a waiting step.
 
 ## Cancellation
 

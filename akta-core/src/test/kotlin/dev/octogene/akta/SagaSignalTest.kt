@@ -235,6 +235,48 @@ class SagaSignalTest {
     }
 
     @Test
+    fun `a signal between two timeout checks is delivered at once, and no check runs again`() {
+        var checks = 0
+        val definition = reservation(checkAtTimeout = { checks++; throw java.io.IOException("payments down") })
+        val engine = engine(definition)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+        engine.resumeAfter(31.minutes)                                          // the check fails: UNKNOWN
+        assertEquals(StepStatus.UNKNOWN, runBlocking { engine.find(id)!! }.stepStatus)
+
+        assertEquals(SignalResult.Delivered(id), engine.pay(id))
+        val done = engine.run(id)
+
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals("confirm P-1", calls.last())
+        assertEquals(1, checks)
+        assertEquals(0, done.checkFailures)                                     // not carried to the next steps
+    }
+
+    @Test
+    fun `a signal during a timeout check that fails is used, instead of checking again`() {
+        lateinit var engine: SagaEngine
+        lateinit var id: Uuid
+        var checks = 0
+        val definition = reservation(checkAtTimeout = {
+            checks++
+            assertEquals(SignalResult.Stored(id), engine.pay(id, paymentId = "P-2"))   // arrives mid-check
+            throw java.io.IOException("payments down")
+        })
+        engine = engine(definition)
+        id = engine.create(definition, "R-1")
+        engine.run(id)
+        engine.resumeAfter(31.minutes)                                          // the check fails: UNKNOWN
+
+        engine.resumeAfter(2.minutes)                                           // when it would check again
+
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.find(id)!! }.state)
+        assertEquals("confirm P-2", calls.last())                               // the signal's value
+        assertEquals(1, checks)
+        assertEquals("consumed (stored earlier) ref=P-2", details(SagaEvents.SIGNAL_RECEIVED).last())
+    }
+
+    @Test
     fun `a check that cannot tell makes the saga stuck`() {
         val definition = reservation(checkAtTimeout = { CheckResult.CannotTell })
         val engine = engine(definition)

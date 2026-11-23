@@ -259,8 +259,8 @@ when (val result = engine.signal(Uuid.parse(event.reference), "payment", Payment
 
 | The step for that name | Result |
 |---|---|
-| Is waiting | `Delivered`: accepted (the saga moves on) or rejected (it compensates) |
-| Does not wait yet (an earlier step runs, or its timeout check is in flight) | `Stored`: used as soon as the step waits; during a timeout check, the check decides |
+| Is waiting, or its timeout check failed and waits to be retried | `Delivered`: accepted (the saga moves on) or rejected (it compensates) |
+| Does not wait yet (an earlier step runs, or its timeout check is in flight) | `Stored`: used as soon as the step waits; during a timeout check, the check decides, unless it fails |
 | Has already received a signal of that name, is done, or the saga finished | `Ignored`: a redelivered or late event changes nothing |
 | Does not exist, or expects another type | `IllegalArgumentException`, nothing stored |
 | (no saga with that id) | `NoSaga` |

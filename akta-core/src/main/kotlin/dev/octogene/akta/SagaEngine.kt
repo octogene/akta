@@ -397,7 +397,10 @@ class SagaEngine(
             received("ignored: already received")
             return SignalResult.Ignored(r.id)
         }
-        return if (r.stepIndex == index && r.stepStatus == StepStatus.WAITING) {
+        // WAITING, or UNKNOWN: its timeout passed and a check failed, to be tried again. No call is in flight
+        // either way (a check in flight is IN_PROGRESS), so the signal answers now what the check looks up.
+        val listening = r.stepStatus == StepStatus.WAITING || r.stepStatus == StepStatus.UNKNOWN
+        return if (r.stepIndex == index && listening) {
             applySignal(r, def, step, context(r, def), value, encoded, now)
             received("delivered")
             SignalResult.Delivered(r.id)
@@ -417,20 +420,33 @@ class SagaEngine(
         now: Instant,
         trace: String?,
     ): Cycle {
-        val stored = repository.signal(r.id, step.signal)
-        if (stored != null) {
-            val value = decode(stored, checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
-            val updated = applySignal(r, def, step, ctx, value, stored, now)
-            // Logged after the change, as in deliver(): the event shows the saga as the signal left it.
-            val detail = listOfNotNull("consumed (stored earlier)", describe(step, value)?.let { "ref=$it" }).joinToString(" ")
-            log(r.id, r.stepIndex, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
-            return claimLocked(updated, trace)
-        }
+        consumeStored(r, def, step, ctx, now, trace)?.let { return it }
         val deadline = now + step.timeout
         val waiting = r.copy(stepStatus = StepStatus.WAITING, nextAttemptAt = deadline, attempts = 0, lastError = null)
         save(waiting, now)
         log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_STARTED, "signal '${step.signal}' until $deadline", now, trace)
         return Cycle(waiting, next = null)
+    }
+
+    /**
+     * The signal of [step] received earlier and stored, if any, applied now: the saga moves on (or compensates),
+     * and the next step is claimed. Null when none was received.
+     */
+    private fun consumeStored(
+        r: SagaRecord,
+        def: AnyDefinition,
+        step: AnySignalStep,
+        ctx: SagaContext<Any?>,
+        now: Instant,
+        trace: String?,
+    ): Cycle? {
+        val stored = repository.signal(r.id, step.signal) ?: return null
+        val value = decode(stored, checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
+        val updated = applySignal(r, def, step, ctx, value, stored, now)
+        // Logged after the change, as in deliver(): the event shows the saga as the signal left it.
+        val detail = listOfNotNull("consumed (stored earlier)", describe(step, value)?.let { "ref=$it" }).joinToString(" ")
+        log(r.id, r.stepIndex, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
+        return claimLocked(updated, trace)
     }
 
     /** A signal for the waiting [step]: its onSignal accepts it (the saga moves on) or rejects it (it compensates). */
@@ -631,7 +647,9 @@ class SagaEngine(
                     log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
                     r = r.copy(stepStatus = StepStatus.UNKNOWN, lastError = noSignal)   // the check decides, below
                 }
-                else -> Unit                              // UNKNOWN: its timeout check, claimed below
+                // UNKNOWN: its timeout check, claimed below. Unless a signal arrived during a check that then
+                // failed: it was stored, and answers what the check would look up again.
+                else -> consumeStored(r, def, signalStep, ctx, now, trace)?.let { return it }
             }
         }
         val idempotency = step.idempotency.takeIf { r.state == SagaState.RUNNING }
@@ -904,12 +922,12 @@ class SagaEngine(
         return if (index == def.steps.size) {
             r.copy(
                 state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null, stuckReason = null, stuckAt = null,
-                keySince = null, keyGeneration = 0,
+                keySince = null, keyGeneration = 0, checkFailures = 0,
             )
         } else {
             r.copy(
-                stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, nextAttemptAt = now, lastError = null,
-                stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0,
+                stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now,
+                lastError = null, stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0,
             )
         }
     }
@@ -929,11 +947,14 @@ class SagaEngine(
     /** Undoes the completed steps, from [index] down to the first one. */
     private fun compensateFrom(r: SagaRecord, index: Int, now: Instant): SagaRecord =
         if (index < 0) {
-            r.copy(state = SagaState.FAILED, stepStatus = StepStatus.READY, stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0)
+            r.copy(
+                state = SagaState.FAILED, stepStatus = StepStatus.READY, checkFailures = 0, stuckReason = null, stuckAt = null,
+                keySince = null, keyGeneration = 0,
+            )
         } else {
             r.copy(
-                state = SagaState.COMPENSATING, stepIndex = index, stepStatus = StepStatus.READY,
-                attempts = 0, nextAttemptAt = now, stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0,
+                state = SagaState.COMPENSATING, stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0,
+                nextAttemptAt = now, stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0,
             )
         }
 
