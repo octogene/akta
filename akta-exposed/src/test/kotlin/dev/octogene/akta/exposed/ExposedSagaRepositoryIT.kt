@@ -37,7 +37,9 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.time.Clock
+import kotlin.time.Instant
 import kotlin.time.Duration.Companion.days
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
@@ -276,6 +278,59 @@ class ExposedSagaRepositoryIT {
         assertFailsWith<Exception> {
             transaction(database) { exec("UPDATE saga SET stuck_reason = NULL WHERE id = '${ids[0]}'") }
         }
+    }
+
+    @Test
+    fun `stats count unfinished sagas and find the oldest one and the oldest due, stuck ones apart`() {
+        val t1 = saga("T1") { step("call") { execute { } } }
+        val t2 = saga("T2") { step("call") { execute { } } }
+        val engine = SagaEngine(ExposedSagaTransactions(database), repository, listOf(t1, t2), serializer)
+        val tx = ExposedSagaTransactions(database)
+        fun create(definition: SagaDefinition<Unit>, key: String) =
+            runBlocking { tx.inTransaction { engine.create(definition, key) } }
+
+        val t0 = Instant.parse("2026-11-20T10:00:00Z")
+        // Step status (or COMPLETED), created_at and next_attempt_at of each saga.
+        val rows = listOf(
+            create(t1, "A") to "READY, created ${t0 + 1.hours}, next ${t0 + 3.hours}",
+            create(t1, "B") to "WAITING, created ${t0 + 2.hours}, next ${t0 + 1.hours}",
+            create(t2, "C") to "READY, created $t0, next ${t0 + 30.minutes}",
+            create(t1, "D") to "STUCK, created ${t0 - 1.days}, next ${t0 - 1.days}",
+            create(t1, "E") to "COMPLETED, created ${t0 - 2.days}, next ${t0 - 2.days}",
+        )
+        transaction(database) {
+            for ((id, spec) in rows) {
+                val (status, created, next) = Regex("(\\w+), created (\\S+), next (\\S+)").matchEntire(spec)!!.destructured
+                val set = when (status) {
+                    "STUCK" -> "step_status = 'STUCK', stuck_reason = 'CANNOT_TELL', stuck_at = '$created'"
+                    "COMPLETED" -> "state = 'COMPLETED'"
+                    else -> "step_status = '$status'"
+                }
+                exec("UPDATE saga SET $set, created_at = '$created', next_attempt_at = '$next' WHERE id = '$id'")
+            }
+        }
+        fun stats(now: Instant, types: List<String>? = null) =
+            runBlocking { tx.inTransaction { repository.stats(now, types) } }
+
+        val all = stats(now = t0 + 2.hours)
+        assertEquals(
+            mapOf(
+                (SagaState.RUNNING to StepStatus.READY) to 2L,
+                (SagaState.RUNNING to StepStatus.WAITING) to 1L,
+                (SagaState.RUNNING to StepStatus.STUCK) to 1L,
+            ),
+            all.unfinished,
+        )
+        assertEquals(mapOf(StuckReason.CANNOT_TELL to 1L), all.stuckByReason)
+        assertEquals(t0, all.oldestUnfinishedAt)                          // C; D is stuck, E finished
+        assertEquals(t0 + 30.minutes, all.oldestDueAt)                    // C
+
+        val ofT1 = stats(now = t0 + 2.hours, types = listOf("T1"))
+        assertEquals(3L, ofT1.unfinished.values.sum())
+        assertEquals(t0 + 1.hours, ofT1.oldestUnfinishedAt)               // A
+        assertEquals(t0 + 1.hours, ofT1.oldestDueAt)                      // B
+
+        assertNull(stats(now = t0 + 20.minutes).oldestDueAt)              // nothing due yet
     }
 
     @Test

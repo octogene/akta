@@ -303,26 +303,46 @@ class ExposedSagaRepository : SagaRepository {
             .limit(limit)
             .map { it.toEntry() }
 
+    /**
+     * One query: the counts read every unfinished saga anyway, so the oldest dates come from the same
+     * scan, as a minimum per group (a few dozen groups at most), combined here.
+     */
     override fun stats(now: Instant, types: Collection<String>?): SagaStats {
-        val unfinished = (SagaTable.state inList UNFINISHED) and ofTypes(types)
-        val notStuck = SagaTable.stepStatus neq StepStatus.STUCK.name
         val count = SagaTable.id.count()
-        val byStatus = SagaTable.select(SagaTable.state, SagaTable.stepStatus, count)
-            .where { unfinished }
-            .groupBy(SagaTable.state, SagaTable.stepStatus)
-            .associate { (SagaState.valueOf(it[SagaTable.state]) to StepStatus.valueOf(it[SagaTable.stepStatus])) to it[count] }
-        val byReason = SagaTable.select(SagaTable.stuckReason, count)
-            .where { unfinished and (SagaTable.stepStatus eq StepStatus.STUCK.name) }
-            .groupBy(SagaTable.stuckReason)
-            .associate { StuckReason.valueOf(checkNotNull(it[SagaTable.stuckReason])) to it[count] }
         val oldestCreated = SagaTable.createdAt.min()
-        val oldestUnfinished = SagaTable.select(oldestCreated).where { unfinished and notStuck }.single()[oldestCreated]
         val oldestNext = SagaTable.nextAttemptAt.min()
-        val oldestDue = SagaTable.select(oldestNext)
-            .where { unfinished and notStuck and (SagaTable.nextAttemptAt lessEq now.utc()) }
-            .single()[oldestNext]
-        return SagaStats(byStatus, byReason, oldestUnfinished?.toKotlin(), oldestDue?.toKotlin())
+        val groups = SagaTable
+            .select(SagaTable.state, SagaTable.stepStatus, SagaTable.stuckReason, count, oldestCreated, oldestNext)
+            .where { (SagaTable.state inList UNFINISHED) and ofTypes(types) }
+            .groupBy(SagaTable.state, SagaTable.stepStatus, SagaTable.stuckReason)
+            .map {
+                StatsGroup(
+                    state = SagaState.valueOf(it[SagaTable.state]),
+                    status = StepStatus.valueOf(it[SagaTable.stepStatus]),
+                    reason = it[SagaTable.stuckReason]?.let(StuckReason::valueOf),
+                    count = it[count],
+                    oldestCreated = it[oldestCreated]?.toKotlin(),
+                    oldestNext = it[oldestNext]?.toKotlin(),
+                )
+            }
+        val byStatus = groups.groupBy { it.state to it.status }.mapValues { (_, g) -> g.sumOf { it.count } }
+        val stuck = groups.filter { it.status == StepStatus.STUCK }
+        val byReason = stuck.groupBy { checkNotNull(it.reason) }.mapValues { (_, g) -> g.sumOf { it.count } }
+        val active = groups - stuck.toSet()
+        val oldestUnfinished = active.mapNotNull { it.oldestCreated }.minOrNull()
+        // The smallest next attempt, if it is due, is the oldest due one; if it is not, none is due.
+        val oldestDue = active.mapNotNull { it.oldestNext }.minOrNull()?.takeIf { it <= now }
+        return SagaStats(byStatus, byReason, oldestUnfinished, oldestDue)
     }
+
+    private class StatsGroup(
+        val state: SagaState,
+        val status: StepStatus,
+        val reason: StuckReason?,
+        val count: Long,
+        val oldestCreated: Instant?,
+        val oldestNext: Instant?,
+    )
 
     private fun ofTypes(types: Collection<String>?): Op<Boolean> = if (types == null) Op.TRUE else SagaTable.type inList types
 
