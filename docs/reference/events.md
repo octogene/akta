@@ -31,6 +31,7 @@ Logged as `<action>:<outcome>`, on the step that ran.
 | `RECORD_FAILED` | The outcome could not be recorded: stuck, with a successful output saved |
 | `RESUME_FAILED` | `resumeDue` could not run the saga (a database error, unreadable data): postponed |
 | `KEY_EXPIRED` | An idempotent step's key may be forgotten: stuck, no call made |
+| `NOT_CALLED` | A long pause after a claim (GC, a stalled thread) left no time to call before its lock expires: the step is released as it was, due at once, no attempt used |
 
 ## Signals and cancellation
 

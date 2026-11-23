@@ -24,6 +24,7 @@ import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
@@ -522,6 +523,77 @@ class SagaEngineTest {
         assertEquals(SagaState.COMPLETED, after.state)
         assertEquals(listOf("item-1"), completed)
         assertEquals(1, stock.executions)
+    }
+
+    /**
+     * Transactions after the first of which the clock jumps by [pause], as a long GC pause between a claim and
+     * its call would, and [meanwhile] runs: what another pod does during the pause.
+     */
+    private inner class PausingTransactions(
+        private val pause: Duration,
+        private val meanwhile: suspend () -> Unit = {},
+    ) : SagaTransactions {
+        private val inMemory = InMemorySagaTransactions(repository)
+        private var paused = false
+
+        override suspend fun <T> inTransaction(block: () -> T): T {
+            val result = inMemory.inTransaction(block)
+            if (!paused) {
+                paused = true
+                clock.advance(pause)
+                meanwhile()
+            }
+            return result
+        }
+    }
+
+    @Test
+    fun `a claim left with no time to call is undone, with no attempt used`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        // 33 s: past the call's budget (callLock 35 s, minus 3.5 s kept to record), before the lock expires.
+        val transactions = PausingTransactions(pause = 33.seconds)
+        val engine = newEngine(transactions, repository, listOf(definition("TEST", listOf(stock))))
+        val id = engine.create("TEST", "item-1")
+
+        val after = runBlocking { engine.run(id, deadline = clock.now + 10.seconds) }   // claimed, then the pause
+
+        assertEquals(0, stock.executions)                                 // never called
+        assertEquals(StepStatus.READY, after.stepStatus)
+        assertEquals(0, after.attempts)
+        assertNull(after.lockedUntil)
+        assertEquals(clock.now, after.nextAttemptAt)                      // due at once, no settle delay
+        assertEquals(listOf(SagaEvents.CREATED, SagaEvents.NOT_CALLED), runBlocking { engine.history(id) }.map { it.event })
+
+        engine.resumeAfter(1.seconds)
+        assertEquals(SagaState.COMPLETED, engine.state(after).state)
+        assertEquals(1, stock.executions)
+    }
+
+    @Test
+    fun `a claim left with no time keeps a cancellation requested meanwhile`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        lateinit var engine: SagaEngine
+        lateinit var id: Uuid
+        val transactions = PausingTransactions(pause = 33.seconds, meanwhile = { engine.cancel(id, "customer left", "support") })
+        engine = newEngine(transactions, repository, listOf(definition("TEST", listOf(stock))))
+        id = engine.create("TEST", "item-1")
+
+        val after = runBlocking { engine.run(id, deadline = clock.now + 10.seconds) }
+
+        assertEquals(0, stock.executions)
+        assertEquals(SagaState.FAILED, after.state)                       // released, then the cancellation applies
+        assertEquals("Cancelled: customer left", after.failureReason)
+    }
+
+    @Test
+    fun `durations that make no sense are refused`() {
+        assertFailsWith<IllegalArgumentException> { SagaConfig(callLock = Duration.ZERO) }
+        assertFailsWith<IllegalArgumentException> { SagaConfig(callLock = 500.milliseconds) }
+        assertFailsWith<IllegalArgumentException> { SagaConfig(settleDelay = (-1).seconds) }
+        assertFailsWith<IllegalArgumentException> { SagaConfig(checkRetryDelay = (-1).seconds) }
+        assertFailsWith<IllegalArgumentException> { SagaConfig(maxBackoff = Duration.ZERO) }
+        assertFailsWith<IllegalArgumentException> { SagaConfig(resumeFailureDelay = (-1).seconds) }
+        SagaConfig(callLock = 1.seconds, settleDelay = Duration.ZERO)      // the smallest accepted
     }
 
     @Test

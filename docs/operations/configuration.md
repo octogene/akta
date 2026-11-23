@@ -22,6 +22,8 @@ SagaEngine(..., config = SagaConfig(
 | `resumeFailureDelay` | 1 min | How long a saga whose run threw in `resumeDue` waits before the next try | |
 | `maxDataBytes` | 16 KB | The largest encoded input, output or signal value | Parameters and identifiers only |
 
+`SagaConfig` refuses values that make no sense: a `callLock` under 1 second (a tenth of it, at most 5 s, is kept after each call to record its outcome), a negative delay, or a `maxBackoff` that is not positive.
+
 Per step, not per engine:
 
 | Setting | Where | What it controls |

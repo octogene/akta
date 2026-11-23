@@ -171,6 +171,11 @@ object SagaEvents {
     const val SIGNAL_RECEIVED = "SIGNAL_RECEIVED"
     /** An idempotent step's key may be forgotten by its service: STUCK ([StuckReason.KEY_EXPIRED]), no call made. */
     const val KEY_EXPIRED = "KEY_EXPIRED"
+    /**
+     * A claimed step was not called: too long a pause after the claim (GC, a stalled thread) left no time
+     * before its lock expires. It is released as it was, due at once; no attempt is used.
+     */
+    const val NOT_CALLED = "NOT_CALLED"
     /** [SagaEngine.cancel] was called; the detail gives the reason. */
     const val CANCEL_REQUESTED = "CANCEL_REQUESTED"
     /**
@@ -212,6 +217,12 @@ data class SagaConfig(
     val maxDataBytes: Int = 16 * 1024,
 ) {
     init {
+        // Every call is cut a tenth of callLock (at most 5 s) before it expires, to record its outcome.
+        require(callLock >= 1.seconds) { "callLock must be at least 1 second" }
+        require(!settleDelay.isNegative()) { "settleDelay must not be negative" }
+        require(!checkRetryDelay.isNegative()) { "checkRetryDelay must not be negative" }
+        require(maxBackoff.isPositive()) { "maxBackoff must be positive" }
+        require(!resumeFailureDelay.isNegative()) { "resumeFailureDelay must not be negative" }
         require(maxAttempts >= 1) { "maxAttempts must be at least 1" }
         require(maxDataBytes >= 1) { "maxDataBytes must be at least 1" }
     }

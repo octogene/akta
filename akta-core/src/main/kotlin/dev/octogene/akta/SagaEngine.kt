@@ -544,7 +544,9 @@ class SagaEngine(
         val ctx: SagaContext<Any?>,
         val trace: String?,
         /** An idempotent step whose key was already used: an earlier attempt may have been applied. */
-        val replay: Boolean = false,
+        val replay: Boolean,
+        /** The saga as it was before the claim: what it goes back to when the call could not be made. */
+        val unclaimed: SagaRecord,
     )
 
     /** [event]: the second half of the logged event (see [SagaEvents]). Stored: never change it. */
@@ -561,10 +563,13 @@ class SagaEngine(
         class CheckFailed(val error: String) : Outcome("CheckFailed", error)
         object Compensated : Outcome("Compensated")
         class CompensationFailed(val error: String) : Outcome("CompensationFailed", error)
+        /** No time was left to call before the lock expires: nothing was called. Logged as NOT_CALLED. */
+        class NotCalled(reason: String) : Outcome("NotCalled", reason)
     }
 
     /** The logged event, e.g. "EXECUTE:Done". */
-    private fun eventOf(work: Work, outcome: Outcome): String = "${work.action.event}:${outcome.event}"
+    private fun eventOf(work: Work, outcome: Outcome): String =
+        if (outcome is Outcome.NotCalled) SagaEvents.NOT_CALLED else "${work.action.event}:${outcome.event}"
 
     /** The event with the outcome's detail, e.g. "EXECUTE:Done ref=STK-1": for LATE_RESULT_IGNORED, RECORD_FAILED. */
     private fun describe(work: Work, outcome: Outcome): String =
@@ -663,7 +668,7 @@ class SagaEngine(
             keySince = keySince,
         )
         save(claimed, now)
-        return Cycle(claimed, Work(claimed, step, action, ctx.forCall(keyOf(claimed, step, action)), trace, replay))
+        return Cycle(claimed, Work(claimed, step, action, ctx.forCall(keyOf(claimed, step, action)), trace, replay, unclaimed = r))
     }
 
     /**
@@ -675,6 +680,12 @@ class SagaEngine(
     private suspend fun perform(work: Work): Outcome {
         val lockedUntil = checkNotNull(work.saga.lockedUntil) { "Claimed saga ${work.saga.id} without a lock" }
         val budget = lockedUntil - currentTime() - recordMargin
+        // A long pause since the claim (GC, a stalled thread) may leave no time at all. withTimeout would
+        // then fail at once, before the step runs, and that would count as a failed call: an attempt
+        // used, an outcome to check. Nothing was called, so the claim is undone instead.
+        if (budget <= Duration.ZERO) {
+            return Outcome.NotCalled("No time left to call before the lock expires (${-budget} late): nothing was called")
+        }
         return try {
             withTimeout(budget) { call(work) }
         } catch (e: CancellationException) {
@@ -825,6 +836,14 @@ class SagaEngine(
                 compensateFrom(r, r.stepIndex - 1, now)
             }
             is Outcome.CompensationFailed -> retryLater(r, outcome.error, now)
+            // What the claim changed goes back, due at once: no attempt used, the idempotency key not used.
+            // The rest is kept: a cancellation requested meanwhile, for one.
+            is Outcome.NotCalled -> work.unclaimed.let { before ->
+                r.copy(
+                    stepStatus = before.stepStatus, attempts = before.attempts, checkFailures = before.checkFailures,
+                    keySince = before.keySince, nextAttemptAt = now,
+                )
+            }
         }
         // Cancelled while the call was in flight: the call's outcome is recorded, now compensate (it included).
         val updated = cancelIfRequested(decided, now)
