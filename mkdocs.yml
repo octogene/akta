@@ -103,6 +103,7 @@ nav:
       - Stuck sagas: operations/stuck-sagas.md
       - Observability: operations/observability.md
       - Configuration: operations/configuration.md
+      - Admin API for Ktor: operations/admin-api.md
   - Reference:
       - reference/index.md
       - Events: reference/events.md
