@@ -127,6 +127,7 @@ class SagaSignalTest {
         val failedSaga = engine.run(id)
 
         assertEquals(SagaState.FAILED, failedSaga.state)
+        assertEquals("dev.octogene.akta.StepRejected: payment P-1 failed", failedSaga.failureReason)
         assertEquals(listOf<String?>("P-1"), released)                          // the payment step was undone
         assertEquals(listOf("R-1"), failed)
     }
@@ -197,7 +198,9 @@ class SagaSignalTest {
 
         engine.resumeAfter(31.minutes)
 
-        assertEquals(SagaState.FAILED, runBlocking { engine.find(id)!! }.state)
+        val failedSaga = runBlocking { engine.find(id)!! }
+        assertEquals(SagaState.FAILED, failedSaga.state)
+        assertTrue(failedSaga.failureReason!!.startsWith("No signal 'payment' before the timeout"), failedSaga.failureReason)
         assertEquals(listOf<String?>("P-1"), released)
     }
 
@@ -256,6 +259,7 @@ class SagaSignalTest {
 
         assertEquals(SagaState.FAILED, cancelled.state)
         assertEquals("customer cancelled", cancelled.cancelReason)
+        assertEquals("Cancelled: customer cancelled", cancelled.failureReason)
         assertEquals(listOf<String?>("P-1"), released)
         assertEquals(SignalResult.Ignored(id), engine.pay(id))                  // too late now
         assertNull(repository.signal(id, "payment"))
@@ -309,6 +313,7 @@ class SagaSignalTest {
         val done = runBlocking { engine.retry(id, "operator") }
         assertEquals(SagaState.FAILED, done.state)
         assertEquals("customer cancelled", done.cancelReason)
+        assertEquals("Cancelled: customer cancelled", done.failureReason)
         assertEquals(listOf("customer cancelled", "second click"), details(SagaEvents.CANCEL_REQUESTED))
     }
 
@@ -326,7 +331,9 @@ class SagaSignalTest {
         engine = engine(definition)
         id = engine.create(definition, "R-1")
 
-        assertEquals(SagaState.FAILED, engine.run(id).state)
+        val done = engine.run(id)
+        assertEquals(SagaState.FAILED, done.state)
+        assertEquals("Cancelled: customer cancelled", done.failureReason)
         assertEquals(listOf<String?>("P-1"), released)
         assertTrue(completed.isEmpty())
     }

@@ -7,11 +7,12 @@ import kotlin.uuid.Uuid
  * Storage for sagas. Every method is called INSIDE a transaction opened by [SagaTransactions].
  * The saga row is the lock of the whole saga: steps are never locked on their own.
  *
- * A saga's `lastError` and a log entry's `detail` are kept up to [MAX_TEXT] characters: longer text is cut.
+ * A saga's `lastError` and `failureReason`, and a log entry's `detail`, are kept up to [MAX_TEXT] characters:
+ * longer text is cut.
  */
 interface SagaRepository {
     companion object {
-        /** The longest `lastError` or log `detail` a repository keeps, in characters. */
+        /** The longest `lastError`, `failureReason` or log `detail` a repository keeps, in characters. */
         const val MAX_TEXT = 2000
     }
 

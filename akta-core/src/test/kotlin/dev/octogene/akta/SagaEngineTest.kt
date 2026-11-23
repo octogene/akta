@@ -151,6 +151,7 @@ class SagaEngineTest {
         val saga = engine(stock, booking).start()
 
         assertEquals(SagaState.COMPLETED, saga.state)
+        assertNull(saga.failureReason)
         assertEquals(mapOf("stock" to "STK-1", "booking" to "RES-1"), results(saga.id))
         assertEquals(listOf("item-1"), completed)
     }
@@ -173,6 +174,7 @@ class SagaEngineTest {
         val saga = engine(stock, booking).start()
 
         assertEquals(SagaState.FAILED, saga.state)
+        assertEquals("dev.octogene.akta.StepRejected: model not bookable", saga.failureReason)
         assertEquals(1, stock.compensations)
         assertEquals(0, booking.compensations)
         assertEquals(emptyMap<String, String?>(), results(saga.id))
@@ -185,6 +187,7 @@ class SagaEngineTest {
         val saga = engine(stock).start()
 
         assertEquals(SagaState.FAILED, saga.state)
+        assertEquals("dev.octogene.akta.StepRejected: unknown EPC", saga.failureReason)
         assertEquals(0, stock.compensations)
     }
 
@@ -367,9 +370,13 @@ class SagaEngineTest {
         val engine = engine(stock, booking)
         val saga = engine.start()
         assertEquals(SagaState.COMPENSATING, saga.state)
+        assertEquals("java.lang.RuntimeException: stock unavailable", saga.lastError)     // the latest problem
+        assertEquals("dev.octogene.akta.StepRejected: refused", saga.failureReason)      // why it compensates
 
         engine.resumeAfter(1.minutes)
-        assertEquals(SagaState.FAILED, engine.state(saga).state)
+        val failedSaga = engine.state(saga)
+        assertEquals(SagaState.FAILED, failedSaga.state)
+        assertEquals("dev.octogene.akta.StepRejected: refused", failedSaga.failureReason)  // not the retried failure
         assertEquals(2, stock.compensations)
     }
 
@@ -400,6 +407,7 @@ class SagaEngineTest {
 
         val after = runBlocking { engine.abort(saga.id, actor = "carol", currentStepApplied = false) }
         assertEquals(SagaState.FAILED, after.state)
+        assertEquals("Aborted by carol", after.failureReason)
         assertEquals(1, stock.compensations)
         assertEquals(0, booking.compensations)
     }
@@ -538,6 +546,13 @@ class SagaEngineTest {
         assertEquals(StepStatus.STUCK, stuck.stepStatus)
         assertEquals(SagaState.COMPENSATING, stuck.state)
         assertEquals(2, stock.compensations)
+        assertTrue(stuck.lastError!!.startsWith("Too many attempts"), stuck.lastError)
+        assertEquals("dev.octogene.akta.StepRejected: refused", stuck.failureReason)
+
+        // An operator undoes it by hand: the saga ends FAILED with the refusal, not the lock expiries.
+        val failedSaga = runBlocking { engine.markCompensated(id, actor = "alice") }
+        assertEquals(SagaState.FAILED, failedSaga.state)
+        assertEquals("dev.octogene.akta.StepRejected: refused", failedSaga.failureReason)
     }
 
     @Test

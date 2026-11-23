@@ -17,7 +17,7 @@ suspend fun registerItem(epc: String, storeId: String): HttpStatusCode {
 
     return when (saga.state) {
         SagaState.COMPLETED -> HttpStatusCode.Created              // 201: done
-        SagaState.FAILED -> HttpStatusCode.UnprocessableEntity     // 422: refused, reason in saga.lastError
+        SagaState.FAILED -> HttpStatusCode.UnprocessableEntity     // 422: refused, reason in saga.failureReason
         else -> HttpStatusCode.Accepted                            // 202: the recovery job finishes it
     }
 }

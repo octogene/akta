@@ -7,6 +7,7 @@ import dev.octogene.akta.SagaDefinition
 import dev.octogene.akta.SagaEngine
 import dev.octogene.akta.SagaConfig
 import dev.octogene.akta.SagaEvents
+import dev.octogene.akta.SagaRepository
 import dev.octogene.akta.SagaState
 import dev.octogene.akta.StuckCursor
 import dev.octogene.akta.StuckReason
@@ -119,6 +120,18 @@ class ExposedSagaRepositoryIT {
 
         assertEquals(SagaState.FAILED, saga.state)
         assertEquals(emptyMap<String, String?>(), storedResults(saga.id))
+    }
+
+    @Test
+    fun `the failure reason is stored, and cut at MAX_TEXT like lastError`() {
+        val long = "no ".repeat(1000)
+        val saga = engine("stock" to { "STK-1" }, "booking" to { throw StepRejected("no") }).start("item-3")
+        val cut = engine("stock" to { "STK-1" }, "booking" to { throw StepRejected(long) }).start("item-4")
+        fun stored(id: kotlin.uuid.Uuid) =
+            runBlocking { ExposedSagaTransactions(database).inTransaction { repository.find(id)!! } }
+
+        assertEquals("dev.octogene.akta.StepRejected: no", stored(saga.id).failureReason)
+        assertEquals(SagaRepository.MAX_TEXT, stored(cut.id).failureReason!!.length)
     }
 
     @Test

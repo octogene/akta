@@ -17,6 +17,7 @@ CREATE TABLE saga (
     input           text,                                 -- the saga's input, encoded; written once
     cancel_requested_at timestamptz,                      -- set by cancel: compensate once no call is in flight
     cancel_reason   text,                                 -- given to cancel; who cancelled is in saga_log
+    failure_reason  text,                                 -- why it compensates: set when compensation starts, never changed
     stuck_reason    text        CHECK (stuck_reason IN ('CANNOT_TELL', 'CHECK_FAILING', 'TOO_MANY_ATTEMPTS',
                                                         'OUTPUT_UNSTORABLE', 'RECORD_FAILED', 'NO_SIGNAL',
                                                         'KEY_EXPIRED')),

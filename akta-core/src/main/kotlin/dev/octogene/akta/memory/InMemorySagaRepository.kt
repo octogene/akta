@@ -54,7 +54,10 @@ class InMemorySagaRepository : SagaRepository {
     }
 
     /** As a database column would keep it: see [SagaRepository.MAX_TEXT]. */
-    private fun SagaRecord.truncated() = copy(lastError = lastError?.take(SagaRepository.MAX_TEXT))
+    private fun SagaRecord.truncated() = copy(
+        lastError = lastError?.take(SagaRepository.MAX_TEXT),
+        failureReason = failureReason?.take(SagaRepository.MAX_TEXT),
+    )
 
     override fun findDue(now: Instant, limit: Int, types: Collection<String>): List<Uuid> =
         sagas.values

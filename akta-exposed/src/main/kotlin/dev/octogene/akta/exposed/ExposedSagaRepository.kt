@@ -59,6 +59,7 @@ object SagaTable : Table("saga") {
     val input = text("input").nullable()
     val cancelRequestedAt = timestampWithTimeZone("cancel_requested_at").nullable()
     val cancelReason = text("cancel_reason").nullable()
+    val failureReason = text("failure_reason").nullable()
     val stuckReason = text("stuck_reason").nullable()
     val stuckAt = timestampWithTimeZone("stuck_at").nullable()
     val keySince = timestampWithTimeZone("key_since").nullable()
@@ -199,6 +200,7 @@ class ExposedSagaRepository : SagaRepository {
         s[SagaTable.checkFailures] = r.checkFailures
         s[SagaTable.cancelRequestedAt] = r.cancelRequestedAt?.utc()
         s[SagaTable.cancelReason] = r.cancelReason
+        s[SagaTable.failureReason] = r.failureReason?.take(SagaRepository.MAX_TEXT)
         s[SagaTable.stuckReason] = r.stuckReason?.name
         s[SagaTable.stuckAt] = r.stuckAt?.utc()
         s[SagaTable.keySince] = r.keySince?.utc()
@@ -227,6 +229,7 @@ class ExposedSagaRepository : SagaRepository {
         input = this[SagaTable.input],
         cancelRequestedAt = this[SagaTable.cancelRequestedAt]?.toKotlin(),
         cancelReason = this[SagaTable.cancelReason],
+        failureReason = this[SagaTable.failureReason],
         stuckReason = this[SagaTable.stuckReason]?.let(StuckReason::valueOf),
         stuckAt = this[SagaTable.stuckAt]?.toKotlin(),
         keySince = this[SagaTable.keySince]?.toKotlin(),

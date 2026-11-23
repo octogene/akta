@@ -267,7 +267,7 @@ when (val result = engine.signal(Uuid.parse(event.reference), "payment", Payment
 
 The external system must carry our saga id, for example as the payment's reference, so that its events lead back to the saga. `run` returns a saga that waits with `stepStatus = WAITING`: an HTTP handler answers 202. Step outputs are read inside the saga (`requireResult`), not from outside it, so the handler finds what it shows another way, for example the payment by its reference (our saga id).
 
-**Cancelling.** `engine.cancel(sagaId, reason, actor)` abandons a saga, a customer who cancels for example: everything done so far is compensated. A saga that waits or is ready compensates at once. One with a call in flight, or an outcome still to check, compensates as soon as that outcome is recorded, the call included. A finished saga cannot be cancelled. The saga keeps `cancel_requested_at` and the `reason` given (`cancel_reason`), which nothing overwrites, unlike `last_error`; who cancelled is in `saga_log` (`CANCEL_REQUESTED`).
+**Cancelling.** `engine.cancel(sagaId, reason, actor)` abandons a saga, a customer who cancels for example: everything done so far is compensated. A saga that waits or is ready compensates at once. One with a call in flight, or an outcome still to check, compensates as soon as that outcome is recorded, the call included. A finished saga cannot be cancelled. The saga keeps `cancel_requested_at` and the `reason` given (`cancel_reason`), which nothing overwrites, unlike `last_error`; who cancelled is in `saga_log` (`CANCEL_REQUESTED`). Its `failure_reason` reads `Cancelled: <reason>`.
 
 ### Steps with an idempotency key
 
@@ -333,7 +333,7 @@ suspend fun registerItem(epc: String, storeId: String): HttpStatusCode {
 
     return when (saga.state) {
         SagaState.COMPLETED -> HttpStatusCode.Created              // 201
-        SagaState.FAILED -> HttpStatusCode.UnprocessableEntity     // 422, reason in saga.lastError
+        SagaState.FAILED -> HttpStatusCode.UnprocessableEntity     // 422, reason in saga.failureReason
         else -> HttpStatusCode.Accepted                            // 202: the recovery job will finish it
     }
 }

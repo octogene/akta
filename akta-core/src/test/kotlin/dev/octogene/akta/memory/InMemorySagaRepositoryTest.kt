@@ -43,7 +43,7 @@ class InMemorySagaRepositoryTest {
     }
 
     @Test
-    fun `lastError and a log detail are cut at MAX_TEXT, as in the database`() {
+    fun `lastError, failureReason and a log detail are cut at MAX_TEXT, as in the database`() {
         val long = "x".repeat(SagaRepository.MAX_TEXT + 500)
 
         repository.insert(record(lastError = long), t0)
@@ -51,6 +51,9 @@ class InMemorySagaRepositoryTest {
 
         repository.save(record(lastError = "y$long"), t0)
         assertEquals("y" + "x".repeat(SagaRepository.MAX_TEXT - 1), repository.find(sagaId)!!.lastError)
+
+        repository.save(record(lastError = null).copy(state = SagaState.COMPENSATING, failureReason = long), t0)
+        assertEquals(SagaRepository.MAX_TEXT, repository.find(sagaId)!!.failureReason!!.length)
 
         repository.log(entry(t0, "EXECUTE:Unknown", detail = long))
         assertEquals(SagaRepository.MAX_TEXT, repository.history(sagaId).single().detail!!.length)

@@ -25,6 +25,17 @@ sequenceDiagram
 
 A refusal at the first step has nothing to undo: the saga ends `FAILED` at once.
 
+The cause is kept in `failure_reason` (`SagaRecord.failureReason`), written when the compensation starts and never changed:
+
+| Cause | `failure_reason` |
+|---|---|
+| A step or a signal refused | The refusal, as `StepRejected` describes it |
+| A signal step timed out, and its check found nothing | `No signal '<name>' before the timeout, …` |
+| `cancel(id, reason, actor)` | `Cancelled: <reason>` |
+| `abort(id, actor, …)` | `Aborted by <actor>` |
+
+Read it to tell a caller why a saga failed. `last_error` is the latest problem only: a compensation that fails and is retried overwrites it, so on a `FAILED` saga it may describe that failure instead.
+
 ## What a compensation receives
 
 Its own step's output, as stored when the step completed: `compensate { own -> … }`. `own` is `null` when the step stored none, so write the undo to cope with it. When an operator aborts a step that is stuck but was applied (`abort(currentStepApplied = true)`), they give the output the compensation should receive.

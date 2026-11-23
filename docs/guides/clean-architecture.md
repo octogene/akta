@@ -133,7 +133,7 @@ class RegisterItem(
         val saga = engine.run(sagaId, deadline = Clock.System.now() + 8.seconds)
         return when (saga.state) {
             SagaState.COMPLETED -> Outcome.Ready(itemId)
-            SagaState.FAILED -> Outcome.Refused(itemId, saga.lastError)
+            SagaState.FAILED -> Outcome.Refused(itemId, saga.failureReason)
             else -> Outcome.Pending(itemId)
         }
     }

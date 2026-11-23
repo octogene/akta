@@ -326,9 +326,9 @@ class SagaEngine(
             val updated = if (currentStepApplied) {
                 val step = definition(r.type).stepAt(r.stepIndex)
                 repository.saveResult(r.id, r.stepIndex, step.name, manualOutput(r, step, output).first, now)
-                compensateFrom(r, r.stepIndex, now)
+                startCompensation(r, r.stepIndex, "Aborted by $actor", now)
             } else {
-                compensateFrom(r, r.stepIndex - 1, now)
+                startCompensation(r, r.stepIndex - 1, "Aborted by $actor", now)
             }
             ManualChange(updated, detail = "currentStepApplied=$currentStepApplied")
         }
@@ -448,7 +448,7 @@ class SagaEngine(
             repository.saveResult(r.id, r.stepIndex, step.name, encoded, now)
             next(r, def, now)
         } catch (e: StepRejected) {
-            compensateFrom(r.copy(lastError = e.toString()), r.stepIndex - 1, now)
+            startCompensation(r.copy(lastError = e.toString()), r.stepIndex - 1, e.toString(), now)
         }
         save(updated, now)
         finishIfNeeded(r, updated)
@@ -476,7 +476,7 @@ class SagaEngine(
         if (r.cancelRequestedAt != null && r.state == SagaState.RUNNING &&
             (r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.WAITING)
         ) {
-            compensateFrom(r, r.stepIndex - 1, now)
+            startCompensation(r, r.stepIndex - 1, cancelled(r), now)
         } else {
             r
         }
@@ -779,7 +779,7 @@ class SagaEngine(
                     "record it with markDone, or undo the step with abort",
                 now,
             )
-            is Outcome.Rejected -> compensateFrom(r.copy(lastError = outcome.error), r.stepIndex - 1, now)
+            is Outcome.Rejected -> startCompensation(r.copy(lastError = outcome.error), r.stepIndex - 1, outcome.error, now)
             // A replay that never left says nothing of the earlier attempt, which may be applied: still UNKNOWN.
             // A first attempt that never left did not use the key: its window has not started (keySince cleared).
             is Outcome.NotSent -> if (work.replay) {
@@ -880,7 +880,7 @@ class SagaEngine(
      * compensates instead, this step included, even when it was the last one.
      */
     private fun next(r: SagaRecord, def: AnyDefinition, now: Instant): SagaRecord {
-        if (r.cancelRequestedAt != null && r.state == SagaState.RUNNING) return compensateFrom(r, r.stepIndex, now)
+        if (r.cancelRequestedAt != null && r.state == SagaState.RUNNING) return startCompensation(r, r.stepIndex, cancelled(r), now)
         val index = r.stepIndex + 1
         return if (index == def.steps.size) {
             r.copy(
@@ -894,6 +894,18 @@ class SagaEngine(
             )
         }
     }
+
+    /**
+     * Starts undoing the completed steps, from [index] down to the first one. [reason] is kept as the
+     * saga's failureReason, which nothing changes afterwards: lastError may then be overwritten by a
+     * compensation that fails and is retried.
+     */
+    private fun startCompensation(r: SagaRecord, index: Int, reason: String, now: Instant): SagaRecord {
+        check(r.state == SagaState.RUNNING) { "Saga ${r.id} is already ${r.state}" }
+        return compensateFrom(r.copy(failureReason = reason), index, now)
+    }
+
+    private fun cancelled(r: SagaRecord) = "Cancelled: ${r.cancelReason}"
 
     /** Undoes the completed steps, from [index] down to the first one. */
     private fun compensateFrom(r: SagaRecord, index: Int, now: Instant): SagaRecord =

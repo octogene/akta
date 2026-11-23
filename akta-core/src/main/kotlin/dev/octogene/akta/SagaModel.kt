@@ -71,6 +71,10 @@ data class SagaRecord(
     /** When the engine should look at this saga again. While a call is in flight, equals [lockedUntil]. */
     val nextAttemptAt: Instant,
     val lockedUntil: Instant?,
+    /**
+     * The latest problem: why the current step is retried, checked or stuck. Cleared when a step is done.
+     * For why a saga failed, read [failureReason]: a compensation that fails and is retried overwrites this.
+     */
     val lastError: String?,
     /** W3C traceparent of the request that started the saga. */
     val traceparent: String?,
@@ -90,6 +94,13 @@ data class SagaRecord(
      * changed, unlike [lastError]. Who cancelled is in `saga_log` (`CANCEL_REQUESTED`).
      */
     val cancelReason: String? = null,
+    /**
+     * Why the saga compensates, then ended FAILED: the refusal of a step or signal (`StepRejected`), a signal
+     * that never came, `Cancelled: <cancelReason>`, or `Aborted by <actor>`. Set when compensation starts and
+     * never changed, unlike [lastError], which a compensation that fails and is retried overwrites. Null while
+     * the saga runs forward, and when it completes.
+     */
+    val failureReason: String? = null,
     /** Why the saga is STUCK; null when it is not. */
     val stuckReason: StuckReason? = null,
     /** When the saga became STUCK; null when it is not. */
