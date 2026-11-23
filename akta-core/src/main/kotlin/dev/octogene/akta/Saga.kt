@@ -166,7 +166,9 @@ interface SagaStep<I, O> {
  * step's output. While it waits, the saga is only a row that is not due: no thread, connection or lock.
  *
  * At [timeout], the step's [check] decides, if [checksOnTimeout]: the value it finds means accepted,
- * NotDone means rejected (the saga compensates), CannotTell means stuck. Without a check, a timeout
+ * NotDone means rejected (the saga compensates), CannotTell means stuck. A signal received while the
+ * check runs, or after it failed, is used instead of NotDone or CannotTell: the timeout is a fallback
+ * for a lost event, not a deadline (a business deadline belongs in [accept]). Without a check, a timeout
  * makes the saga stuck. The DSL (`awaitSignal<S>(…) { … }`) builds these.
  */
 interface SignalStep<I, S> : SagaStep<I, S> {

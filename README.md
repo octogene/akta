@@ -253,14 +253,14 @@ when (val result = engine.signal(Uuid.parse(event.reference), "payment", Payment
 |---|---|
 | `awaitSignal<S>(name, signal, timeout) { … }` | A step that makes no call and waits for the signal named `signal` (it names the event, not the step), whose value is an `S`. The value becomes the step's output. A signal name is used by one step of a saga. |
 | `onSignal { value -> … }` | Optional. Throw `StepRejected` to reject the value: the saga compensates. Runs inside the engine's transaction: no external calls. |
-| `check { … }` / `checkByLookup { … }` | Optional. At the timeout, ask the external system: a value found is accepted (it goes through `onSignal` too), `NotDone` rejects, `CannotTell` makes the saga stuck. Without a check, a timeout makes the saga stuck. |
+| `check { … }` / `checkByLookup { … }` | Optional. At the timeout, ask the external system: a value found is accepted (it goes through `onSignal` too), `NotDone` rejects, `CannotTell` makes the saga stuck, unless a signal arrived meanwhile: it is used instead. Without a check, a timeout makes the saga stuck. |
 
 `engine.signal(sagaId, name, value)` is one short transaction. The engine finds the step of that saga's definition that waits for `name`, and checks the value's type against the one it declares:
 
 | The step for that name | Result |
 |---|---|
 | Is waiting, or its timeout check failed and waits to be retried | `Delivered`: accepted (the saga moves on) or rejected (it compensates) |
-| Does not wait yet (an earlier step runs, or its timeout check is in flight) | `Stored`: used as soon as the step waits; during a timeout check, the check decides, unless it fails |
+| Does not wait yet (an earlier step runs, or its timeout check is in flight) | `Stored`: used as soon as the step waits; during a timeout check, used unless the check finds a value |
 | Has already received a signal of that name, is done, or the saga finished | `Ignored`: a redelivered or late event changes nothing |
 | Does not exist, or expects another type | `IllegalArgumentException`, nothing stored |
 | (no saga with that id) | `NoSaga` |

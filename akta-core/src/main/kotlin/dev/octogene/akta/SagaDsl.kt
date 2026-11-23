@@ -213,7 +213,10 @@ class SignalStepBuilder<I, S> @PublishedApi internal constructor(
         acceptBlock = block
     }
 
-    /** At the timeout, asks the external system: [CheckResult.Done] accepts its value, NotDone rejects. */
+    /**
+     * At the timeout, asks the external system: [CheckResult.Done] accepts its value, NotDone rejects. A signal
+     * received while it runs is used instead of NotDone or CannotTell.
+     */
     fun check(block: suspend SagaContext<I>.() -> CheckResult<S>) {
         checkBlock = block
     }

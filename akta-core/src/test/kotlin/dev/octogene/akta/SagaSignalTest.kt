@@ -217,7 +217,7 @@ class SagaSignalTest {
     }
 
     @Test
-    fun `a signal during the timeout check is stored, and the check decides`() {
+    fun `a signal during a timeout check that finds a value is stored, and the value found wins`() {
         lateinit var engine: SagaEngine
         lateinit var id: Uuid
         val definition = reservation(checkAtTimeout = {
@@ -232,6 +232,65 @@ class SagaSignalTest {
 
         assertEquals(SagaState.COMPLETED, runBlocking { engine.find(id)!! }.state)
         assertEquals("confirm P-1", calls.last())                               // the check's value, not the signal's
+    }
+
+    @Test
+    fun `a signal during a timeout check that finds nothing is used, since the lookup raced with the event`() {
+        lateinit var engine: SagaEngine
+        lateinit var id: Uuid
+        val definition = reservation(checkAtTimeout = {
+            assertEquals(SignalResult.Stored(id), engine.pay(id, paymentId = "P-2"))   // arrives mid-check
+            CheckResult.NotDone
+        })
+        engine = engine(definition)
+        id = engine.create(definition, "R-1")
+        engine.run(id)
+
+        engine.resumeAfter(31.minutes)
+
+        val saga = runBlocking { engine.find(id)!! }
+        assertEquals(SagaState.COMPLETED, saga.state)
+        assertEquals("confirm P-2", calls.last())                               // the signal's value
+        assertTrue(released.isEmpty())                                          // nothing undone
+        assertEquals("consumed (stored during the check) ref=P-2", details(SagaEvents.SIGNAL_RECEIVED).last())
+    }
+
+    @Test
+    fun `a signal during a timeout check that cannot tell is used, instead of stopping`() {
+        lateinit var engine: SagaEngine
+        lateinit var id: Uuid
+        val definition = reservation(checkAtTimeout = {
+            engine.pay(id, paymentId = "P-2")
+            CheckResult.CannotTell
+        })
+        engine = engine(definition)
+        id = engine.create(definition, "R-1")
+        engine.run(id)
+
+        engine.resumeAfter(31.minutes)
+
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.find(id)!! }.state)
+        assertEquals("confirm P-2", calls.last())
+    }
+
+    @Test
+    fun `a signal used instead of the check still goes through onSignal`() {
+        lateinit var engine: SagaEngine
+        lateinit var id: Uuid
+        val definition = reservation(checkAtTimeout = {
+            engine.pay(id, succeeded = false, paymentId = "P-2")                 // a failed payment
+            CheckResult.NotDone
+        })
+        engine = engine(definition)
+        id = engine.create(definition, "R-1")
+        engine.run(id)
+
+        engine.resumeAfter(31.minutes)
+
+        val saga = runBlocking { engine.find(id)!! }
+        assertEquals(SagaState.FAILED, saga.state)
+        assertEquals("dev.octogene.akta.StepRejected: payment P-2 failed", saga.failureReason)
+        assertEquals(listOf<String?>("P-1"), released)
     }
 
     @Test

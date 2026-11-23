@@ -52,7 +52,12 @@ At the timeout, the recovery job claims the step (`WAIT_TIMED_OUT` in the histor
 | A check that cannot tell | The saga stops (`CANNOT_TELL`) |
 | No check | The saga stops (`NO_SIGNAL`). A human delivers the event by hand, then `retry` waits again |
 
-A signal that arrives while the timeout check runs is stored, but the check decides. If that check fails (it throws), it is not tried again: the stored signal is used instead. A check that failed is retried later, with backoff; a signal that arrives before that retry is delivered at once, as to a waiting step.
+**A signal received after the timeout still counts**, until the saga moves on. The timeout is a fallback for an event that may be lost, not a deadline:
+
+- A signal that arrives while the check runs is stored. If the check finds a value, that value is used: it is the same event. If it finds nothing or cannot tell, the stored signal is used instead: the lookup ran just before the event, which did happen. If the check fails (it throws), it is not tried again: the stored signal is used.
+- A check that failed is retried later, with backoff. A signal that arrives before that retry is delivered at once, as to a waiting step.
+
+Either way the signal goes through `onSignal`, like any other. **A business deadline belongs there**: to refuse a payment that comes too late, compare its time with the deadline in `onSignal` and throw `StepRejected`.
 
 ## Cancellation
 

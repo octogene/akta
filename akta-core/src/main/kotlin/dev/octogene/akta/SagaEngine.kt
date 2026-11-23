@@ -459,17 +459,29 @@ class SagaEngine(
         encoded: String,
         now: Instant,
     ): SagaRecord {
-        val updated = try {
+        val updated = signalDecision(r, def, step, ctx, value, encoded, now)
+        save(updated, now)
+        finishIfNeeded(r, updated)
+        return updated
+    }
+
+    /** What a signal makes of the saga, not saved yet: onSignal accepts it (next step) or rejects it (compensate). */
+    private fun signalDecision(
+        r: SagaRecord,
+        def: AnyDefinition,
+        step: AnySignalStep,
+        ctx: SagaContext<Any?>,
+        value: Any?,
+        encoded: String,
+        now: Instant,
+    ): SagaRecord =
+        try {
             step.accept(ctx, value)
             repository.saveResult(r.id, r.stepIndex, step.name, encoded, now)
             next(r, def, now)
         } catch (e: StepRejected) {
             startCompensation(r.copy(lastError = e.toString()), r.stepIndex - 1, e.toString(), now)
         }
-        save(updated, now)
-        finishIfNeeded(r, updated)
-        return updated
-    }
 
     /**
      * Abandons the saga: everything done so far is compensated. A saga that is waiting or ready
@@ -571,7 +583,8 @@ class SagaEngine(
         class Done(val output: String?, logged: String?) : Outcome("Done", logged?.let { "ref=$it" })
         /** The call was made, but its output could not be encoded or is too large: the step must not run again. */
         class OutputUnstorable(val reason: String) : Outcome("OutputUnstorable", reason)
-        class Rejected(val error: String) : Outcome("Rejected", error)
+        /** [noSignalFound]: a signal step's timeout check found nothing, rather than a refusal. */
+        class Rejected(val error: String, val noSignalFound: Boolean = false) : Outcome("Rejected", error)
         class NotSent(val error: String) : Outcome("NotSent", error)
         class Unknown(val error: String) : Outcome("Unknown", error)
         object NotDone : Outcome("NotDone")
@@ -726,7 +739,7 @@ class SagaEngine(
                 is CheckResult.Done -> accepted(work, c.output)
                 // A signal step found nothing at its timeout: the signal will not come, the saga gives up.
                 CheckResult.NotDone -> (work.step as? SignalStep<*, *>)
-                    ?.let { Outcome.Rejected("No signal '${it.signal}' before the timeout, and the check found none") }
+                    ?.let { Outcome.Rejected("No signal '${it.signal}' before the timeout, and the check found none", noSignalFound = true) }
                     ?: Outcome.NotDone
                 CheckResult.CannotTell -> Outcome.CannotTell
             }
@@ -797,7 +810,8 @@ class SagaEngine(
         // Any outcome but a failed check ends the series of failed checks.
         val r = current.copy(lockedUntil = null, checkFailures = 0)
 
-        val decided = when (outcome) {
+        val received = signalDuringCheck(work, outcome, r)
+        val decided = received?.let { signalDecision(r, def, it.step, work.ctx, it.value, it.encoded, now) } ?: when (outcome) {
             is Outcome.Done -> {
                 repository.saveResult(r.id, r.stepIndex, work.step.name, outcome.output, now)
                 next(r, def, now)
@@ -868,18 +882,41 @@ class SagaEngine(
         save(updated, now)
         // The new lastError when it changed (it may add "Too many attempts"), else the outcome's own
         // detail: a repeated error is logged every time, not only the first.
-        val detail = when (outcome) {
-            is Outcome.Done -> outcome.detail
+        val detail = when {
+            outcome is Outcome.Done || received != null -> outcome.detail
             else -> updated.lastError.takeIf { it != current.lastError } ?: outcome.detail
         }
         // Logged on the step that ran, not on the one the saga moved to.
         log(work, eventOf(work, outcome), detail, now)
+        if (received != null) {
+            val consumed = listOfNotNull("consumed (stored during the check)", describe(received.step, received.value)?.let { "ref=$it" })
+            log(r.id, r.stepIndex, received.step.name, SagaEvents.SIGNAL_RECEIVED, consumed.joinToString(" "), now, work.trace)
+        }
         finishIfNeeded(current, updated)
         return if (claimUntil != null && currentTime() < claimUntil) {
             claimLocked(updated, work.trace)
         } else {
             Cycle(updated, next = null)
         }
+    }
+
+    private class ReceivedSignal(val step: AnySignalStep, val value: Any?, val encoded: String)
+
+    /**
+     * A signal received while a signal step's timeout check ran, when that check found nothing or could not
+     * tell: the lookup raced with the event, and the signal says it did happen, so it is used instead.
+     * A value the check found is kept: it is the same event. A business deadline belongs in onSignal,
+     * which every signal goes through.
+     */
+    private fun signalDuringCheck(work: Work, outcome: Outcome, r: SagaRecord): ReceivedSignal? {
+        if (work.action != Action.CHECK) return null
+        @Suppress("UNCHECKED_CAST")
+        val step = work.step as? AnySignalStep ?: return null
+        val foundNothing = outcome is Outcome.Rejected && outcome.noSignalFound
+        if (!foundNothing && outcome != Outcome.CannotTell) return null
+        val stored = repository.signal(r.id, step.signal) ?: return null
+        val value = decode(stored, checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
+        return ReceivedSignal(step, value, stored)
     }
 
     /**
