@@ -35,9 +35,12 @@ annotation class SagaDslMarker
 fun saga(type: String, block: SagaBuilder<Unit>.() -> Unit): SagaDefinition<Unit> =
     SagaBuilder<Unit>(type, inputType = null).apply(block).build()
 
-/** Builds a saga whose input is an [I]: given to `create`, read by every step as `input`. */
+/**
+ * Builds a saga whose input is an [I]: given to `create`, read by every step as `input`.
+ * `saga<Unit>` is the same as `saga` without a type argument: no input is stored.
+ */
 inline fun <reified I> saga(type: String, noinline block: SagaBuilder<I>.() -> Unit): SagaDefinition<I> =
-    SagaBuilder<I>(type, typeOf<I>()).apply(block).build()
+    SagaBuilder<I>(type, typeOf<I>().unlessUnit()).apply(block).build()
 
 @SagaDslMarker
 class SagaBuilder<I> @PublishedApi internal constructor(
@@ -52,9 +55,12 @@ class SagaBuilder<I> @PublishedApi internal constructor(
     @JvmName("stepWithoutOutput")  // same JVM signature as the typed step<O> below, once erased
     fun step(name: String, block: StepBuilder<I, Unit>.() -> Unit): StepRef<Unit> = addStep(name, null, block)
 
-    /** Declares the next step, whose call returns an [O]. Steps run in declaration order. */
+    /**
+     * Declares the next step, whose call returns an [O]. Steps run in declaration order.
+     * `step<Unit>` is the same as `step` without a type argument: no output is stored.
+     */
     inline fun <reified O> step(name: String, noinline block: StepBuilder<I, O>.() -> Unit): StepRef<O> =
-        addStep(name, typeOf<O>(), block)
+        addStep(name, typeOf<O>().unlessUnit(), block)
 
     @PublishedApi
     internal fun <O> addStep(name: String, outputType: KType?, block: StepBuilder<I, O>.() -> Unit): StepRef<O> {

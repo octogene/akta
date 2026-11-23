@@ -9,6 +9,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.reflect.typeOf
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -78,6 +79,34 @@ class SagaDslTest {
         assertEquals(SagaState.COMPLETED, saga.state)
         assertEquals(mapOf("notify" to null), repository.results(saga.id))
         assertNull(definition.steps.single().outputType)
+    }
+
+    @Test
+    fun `step of Unit and saga of Unit store nothing, like the forms without a type argument`() {
+        val definition = saga<Unit>("NOTIFY") {
+            step<Unit>("notify") { execute { } }
+        }
+        assertNull(definition.inputType)
+        assertNull(definition.steps.single().outputType)
+
+        val saga = definition.runFor("item-1")
+
+        assertEquals(SagaState.COMPLETED, saga.state)
+        assertNull(saga.input)
+        assertEquals(mapOf("notify" to null), repository.results(saga.id))
+    }
+
+    @Test
+    fun `a definition built by hand drops a Unit input, and refuses a step with a Unit output`() {
+        val noOutput = saga("T") { step("x") { execute { } } }.steps.single()
+        assertNull(SagaDefinition("T", typeOf<Unit>(), listOf(noOutput)).inputType)
+        assertEquals(typeOf<Unit?>(), SagaDefinition("T", typeOf<Unit?>(), listOf(noOutput)).inputType)
+
+        val unitOutput = object : SagaStep<Unit, Unit> by noOutput as SagaStep<Unit, Unit> {
+            override val outputType = typeOf<Unit>()
+        }
+        val error = assertFailsWith<IllegalArgumentException> { SagaDefinition("T", null, listOf(unitOutput)) }
+        assertTrue("declares Unit" in error.message!!, error.message)
     }
 
     @Test

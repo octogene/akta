@@ -119,7 +119,10 @@ interface SagaStep<I, O> {
     /** Unique within its saga. Stored in the database: do not rename a step that has running sagas. */
     val name: String
 
-    /** The type of the output, for the engine's serializer. Null when the step has no output (O is Unit). */
+    /**
+     * The type of the output, for the engine's serializer. Null when the step has no output (O is Unit):
+     * `typeOf<Unit>()` is refused, since it would store `{}` for a step that returns nothing.
+     */
     val outputType: KType?
 
     /**
@@ -202,14 +205,19 @@ sealed interface SignalResult {
 class SagaDefinition<I>(
     /** Saga type, stored in the database (e.g. "ITEM_SETUP"). */
     val type: String,
-    /** The type of the input, for the engine's serializer. Null when the saga has no input (I is Unit). */
-    val inputType: KType?,
+    inputType: KType?,
     val steps: List<SagaStep<I, *>>,
     /** Runs INSIDE the transaction that completes the saga. Must not call external systems. */
     val onCompleted: SagaContext<I>.() -> Unit = {},
     /** Runs INSIDE the transaction that ends the saga after compensation. Must not call external systems. */
     val onFailed: SagaContext<I>.() -> Unit = {},
 ) {
+    /**
+     * The type of the input, for the engine's serializer. Null when the saga has no input (I is Unit):
+     * `typeOf<Unit>()` becomes null, so a saga without input never stores `{}`.
+     */
+    val inputType: KType? = inputType?.unlessUnit()
+
     init {
         require(type.isNotBlank()) { "Saga type must not be blank" }
         require(steps.isNotEmpty()) { "Saga $type has no steps" }
@@ -220,9 +228,18 @@ class SagaDefinition<I>(
         require(duplicateSignals.isEmpty()) { "Signal names used by several steps in saga $type: $duplicateSignals" }
         signals.forEach { require(it.outputType != null) { "Signal step '${it.name}' of saga $type needs a value type" } }
         signals.forEach { require(it.idempotency == null) { "Signal step '${it.name}' of saga $type makes no call: it cannot be idempotent" } }
+        steps.filter { it !is SignalStep<*, *> }.forEach {
+            require(it.outputType?.unlessUnit() == it.outputType) {
+                "Step '${it.name}' of saga $type declares Unit as its output type: declare null, a step without output stores nothing"
+            }
+        }
         // The name is part of the idempotency key, which services limit in length.
         steps.forEach { require(it.name.length <= MAX_STEP_NAME) { "Step name '${it.name}' of saga $type is over $MAX_STEP_NAME characters" } }
     }
 }
 
 private const val MAX_STEP_NAME = 100
+
+/** Null for `Unit`, which carries no data: nothing to store, rather than `{}`. `Unit?` is kept. */
+@PublishedApi
+internal fun KType.unlessUnit(): KType? = takeUnless { it.classifier == Unit::class && !it.isMarkedNullable }
