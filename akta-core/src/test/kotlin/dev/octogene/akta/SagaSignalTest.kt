@@ -157,6 +157,25 @@ class SagaSignalTest {
     // ---- Timeouts -----------------------------------------------------------------------------
 
     @Test
+    fun `without a check, a timeout makes the saga stuck without reading its data`() {
+        val json = KotlinxJsonSagaSerializer()
+        var decodes = 0
+        val counting = object : SagaSerializer by json {
+            override fun decode(text: String, type: kotlin.reflect.KType): Any? { decodes++; return json.decode(text, type) }
+        }
+        val definition = reservation()
+        val engine = SagaEngine(InMemorySagaTransactions(repository), repository, listOf(definition), counting, SagaConfig(), clock)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+
+        decodes = 0
+        engine.resumeAfter(31.minutes)
+
+        assertEquals(StepStatus.STUCK, runBlocking { engine.find(id)!! }.stepStatus)
+        assertEquals(0, decodes)                                                // nothing to call: nothing decoded
+    }
+
+    @Test
     fun `without a check, a timeout makes the saga stuck, and a retry waits again`() {
         val definition = reservation()
         val engine = engine(definition)

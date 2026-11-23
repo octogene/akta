@@ -668,10 +668,8 @@ class SagaEngine(
         if (r.stepStatus == StepStatus.STUCK || r.nextAttemptAt > now) return Cycle(r, next = null)
 
         val def = definition(r.type)
-        // Decoded before anything is called: data that cannot be read throws here, and the transaction
-        // rolls back. resumeDue then postpones the saga (another version of the code may read it).
-        val ctx = context(r, def)
-        // A cancellation that waited for a call to end: compensate now that none is in flight.
+        // A cancellation that waited for a call to end: compensate now that none is in flight. Before the
+        // data is decoded: the claim below decodes it, in this same transaction.
         val cancelled = cancelIfRequested(r, now)
         if (cancelled !== r) {
             save(cancelled, now)
@@ -680,21 +678,25 @@ class SagaEngine(
             return claimLocked(cancelled, trace)
         }
         val step = def.stepAt(r.stepIndex)
-        if (step is SignalStep<*, *> && r.state == SagaState.RUNNING) {
+        val signalStep = (step as? SignalStep<*, *>)?.takeIf { r.state == SagaState.RUNNING }
+        // A signal step's timeout passed without its signal, and nothing will check: stuck, no data needed.
+        if (signalStep != null && r.stepStatus == StepStatus.WAITING && !signalStep.checksOnTimeout) {
+            val blocked = stuck(r, StuckReason.NO_SIGNAL, "No signal '${signalStep.signal}' before the timeout", now)
+            save(blocked, now)
+            log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
+            return Cycle(blocked, next = null)
+        }
+        // Decoded before anything is called: data that cannot be read throws here, and the transaction
+        // rolls back. resumeDue then postpones the saga (another version of the code may read it).
+        val ctx = context(r, def)
+        if (signalStep != null) {
             @Suppress("UNCHECKED_CAST")
-            val signalStep = step as AnySignalStep
+            signalStep as AnySignalStep
             when (r.stepStatus) {
                 StepStatus.READY -> return enterWait(r, def, signalStep, ctx, now, trace)
-                StepStatus.WAITING -> {                  // its timeout passed without the signal
-                    val noSignal = "No signal '${signalStep.signal}' before the timeout"
-                    if (!signalStep.checksOnTimeout) {
-                        val blocked = stuck(r, StuckReason.NO_SIGNAL, noSignal, now)
-                        save(blocked, now)
-                        log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
-                        return Cycle(blocked, next = null)
-                    }
+                StepStatus.WAITING -> {                  // its timeout passed without the signal: the check decides
                     log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
-                    r = r.copy(stepStatus = StepStatus.UNKNOWN, lastError = noSignal)   // the check decides, below
+                    r = r.copy(stepStatus = StepStatus.UNKNOWN, lastError = "No signal '${signalStep.signal}' before the timeout")
                 }
                 // UNKNOWN: its timeout check, claimed below. Unless a signal arrived during a check that then
                 // failed: it was stored, and answers what the check would look up again.
