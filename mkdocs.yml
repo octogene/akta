@@ -1,5 +1,8 @@
 site_name: akta
 site_description: A small saga engine for Kotlin services that call external systems, with state in PostgreSQL.
+site_url: https://octogene.github.io/akta/
+repo_url: https://github.com/octogene/akta
+repo_name: octogene/akta
 copyright: akta documentation
 
 theme:

@@ -8,7 +8,7 @@ A small, generic saga engine for Kotlin services that call external systems **wh
 - When it cannot decide, it stops and waits for a human, instead of risking a duplicate.
 - A saga can carry a typed **input**, fixed at creation, and each step a typed **output**, read by the steps after it: stored as JSON through kotlinx.serialization.
 
-**Documentation site** (Material for MkDocs: getting started, use cases, a guide to clean architecture with Ktor, how it works, operations), from `docs/`:
+**Documentation site** (Material for MkDocs: getting started, use cases, a guide to clean architecture with Ktor, how it works, operations), at <https://octogene.github.io/akta/>, published from `docs/` by `.github/workflows/docs.yml` on every push to `master`. Locally:
 
 ```bash
 pipx run --spec mkdocs-material==9.6.14 mkdocs serve      # http://127.0.0.1:8000, reloads on edit
