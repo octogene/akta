@@ -3,7 +3,7 @@ site_description: A small saga engine for Kotlin services that call external sys
 site_url: https://octogene.github.io/akta/
 repo_url: https://github.com/octogene/akta
 repo_name: octogene/akta
-copyright: akta documentation
+copyright: Copyright &copy; 2026 Octogene, under the MIT license
 
 theme:
   name: material

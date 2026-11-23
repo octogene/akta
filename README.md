@@ -605,3 +605,9 @@ Other systems and users see the intermediate state while a saga runs (stock move
 
 - **PostgreSQL only.** The Exposed repository uses `FOR UPDATE SKIP LOCKED`, `ON CONFLICT DO NOTHING` and partial indexes, and its transactions always run in READ COMMITTED. Another database needs its own `SagaRepository`.
 - **The in-memory repository is for tests only.** Build `InMemorySagaTransactions(repository)` on the same repository, so failed transactions are rolled back as in PostgreSQL.
+
+---
+
+## License
+
+MIT: see [LICENSE](LICENSE).
