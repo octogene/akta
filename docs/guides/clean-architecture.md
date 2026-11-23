@@ -5,21 +5,28 @@ A saga is **application-level orchestration**: it decides which ports are called
 ```mermaid
 flowchart TB
     subgraph web[web: Ktor]
-        R[Routes] --> UC
-        L[Kafka listener] --> UC2
+        R[Routes]
+        L[Kafka listener]
     end
     subgraph application[application: depends on akta-core]
-        UC[RegisterItem use case] -->|create, run| E[SagaEngine]
-        UC2[HandlePaymentEvent use case] -->|signal| E
-        S[ItemSetupSaga definition] -->|calls| P
+        UC[RegisterItem use case]
+        UC2[HandlePaymentEvent use case]
+        S[ItemSetupSaga definition]
+        E[SagaEngine]
     end
     subgraph domain[domain: no dependency]
         P[Ports: StockGateway, BookingGateway, ItemRepository]
     end
     subgraph infrastructure[infrastructure: depends on akta-exposed]
-        A[HTTP gateways, Exposed repositories] -.implements.-> P
+        A[HTTP gateways, Exposed repositories]
         W[Engine wiring, recovery job]
     end
+    R --> UC
+    L --> UC2
+    UC -->|create, run| E
+    UC2 -->|signal| E
+    S -->|calls| P
+    A -.->|implements| P
 ```
 
 ## Modules and dependencies

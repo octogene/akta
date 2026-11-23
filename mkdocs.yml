@@ -62,8 +62,15 @@ markdown_extensions:
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
-          class: mermaid
+          class: mermaid-raw
           format: !!python/name:pymdownx.superfences.fence_code_format
+
+extra_css:
+  - stylesheets/mermaid.css
+
+extra_javascript:
+  - path: javascripts/mermaid-init.js
+    type: module
 
 nav:
   - Home: index.md
