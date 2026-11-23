@@ -42,7 +42,11 @@ The records carry the saga's encoded input, which may hold personal data: decide
 | `markCompensated(id, actor)` | A compensation is stuck and you undid the step by hand, or there was nothing to undo: the saga goes on undoing the earlier steps. |
 | `cancel(id, reason, actor)` | Abandon a saga that is not stuck, at any time before it finishes. |
 
-Every action is logged with its author. Each runs the saga on right after, for a few seconds, so the screen can show where it went.
+Every action is logged with its author. Each commits its change, then runs the saga on for up to `runFor` (10 s by default), so the screen can show where it went:
+
+- **The wait can be longer than `runFor`**: a call started just before it may take up to `callLock` more. Pass `runFor = Duration.ZERO` to return at once, as an HTTP handler that must answer quickly would; the recovery job then takes the saga on.
+- **Nothing runs when the saga cannot move**: finished, stuck, a call in flight, or not due yet.
+- **The action holds even if running the saga on fails** (the database, data that cannot be read, a saga type this pod does not know): the call returns the saga as the action left it, postponed and logged as `RESUME_FAILED`, as the recovery job would.
 
 !!! tip "Build the screen around the reason"
     The reason maps to the action: an admin screen can suggest it, show the lookup to do in the external system, and ask for the output only when `markDone` needs one.

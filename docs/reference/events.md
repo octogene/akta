@@ -29,7 +29,7 @@ Logged as `<action>:<outcome>`, on the step that ran.
 | `LOCK_EXPIRED` | A call's lock expired: the pod died, or the call never recorded its outcome |
 | `LATE_RESULT_IGNORED` | A call ended after its lock expired and another pod took over: its outcome is dropped |
 | `RECORD_FAILED` | The outcome could not be recorded: stuck, with a successful output saved |
-| `RESUME_FAILED` | `resumeDue` could not run the saga (a database error, unreadable data): postponed |
+| `RESUME_FAILED` | `resumeDue`, or the run after a manual action, could not run the saga (a database error, unreadable data, an unknown type): postponed |
 | `KEY_EXPIRED` | An idempotent step's key may be forgotten: stuck, no call made |
 | `NOT_CALLED` | A long pause after a claim (GC, a stalled thread) left no time to call before its lock expires: the step is released as it was, due at once, no attempt used |
 

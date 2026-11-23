@@ -156,7 +156,10 @@ object SagaEvents {
     const val LATE_RESULT_IGNORED = "LATE_RESULT_IGNORED"
     /** The outcome of a call could not be saved: the saga is STUCK; a successful call's output is kept with its result. */
     const val RECORD_FAILED = "RECORD_FAILED"
-    /** resumeDue could not run the saga (database error, bug…): postponed by [SagaConfig.resumeFailureDelay]. */
+    /**
+     * resumeDue, or the run after a manual action, could not run the saga (database error, bug…): postponed by
+     * [SagaConfig.resumeFailureDelay]. The manual action itself is committed.
+     */
     const val RESUME_FAILED = "RESUME_FAILED"
     const val MANUAL_RETRY = "MANUAL_RETRY"
     const val MANUAL_DONE = "MANUAL_DONE"

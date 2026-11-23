@@ -404,7 +404,7 @@ When a saga is `STUCK`, a human decides. List them with `engine.findStuck()` (se
 
 For a signal step that got stuck at its timeout, `retry` waits again (and uses a signal received meanwhile), and `markDone` takes the signal's value as JSON. A lost event can also be delivered by hand with `engine.signal`, and `engine.cancel` abandons a saga at any time before it finishes.
 
-Every manual action is logged with its author in `saga_log`.
+Every manual action is logged with its author in `saga_log`. Each commits its change, then runs the saga on for up to `runFor` (10 s by default; a call started before that may take up to `callLock` more). `runFor = Duration.ZERO` returns at once and leaves the saga to `resumeDue`. If running the saga on fails, the action still holds: the saga is postponed and logged as `RESUME_FAILED`.
 
 ---
 

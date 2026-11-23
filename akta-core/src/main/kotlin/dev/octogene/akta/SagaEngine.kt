@@ -183,7 +183,7 @@ class SagaEngine(
     }
 
     /**
-     * After [run] threw in [resumeDue] (a database error, a bug…): moves the saga back in the queue,
+     * After [run] threw in [resumeDue], or after a manual action (a database error, a bug…): moves the saga back in the queue,
      * so that sagas failing on every attempt cannot fill each batch and starve the others.
      * Best effort: if this fails too, the error is already reported by [resumeDue].
      */
@@ -204,6 +204,11 @@ class SagaEngine(
         } catch (_: Exception) {
             // The database is probably down: nothing more to do here.
         }
+    }
+
+    /** How long a manual action runs the saga on by default, after committing its change. */
+    private companion object {
+        val MANUAL_RUN = 10.seconds
     }
 
     /** What [resumeDue] did: how many sagas it looked at, and the ones that threw. */
@@ -259,6 +264,13 @@ class SagaEngine(
     }
 
     // ---- Manual actions on a stuck saga -----------------------------------------------------
+    //
+    // Each action commits its change, then runs the saga on for up to runFor (10 s by default), as run()
+    // does: a call started before that may take up to callLock more. Duration.ZERO returns at once and
+    // leaves the saga to resumeDue, which picks it up within its period. Nothing runs when the saga cannot
+    // move on (finished, stuck, a call in flight, not due). The change stays committed whatever happens
+    // next: if running the saga on fails (the database, data that cannot be read, a type this engine does
+    // not know), the action still returns the saga, postponed and logged as RESUME_FAILED, as in resumeDue.
 
     /**
      * Retries the stuck step. Forward, this EXECUTES the step again without checking first:
@@ -270,8 +282,8 @@ class SagaEngine(
      * the step was not applied (after [StuckReason.KEY_EXPIRED], or when the service keeps answering a failure
      * it remembered for the old key).
      */
-    suspend fun retry(id: Uuid, actor: String, newKey: Boolean = false): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_RETRY) { r, now ->
+    suspend fun retry(id: Uuid, actor: String, newKey: Boolean = false, runFor: Duration = MANUAL_RUN): SagaRecord =
+        manual(id, actor, SagaEvents.MANUAL_RETRY, runFor) { r, now ->
             require(r.stepStatus == StepStatus.STUCK) { "Saga $id is not stuck" }
             require(newKey || r.stuckReason != StuckReason.KEY_EXPIRED) {
                 "The idempotency key of saga $id may be forgotten by its service: confirm the step was not applied, " +
@@ -297,8 +309,8 @@ class SagaEngine(
      * step's output type before it is saved. Null keeps the output already saved for the step (after a
      * `RECORD_FAILED`), or means no output.
      */
-    suspend fun markDone(id: Uuid, output: String?, actor: String): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_DONE) { r, now ->
+    suspend fun markDone(id: Uuid, output: String?, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
+        manual(id, actor, SagaEvents.MANUAL_DONE, runFor) { r, now ->
             require(r.state == SagaState.RUNNING && r.stepStatus == StepStatus.STUCK) { "Saga $id has no stuck forward step" }
             val def = definition(r.type)
             val step = def.stepAt(r.stepIndex)
@@ -314,8 +326,14 @@ class SagaEngine(
      * after looking in the external system. When true, the current step is compensated too, and
      * receives [output] as its own output (checked as in [markDone]). A step that is READY was never applied.
      */
-    suspend fun abort(id: Uuid, actor: String, currentStepApplied: Boolean, output: String? = null): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_ABORT) { r, now ->
+    suspend fun abort(
+        id: Uuid,
+        actor: String,
+        currentStepApplied: Boolean,
+        output: String? = null,
+        runFor: Duration = MANUAL_RUN,
+    ): SagaRecord =
+        manual(id, actor, SagaEvents.MANUAL_ABORT, runFor) { r, now ->
             require(r.state == SagaState.RUNNING) { "Saga $id is not running forward" }
             require(r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.WAITING || r.stepStatus == StepStatus.STUCK) {
                 "A call of saga $id may have been applied: wait for its outcome"
@@ -338,8 +356,8 @@ class SagaEngine(
      * compensated, and the saga goes on undoing the previous steps (or ends FAILED). Used wrongly, it
      * leaves an effect in the external system, as [markDone] would.
      */
-    suspend fun markCompensated(id: Uuid, actor: String): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_COMPENSATED) { r, now ->
+    suspend fun markCompensated(id: Uuid, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
+        manual(id, actor, SagaEvents.MANUAL_COMPENSATED, runFor) { r, now ->
             require(r.state == SagaState.COMPENSATING && r.stepStatus == StepStatus.STUCK) { "Saga $id has no stuck compensation" }
             repository.markCompensated(r.id, r.stepIndex, now)
             ManualChange(compensateFrom(r, r.stepIndex - 1, now))
@@ -490,8 +508,8 @@ class SagaEngine(
      * saga stays stuck until a human retries or aborts it. Refused for a finished saga: undoing it is a
      * new saga. [reason] is kept in [SagaRecord.cancelReason]; a second cancellation is only logged.
      */
-    suspend fun cancel(id: Uuid, reason: String, actor: String): SagaRecord =
-        manual(id, actor, SagaEvents.CANCEL_REQUESTED) { r, now ->
+    suspend fun cancel(id: Uuid, reason: String, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
+        manual(id, actor, SagaEvents.CANCEL_REQUESTED, runFor) { r, now ->
             require(!r.state.isFinished) { "Saga $id is finished: undoing it is a new saga" }
             if (r.state != SagaState.RUNNING) return@manual ManualChange(r, detail = reason)   // already compensating
             // The first cancellation counts: a second one is only logged.
@@ -515,10 +533,12 @@ class SagaEngine(
         id: Uuid,
         actor: String,
         event: String,
+        runFor: Duration,
         change: (SagaRecord, Instant) -> ManualChange,
     ): SagaRecord {
+        require(!runFor.isNegative()) { "runFor must not be negative" }
         val trace = traceId()
-        tx {
+        val committed = tx {
             val r = lock(id) ?: throw NoSuchElementException("Saga $id not found")
             val now = currentTime()
             val (updated, detail) = change(r, now).let { it.record to it.detail }
@@ -526,8 +546,24 @@ class SagaEngine(
             // r: logged on the step the action was taken on
             log(r.id, r.stepIndex, null, event, detail, now, trace, actor)
             finishIfNeeded(r, updated)
+            updated
         }
-        return run(id, deadline = currentTime() + 10.seconds)
+        val now = currentTime()
+        val canMoveOn = !committed.state.isFinished && committed.stepStatus != StepStatus.STUCK && committed.nextAttemptAt <= now
+        if (!runFor.isPositive() || !canMoveOn) return committed
+        // The action is committed: a failure from here on is the saga's, not the action's.
+        return try {
+            run(id, deadline = now + runFor)
+        } catch (e: Throwable) {
+            if (e is CancellationException || e.isFatal()) throw e
+            postpone(id, e)
+            try {
+                tx { repository.find(id) } ?: committed
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                committed
+            }
+        }
     }
 
     /**

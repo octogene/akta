@@ -586,6 +586,67 @@ class SagaEngineTest {
     }
 
     @Test
+    fun `a manual action with runFor zero commits and leaves the saga to resumeDue`() {
+        var down = true
+        val stock = FakeStep("stock", { if (down) throw StepNotSent("down") else "STK-1" })
+        val engine = engine(stock, config = SagaConfig(maxAttempts = 1))
+        val saga = engine.start()
+        assertEquals(StepStatus.STUCK, saga.stepStatus)
+        down = false
+
+        val after = runBlocking { engine.retry(saga.id, actor = "alice", runFor = Duration.ZERO) }
+
+        assertEquals(StepStatus.READY, after.stepStatus)                  // committed, not run
+        assertEquals(1, stock.executions)
+        engine.resumeAfter(1.seconds)
+        assertEquals(SagaState.COMPLETED, engine.state(saga).state)
+    }
+
+    @Test
+    fun `a manual action does not run a saga that cannot move on`() {
+        val stock = FakeStep("stock", { throw java.io.IOException("read timeout") })   // unknown outcome
+        val transactions = object : SagaTransactions {
+            val inMemory = InMemorySagaTransactions(repository)
+            var count = 0
+            override suspend fun <T> inTransaction(block: () -> T): T { count++; return inMemory.inTransaction(block) }
+        }
+        val engine = newEngine(transactions, repository, listOf(definition("TEST", listOf(stock))))
+        val saga = engine.start()
+        assertEquals(StepStatus.UNKNOWN, saga.stepStatus)                 // to check after settleDelay
+
+        transactions.count = 0
+        val after = runBlocking { engine.cancel(saga.id, "customer left", "support") }
+
+        assertEquals("customer left", after.cancelReason)
+        assertEquals(1, transactions.count)                               // the cancellation only
+    }
+
+    @Test
+    fun `a failure to run the saga on does not fail the action, which is committed`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        val booking = FakeStep("booking", { throw StepNotSent("down") })
+        val engine = engine(stock, booking, config = SagaConfig(maxAttempts = 3))
+        val saga = engine.start()                                         // booking: retried later
+        // A pod that does not know this saga type (a rolling deploy): its run after the action throws.
+        val other = newEngine(
+            InMemorySagaTransactions(repository), repository, listOf(definition("OTHER", listOf(FakeStep("x", { "X" })))),
+        )
+
+        val after = runBlocking { other.cancel(saga.id, "customer left", "support") }
+
+        assertEquals(SagaState.COMPENSATING, after.state)                 // the cancellation is committed
+        assertEquals("Cancelled: customer left", after.failureReason)
+        val failure = repository.log.last()
+        assertEquals(SagaEvents.RESUME_FAILED, failure.event)
+        assertTrue(failure.detail!!.contains("Unknown saga type: TEST"), failure.detail)
+        assertTrue(after.nextAttemptAt >= clock.now + SagaConfig().resumeFailureDelay)   // postponed
+
+        engine.resumeAfter(2.minutes)                                     // a pod that knows the type
+        assertEquals(SagaState.FAILED, engine.state(saga).state)
+        assertEquals(1, stock.compensations)
+    }
+
+    @Test
     fun `durations that make no sense are refused`() {
         assertFailsWith<IllegalArgumentException> { SagaConfig(callLock = Duration.ZERO) }
         assertFailsWith<IllegalArgumentException> { SagaConfig(callLock = 500.milliseconds) }
