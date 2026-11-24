@@ -273,12 +273,21 @@ class SagaDslTest {
     }
 
     @Test
+    @OptIn(ExperimentalUuidApi::class)
     fun `data that cannot be read makes no call, and the saga is postponed`() {
         var calls = 0
         val definition = saga<BookingRequest>("BOOKING") { step("x") { execute { calls++ } } }
         val engine = engine(definition)
-        val id = engine.create(definition, "item-1", BookingRequest("C-1", "2026-12-01", "2026-12-03"))
-        repository.save(repository.find(id)!!.copy(input = """{"customerId": 42"""), now)   // written by "another version"
+        // A saga written by "another version": its input cannot be read as a BookingRequest.
+        val id = Uuid.generateV7()
+        repository.insert(
+            SagaRecord(
+                id = id, type = "BOOKING", key = "item-1", state = SagaState.RUNNING, stepIndex = 0,
+                stepStatus = StepStatus.READY, attempts = 0, nextAttemptAt = now, lockedUntil = null, lastError = null,
+                traceparent = null, createdAt = now, input = """{"customerId": 42""",
+            ),
+            now,
+        )
 
         val result = runBlocking { engine.resumeDue() }
 

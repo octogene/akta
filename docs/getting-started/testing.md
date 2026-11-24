@@ -17,7 +17,7 @@ val engine = SagaEngine(
 )
 ```
 
-`InMemorySagaTransactions(repository)` rolls back a "transaction" that throws, as PostgreSQL would: build it on the same repository.
+`InMemorySagaTransactions(repository)` rolls back a "transaction" that throws, as PostgreSQL would: build it on the same repository. The repository also refuses the rows the schema's constraints would refuse, and updates a saga as PostgreSQL does, without touching what is written once (its input, type, key and creation time): a test fails where production would.
 
 ## Test the paths that matter
 

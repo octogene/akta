@@ -39,6 +39,7 @@ class InMemorySagaRepository : SagaRepository {
     fun storedResults(sagaId: Uuid): List<StoredResult> = results.filter { it.sagaId == sagaId }
 
     override fun insert(record: SagaRecord, now: Instant) {
+        record.checkConstraints()
         if (sagas.values.any { it.key == record.key && !it.state.isFinished }) throw DuplicateSagaException(record.key)
         sagas[record.id] = record.truncated()
         updatedAt[record.id] = now
@@ -48,9 +49,26 @@ class InMemorySagaRepository : SagaRepository {
 
     override fun find(id: Uuid): SagaRecord? = sagas[id]
 
+    /**
+     * As the database's UPDATE: a saga that does not exist is left alone, and what is written once at creation
+     * (type, key, input, createdAt) is kept, whatever [record] says.
+     */
     override fun save(record: SagaRecord, now: Instant) {
-        sagas[record.id] = record.truncated()
+        record.checkConstraints()
+        val stored = sagas[record.id] ?: return
+        sagas[record.id] = record.truncated().copy(type = stored.type, key = stored.key, input = stored.input, createdAt = stored.createdAt)
         updatedAt[record.id] = now
+    }
+
+    /** The CHECK constraints of schema.sql: a test fails where PostgreSQL would refuse the row. */
+    private fun SagaRecord.checkConstraints() {
+        check(stepIndex >= 0 && attempts >= 0 && checkFailures >= 0 && keyGeneration >= 0) {
+            "Saga $id: negative step_index, attempts, check_failures or key_generation"
+        }
+        check((stepStatus == StepStatus.IN_PROGRESS) == (lockedUntil != null)) { "Saga $id violates saga_lock: $stepStatus, lockedUntil $lockedUntil" }
+        check((cancelRequestedAt == null) == (cancelReason == null)) { "Saga $id violates saga_cancel" }
+        check((stepStatus == StepStatus.STUCK) == (stuckReason != null && stuckAt != null)) { "Saga $id violates saga_stuck_reason" }
+        check((stuckReason == null) == (stuckAt == null)) { "Saga $id violates saga_stuck_at" }
     }
 
     /** As a database column would keep it: see [SagaRepository.MAX_TEXT]. */
@@ -149,19 +167,19 @@ class InMemorySagaRepository : SagaRepository {
 }
 
 /**
- * Runs each "transaction" under one lock. For tests only.
- * Given the [repository], a transaction that throws is rolled back, as in a real database.
+ * Runs each "transaction" under one lock, on [repository]: one that throws is rolled back, as in a real
+ * database. For tests only. Build the engine with the same repository.
  */
-class InMemorySagaTransactions(private val repository: InMemorySagaRepository? = null) : SagaTransactions {
+class InMemorySagaTransactions(private val repository: InMemorySagaRepository) : SagaTransactions {
     private val lock = ReentrantLock()
 
     override suspend fun <T> inTransaction(block: () -> T): T = lock.withLock {
         if (lock.holdCount > 1) return@withLock block()        // nested: part of the outer transaction
-        val snapshot = repository?.snapshot()
+        val snapshot = repository.snapshot()
         try {
             block()
         } catch (e: Throwable) {
-            snapshot?.let { repository.restore(it) }
+            repository.restore(snapshot)
             throw e
         }
     }

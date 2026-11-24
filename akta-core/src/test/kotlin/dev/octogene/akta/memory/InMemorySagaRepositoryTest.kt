@@ -7,6 +7,8 @@ import dev.octogene.akta.SagaState
 import dev.octogene.akta.StepStatus
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlin.test.assertFailsWith
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
 import kotlin.uuid.ExperimentalUuidApi
@@ -67,5 +69,40 @@ class InMemorySagaRepositoryTest {
 
         assertEquals(exact, repository.find(sagaId)!!.lastError)
         assertEquals("short", repository.history(sagaId).single().detail)
+    }
+
+    @Test
+    fun `save keeps what the database writes once, and leaves an unknown saga alone`() {
+        repository.insert(record(lastError = null).copy(input = "{\"customerId\":\"C-1\"}"), t0)
+
+        repository.save(record(lastError = "down").copy(type = "OTHER", key = "item-2", input = "{}", createdAt = t0 + 1.seconds), t0)
+
+        val stored = repository.find(sagaId)!!
+        assertEquals("down", stored.lastError)                               // what an UPDATE writes
+        assertEquals("T", stored.type)                                       // what it never writes
+        assertEquals("item-1", stored.key)
+        assertEquals("{\"customerId\":\"C-1\"}", stored.input)
+        assertEquals(t0, stored.createdAt)
+
+        val unknown = record(lastError = null).copy(id = Uuid.generateV7())
+        repository.save(unknown, t0)                                         // UPDATE of no row
+        assertNull(repository.find(unknown.id))
+    }
+
+    @Test
+    fun `a row the schema would refuse is refused`() {
+        assertFailsWith<IllegalStateException> {                           // saga_lock
+            repository.insert(record(lastError = null).copy(stepStatus = StepStatus.IN_PROGRESS), t0)
+        }
+        repository.insert(record(lastError = null), t0)
+        assertFailsWith<IllegalStateException> {                           // saga_cancel
+            repository.save(record(lastError = null).copy(cancelRequestedAt = t0), t0)
+        }
+        assertFailsWith<IllegalStateException> {                           // saga_stuck_reason
+            repository.save(record(lastError = null).copy(stepStatus = StepStatus.STUCK), t0)
+        }
+        assertFailsWith<IllegalStateException> {                           // attempts >= 0
+            repository.save(record(lastError = null).copy(attempts = -1), t0)
+        }
     }
 }
