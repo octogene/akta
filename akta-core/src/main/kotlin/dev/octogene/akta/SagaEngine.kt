@@ -253,8 +253,9 @@ class SagaEngine(
 
     /**
      * Counts and ages of the unfinished sagas, for gauges and alerts: stuck sagas by reason, the oldest
-     * unfinished saga, and how far behind the recovery job is (`now - oldestDueAt`). Sample it about once
-     * a minute; it reads partial indexes only.
+     * unfinished saga, and how far behind the recovery job is (`now - oldestDueAt`). It reads every
+     * unfinished saga (one grouped query on PostgreSQL), never the finished ones: sample it about once a
+     * minute, not per request.
      */
     suspend fun stats(types: Collection<String>? = null): SagaStats = tx { repository.stats(currentTime(), types) }
 

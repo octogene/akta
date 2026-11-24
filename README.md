@@ -423,7 +423,7 @@ The records carry the saga's encoded input, which may hold personal data: decide
 
 **Metrics.** Two sources, for two kinds of numbers:
 
-- **Gauges from `engine.stats()`**: unfinished sagas by state and status, stuck sagas by reason, the oldest unfinished saga (`oldestUnfinishedAt`) and how far behind the recovery job is (`now - oldestDueAt`). It reads partial indexes only; sample it about once a minute. It is always right, even after a restart.
+- **Gauges from `engine.stats()`**: unfinished sagas by state and status, stuck sagas by reason, the oldest unfinished saga (`oldestUnfinishedAt`) and how far behind the recovery job is (`now - oldestDueAt`). It reads every unfinished saga in one grouped query, never the finished ones; sample it about once a minute. It is always right, even after a restart.
 - **Counters from a `SagaListener`**, passed to the engine: it is told about each `saga_log` entry once its transaction commits (`EXECUTE:Done`, `LOCK_EXPIRED`, `WAIT_TIMED_OUT`…), with the saga's type and state. A change that rolls back is never reported; a crash right after a commit can lose events (`saga_log` stays the record). A listener that throws is ignored. Creations are not reported: `create` runs in your transaction, whose commit the engine cannot see.
 
 With OpenTelemetry (exported to Datadog):

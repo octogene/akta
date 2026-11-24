@@ -12,7 +12,7 @@ stats.oldestUnfinishedAt  // the oldest unfinished saga that is not stuck (waiti
 stats.oldestDueAt         // the oldest due next_attempt_at: now - this = how far behind recovery is
 ```
 
-It reads partial indexes only (finished sagas, the bulk of the table, are never read): sample it about once a minute. A gauge from a query is right after every restart, which a counter is not.
+It reads every unfinished saga in one grouped query, and never the finished ones, the bulk of the table: sample it about once a minute, not per request. A gauge from a query is right after every restart, which a counter is not.
 
 ## Counters: a `SagaListener`
 
