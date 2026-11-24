@@ -9,13 +9,15 @@ import dev.octogene.akta.SagaStats
 import dev.octogene.akta.StepStatus
 import dev.octogene.akta.StuckCursor
 import dev.octogene.akta.StuckReason
+import org.jetbrains.exposed.v1.core.ComparisonOp
+import org.jetbrains.exposed.v1.core.Expression
 import org.jetbrains.exposed.v1.core.Op
+import org.jetbrains.exposed.v1.core.QueryBuilder
+import org.jetbrains.exposed.v1.core.QueryParameter
 import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.count
-import org.jetbrains.exposed.v1.core.greater
 import org.jetbrains.exposed.v1.core.min
-import org.jetbrains.exposed.v1.core.or
 import org.jetbrains.exposed.v1.core.Table
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
@@ -284,8 +286,13 @@ class ExposedSagaRepository : SagaRepository {
             .where {
                 var op: Op<Boolean> = (SagaTable.stepStatus eq StepStatus.STUCK.name) and ofTypes(types)
                 if (after != null) {
-                    val at = after.stuckAt.utc()
-                    op = op and ((SagaTable.stuckAt greater at) or ((SagaTable.stuckAt eq at) and (SagaTable.id greater after.id)))
+                    // (stuck_at, id) > (?, ?): a row comparison, which PostgreSQL resolves as one range of the
+                    // saga_stuck index, unlike the equivalent OR.
+                    val cursor = Row(
+                        QueryParameter(after.stuckAt.utc(), SagaTable.stuckAt.columnType),
+                        QueryParameter(after.id, SagaTable.id.columnType),
+                    )
+                    op = op and object : ComparisonOp(Row(SagaTable.stuckAt, SagaTable.id), cursor, ">") {}
                 }
                 op
             }
@@ -346,6 +353,13 @@ class ExposedSagaRepository : SagaRepository {
         val oldestCreated: Instant?,
         val oldestNext: Instant?,
     )
+
+    /** A row value, `(a, b, …)`, for row comparisons. */
+    private class Row(vararg val parts: Expression<*>) : Expression<Any>() {
+        override fun toQueryBuilder(queryBuilder: QueryBuilder) = queryBuilder {
+            parts.toList().appendTo(separator = ", ", prefix = "(", postfix = ")") { append(it) }
+        }
+    }
 
     private fun ofTypes(types: Collection<String>?): Op<Boolean> = if (types == null) Op.TRUE else SagaTable.type inList types
 
