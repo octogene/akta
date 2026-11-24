@@ -224,9 +224,15 @@ class SagaDefinition<I>(
     val type: String,
     inputType: KType?,
     val steps: List<SagaStep<I, *>>,
-    /** Runs INSIDE the transaction that completes the saga. Must not call external systems. */
+    /**
+     * Runs INSIDE the transaction that completes the saga. Must not call external systems.
+     * The saga's own row is written as the transaction ends: read the saga from the context, not the saga table.
+     */
     val onCompleted: SagaContext<I>.() -> Unit = {},
-    /** Runs INSIDE the transaction that ends the saga after compensation. Must not call external systems. */
+    /**
+     * Runs INSIDE the transaction that ends the saga after compensation. Must not call external systems.
+     * The saga's own row is written as the transaction ends: read the saga from the context, not the saga table.
+     */
     val onFailed: SagaContext<I>.() -> Unit = {},
 ) {
     /**

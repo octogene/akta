@@ -1311,10 +1311,14 @@ class SagaEngine(
 
     // ---- Transactions, and the events they report after commit ---------------------------------
 
-    /** The log entries of the transaction running on this thread, and the sagas it touched. */
+    /**
+     * The transaction running on this thread: the sagas it touched as it last read or wrote them, its log
+     * entries, and the sagas it changed, written once each when its block ends (see [save]).
+     */
     private class PendingEvents {
         val latest = HashMap<Uuid, SagaRecord>()
         val events = ArrayList<SagaEvent>()
+        val unsaved = LinkedHashMap<Uuid, Pair<SagaRecord, Instant>>()
     }
 
     /**
@@ -1332,7 +1336,11 @@ class SagaEngine(
             val outer = txEvents.get()
             txEvents.set(pending)
             try {
-                block()
+                block().also {
+                    // Each saga the block changed, written once: a step recorded and the next one claimed in the
+                    // same transaction is one UPDATE, not two (each is a new row version, a dead one to vacuum).
+                    for ((record, at) in pending.unsaved.values) repository.save(record, at)
+                }
             } finally {
                 // remove(), not set(null): pooled threads are left exactly as they were found.
                 if (outer == null) txEvents.remove() else txEvents.set(outer)
@@ -1355,12 +1363,22 @@ class SagaEngine(
     private fun lock(id: Uuid, skipLocked: Boolean = false): SagaRecord? =
         repository.lock(id, skipLocked)?.also { txEvents.get()?.latest?.put(it.id, it) }
 
+    /**
+     * Saves [r] when the transaction's block ends, so that a saga changed several times in one transaction is
+     * written once. Nothing in a transaction reads a saga row back after changing it: each works on the
+     * record it locked. Outside the engine's transactions (none today), it writes at once.
+     */
     private fun save(r: SagaRecord, now: Instant) {
         check((r.stepStatus == StepStatus.STUCK) == (r.stuckReason != null && r.stuckAt != null)) {
             "Saga ${r.id}: ${r.stepStatus} with stuck reason ${r.stuckReason}"
         }
-        repository.save(r, now)
-        txEvents.get()?.latest?.put(r.id, r)
+        val pending = txEvents.get()
+        if (pending == null) {
+            repository.save(r, now)
+            return
+        }
+        pending.unsaved[r.id] = r to now
+        pending.latest[r.id] = r
     }
 
     /** Logs an event on the step that [work] ran. */
