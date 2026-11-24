@@ -1,0 +1,347 @@
+public final class dev/octogene/akta/ktor/AbortRequest {
+	public static final field Companion Ldev/octogene/akta/ktor/AbortRequest$Companion;
+	public fun <init> (ZLkotlinx/serialization/json/JsonElement;)V
+	public synthetic fun <init> (ZLkotlinx/serialization/json/JsonElement;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Z
+	public final fun component2 ()Lkotlinx/serialization/json/JsonElement;
+	public final fun copy (ZLkotlinx/serialization/json/JsonElement;)Ldev/octogene/akta/ktor/AbortRequest;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/AbortRequest;ZLkotlinx/serialization/json/JsonElement;ILjava/lang/Object;)Ldev/octogene/akta/ktor/AbortRequest;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCurrentStepApplied ()Z
+	public final fun getOutput ()Lkotlinx/serialization/json/JsonElement;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/AbortRequest$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/AbortRequest$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/AbortRequest;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/AbortRequest;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/AbortRequest$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/CancelRequest {
+	public static final field Companion Ldev/octogene/akta/ktor/CancelRequest$Companion;
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Ldev/octogene/akta/ktor/CancelRequest;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/CancelRequest;Ljava/lang/String;ILjava/lang/Object;)Ldev/octogene/akta/ktor/CancelRequest;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getReason ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/CancelRequest$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/CancelRequest$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/CancelRequest;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/CancelRequest;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/CancelRequest$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/ErrorView {
+	public static final field Companion Ldev/octogene/akta/ktor/ErrorView$Companion;
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Ldev/octogene/akta/ktor/ErrorView;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/ErrorView;Ljava/lang/String;ILjava/lang/Object;)Ldev/octogene/akta/ktor/ErrorView;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getError ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/ErrorView$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/ErrorView$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/ErrorView;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/ErrorView;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/ErrorView$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/LogEntryView {
+	public static final field Companion Ldev/octogene/akta/ktor/LogEntryView$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()I
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()Ljava/lang/String;
+	public final fun component6 ()Ljava/lang/String;
+	public final fun component7 ()Ljava/lang/String;
+	public final fun component8 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ldev/octogene/akta/ktor/LogEntryView;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/LogEntryView;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ldev/octogene/akta/ktor/LogEntryView;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getActor ()Ljava/lang/String;
+	public final fun getAt ()Ljava/lang/String;
+	public final fun getDetail ()Ljava/lang/String;
+	public final fun getEvent ()Ljava/lang/String;
+	public final fun getSagaId ()Ljava/lang/String;
+	public final fun getStepIndex ()I
+	public final fun getStepName ()Ljava/lang/String;
+	public final fun getTraceId ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/LogEntryView$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/LogEntryView$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/LogEntryView;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/LogEntryView;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/LogEntryView$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/MarkDoneRequest {
+	public static final field Companion Ldev/octogene/akta/ktor/MarkDoneRequest$Companion;
+	public fun <init> ()V
+	public fun <init> (Lkotlinx/serialization/json/JsonElement;)V
+	public synthetic fun <init> (Lkotlinx/serialization/json/JsonElement;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Lkotlinx/serialization/json/JsonElement;
+	public final fun copy (Lkotlinx/serialization/json/JsonElement;)Ldev/octogene/akta/ktor/MarkDoneRequest;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/MarkDoneRequest;Lkotlinx/serialization/json/JsonElement;ILjava/lang/Object;)Ldev/octogene/akta/ktor/MarkDoneRequest;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getOutput ()Lkotlinx/serialization/json/JsonElement;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/MarkDoneRequest$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/MarkDoneRequest$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/MarkDoneRequest;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/MarkDoneRequest;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/MarkDoneRequest$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/RetryRequest {
+	public static final field Companion Ldev/octogene/akta/ktor/RetryRequest$Companion;
+	public fun <init> ()V
+	public fun <init> (Z)V
+	public synthetic fun <init> (ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Z
+	public final fun copy (Z)Ldev/octogene/akta/ktor/RetryRequest;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/RetryRequest;ZILjava/lang/Object;)Ldev/octogene/akta/ktor/RetryRequest;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getNewKey ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/RetryRequest$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/RetryRequest$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/RetryRequest;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/RetryRequest;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/RetryRequest$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/SagaAdminKt {
+	public static final field SAGA_ADMIN_MAX_LIMIT I
+	public static final fun sagaAdminActions (Lio/ktor/server/routing/Route;Ldev/octogene/akta/SagaEngine;Lkotlin/jvm/functions/Function1;)V
+	public static final fun sagaAdminRead (Lio/ktor/server/routing/Route;Ldev/octogene/akta/SagaEngine;)V
+}
+
+public final class dev/octogene/akta/ktor/SagaView {
+	public static final field Companion Ldev/octogene/akta/ktor/SagaView$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component10 ()Ljava/lang/String;
+	public final fun component11 ()Ljava/lang/String;
+	public final fun component12 ()Ljava/lang/String;
+	public final fun component13 ()Ljava/lang/String;
+	public final fun component14 ()Ljava/lang/String;
+	public final fun component15 ()Ljava/lang/String;
+	public final fun component16 ()Ljava/lang/String;
+	public final fun component17 ()Ljava/lang/String;
+	public final fun component18 ()I
+	public final fun component19 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component20 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()I
+	public final fun component6 ()Ljava/lang/String;
+	public final fun component7 ()I
+	public final fun component8 ()I
+	public final fun component9 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)Ldev/octogene/akta/ktor/SagaView;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/SagaView;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ldev/octogene/akta/ktor/SagaView;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAttempts ()I
+	public final fun getCancelReason ()Ljava/lang/String;
+	public final fun getCancelRequestedAt ()Ljava/lang/String;
+	public final fun getCheckFailures ()I
+	public final fun getCreatedAt ()Ljava/lang/String;
+	public final fun getFailureReason ()Ljava/lang/String;
+	public final fun getId ()Ljava/lang/String;
+	public final fun getKey ()Ljava/lang/String;
+	public final fun getKeyGeneration ()I
+	public final fun getKeySince ()Ljava/lang/String;
+	public final fun getLastError ()Ljava/lang/String;
+	public final fun getLockedUntil ()Ljava/lang/String;
+	public final fun getNextAttemptAt ()Ljava/lang/String;
+	public final fun getState ()Ljava/lang/String;
+	public final fun getStepIndex ()I
+	public final fun getStepStatus ()Ljava/lang/String;
+	public final fun getStuckAt ()Ljava/lang/String;
+	public final fun getStuckReason ()Ljava/lang/String;
+	public final fun getTraceparent ()Ljava/lang/String;
+	public final fun getType ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/SagaView$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/SagaView$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/SagaView;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/SagaView;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/SagaView$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/StatsView {
+	public static final field Companion Ldev/octogene/akta/ktor/StatsView$Companion;
+	public fun <init> (Ljava/util/List;Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Ljava/util/Map;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun copy (Ljava/util/List;Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;)Ldev/octogene/akta/ktor/StatsView;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/StatsView;Ljava/util/List;Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ldev/octogene/akta/ktor/StatsView;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getOldestDueAt ()Ljava/lang/String;
+	public final fun getOldestUnfinishedAt ()Ljava/lang/String;
+	public final fun getStuckByReason ()Ljava/util/Map;
+	public final fun getUnfinished ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/StatsView$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/StatsView$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/StatsView;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/StatsView;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/StatsView$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/StatusCount {
+	public static final field Companion Ldev/octogene/akta/ktor/StatusCount$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;J)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()J
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;J)Ldev/octogene/akta/ktor/StatusCount;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/StatusCount;Ljava/lang/String;Ljava/lang/String;JILjava/lang/Object;)Ldev/octogene/akta/ktor/StatusCount;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCount ()J
+	public final fun getState ()Ljava/lang/String;
+	public final fun getStepStatus ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/StatusCount$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/StatusCount$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/StatusCount;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/StatusCount;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/StatusCount$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/StuckPage {
+	public static final field Companion Ldev/octogene/akta/ktor/StuckPage$Companion;
+	public fun <init> (Ljava/util/List;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Ljava/util/List;Ljava/lang/String;)Ldev/octogene/akta/ktor/StuckPage;
+	public static synthetic fun copy$default (Ldev/octogene/akta/ktor/StuckPage;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)Ldev/octogene/akta/ktor/StuckPage;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getNext ()Ljava/lang/String;
+	public final fun getSagas ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class dev/octogene/akta/ktor/StuckPage$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Ldev/octogene/akta/ktor/StuckPage$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ldev/octogene/akta/ktor/StuckPage;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Ldev/octogene/akta/ktor/StuckPage;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class dev/octogene/akta/ktor/StuckPage$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+

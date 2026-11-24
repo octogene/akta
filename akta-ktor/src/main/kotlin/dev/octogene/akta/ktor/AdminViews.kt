@@ -14,7 +14,7 @@ import kotlinx.serialization.json.JsonElement
 
 /** A saga as an operator sees it. Its input is left out: it may hold personal data. */
 @Serializable
-data class SagaView(
+public data class SagaView(
     val id: String,
     val type: String,
     val key: String,
@@ -41,10 +41,10 @@ data class SagaView(
 
 /** One page of stuck sagas, stuck longest first. Pass [next] as `after` for the following page. */
 @Serializable
-data class StuckPage(val sagas: List<SagaView>, val next: String?)
+public data class StuckPage(val sagas: List<SagaView>, val next: String?)
 
 @Serializable
-data class StatsView(
+public data class StatsView(
     /** Unfinished sagas, by state and step status. */
     val unfinished: List<StatusCount>,
     val stuckByReason: Map<String, Long>,
@@ -55,10 +55,10 @@ data class StatsView(
 )
 
 @Serializable
-data class StatusCount(val state: String, val stepStatus: String, val count: Long)
+public data class StatusCount(val state: String, val stepStatus: String, val count: Long)
 
 @Serializable
-data class LogEntryView(
+public data class LogEntryView(
     val sagaId: String,
     val at: String,
     val stepIndex: Int,
@@ -71,18 +71,18 @@ data class LogEntryView(
 
 /** Every error: what was wrong, in a sentence. */
 @Serializable
-data class ErrorView(val error: String)
+public data class ErrorView(val error: String)
 
 // ---- Request bodies ----------------------------------------------------------------------
 
 @Serializable
-data class RetryRequest(
+public data class RetryRequest(
     /** Send a fresh idempotency key: only once the step is known not to be applied. */
     val newKey: Boolean = false,
 )
 
 @Serializable
-data class MarkDoneRequest(
+public data class MarkDoneRequest(
     /**
      * The step's output, as a JSON value (`"STK-1"`, `{"id": "H-1"}`): what KotlinxJsonSagaSerializer stores.
      * Left out, the output already saved for the step is kept (after a RECORD_FAILED), or there is none.
@@ -91,7 +91,7 @@ data class MarkDoneRequest(
 )
 
 @Serializable
-data class AbortRequest(
+public data class AbortRequest(
     /** The stuck step was applied, as found in the external system: it is compensated too. */
     val currentStepApplied: Boolean,
     /** With [currentStepApplied], the output its compensation receives, as in [MarkDoneRequest]. */
@@ -99,7 +99,7 @@ data class AbortRequest(
 )
 
 @Serializable
-data class CancelRequest(val reason: String)
+public data class CancelRequest(val reason: String)
 
 // ---- Mapping -----------------------------------------------------------------------------
 
