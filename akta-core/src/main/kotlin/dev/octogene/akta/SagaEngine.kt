@@ -75,6 +75,9 @@ class SagaEngine(
      * Creates a saga of [definition] with its [input]. Call it INSIDE the transaction that makes the
      * business change (e.g. inserting the item), then call [run] once that transaction is committed.
      *
+     * [key] is shared by every saga type: one unfinished saga per key, whatever its type. Prefix keys by
+     * what they identify (`order:123`) unless sagas of different types are meant to exclude each other.
+     *
      * @throws DuplicateSagaException if an unfinished saga already exists for [key].
      * @throws IllegalArgumentException if [definition] is not registered, or the encoded input is over
      *   [SagaConfig.maxDataBytes]. Nothing is written in either case.

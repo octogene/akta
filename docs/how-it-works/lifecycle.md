@@ -25,7 +25,7 @@ stateDiagram-v2
     FAILED --> [*] : purgeFinished, after the retention period
 ```
 
-`RUNNING` and `COMPENSATING` are **unfinished**: the saga holds its business key (no other unfinished saga may use it), and the recovery job picks it up whenever it is due. `COMPLETED` and `FAILED` are **final**: nothing changes them, and a new saga may start for the same key.
+`RUNNING` and `COMPENSATING` are **unfinished**: the saga holds its business key (no other unfinished saga, of any type, may use it), and the recovery job picks it up whenever it is due. `COMPLETED` and `FAILED` are **final**: nothing changes them, and a new saga may start for the same key.
 
 ## Step statuses
 

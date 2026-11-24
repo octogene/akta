@@ -27,6 +27,7 @@ suspend fun registerItem(epc: String, storeId: String): HttpStatusCode {
 - **`run`** moves the saga forward until it ends, blocks (a retry later, an outcome to check, a human), or the deadline passes. The deadline is checked between calls: the answer comes within the deadline plus one call at most.
 - **A cancelled request does not interrupt a call.** If the client disconnects, Ktor cancels the handler's coroutine. `run` still lets the call in flight end and records its outcome (it waits at most `callLock`), then stops and passes the cancellation on. The recovery job takes the saga on from there. An interrupted call would have been an unknown outcome: checked after a delay, or stuck.
 - **The business key** (`key`) says what the saga is about. At most one unfinished saga per key: `create` throws `DuplicateSagaException` otherwise, for example when an item is removed while it is still being set up. Your transaction stays usable after it, so you can answer 409.
+- **Keys are shared by every saga type.** That is what lets an item's exit wait for its setup, two types with the same key. It also means two unrelated types whose ids can be equal collide: an order `123` and a user `123` would block each other. Prefix keys by what they identify, `order:123` and `user:123`, unless the types are meant to exclude each other.
 
 ```mermaid
 sequenceDiagram
