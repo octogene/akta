@@ -2,9 +2,6 @@ package dev.octogene.akta
 
 import dev.octogene.akta.memory.InMemorySagaRepository
 import dev.octogene.akta.memory.InMemorySagaTransactions
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
@@ -92,7 +89,6 @@ class SagaIdempotencyTest {
 
     @Test
     fun `a lock that expired mid-call is replayed at once with the same key, on another pod`() {
-        val inCall = CompletableDeferred<Unit>()
         var first = true
         val definition = saga("PAYMENT") {
             step<String>("create-payment") {
@@ -101,8 +97,7 @@ class SagaIdempotencyTest {
                     keys += idempotencyKey
                     if (first) {
                         first = false
-                        inCall.complete(Unit)
-                        awaitCancellation()                                     // the pod dies during the call
+                        throw SimulatedCrash()                                  // the pod dies during the call
                     }
                     "P-1"
                 }
@@ -111,11 +106,7 @@ class SagaIdempotencyTest {
         }
         val crashed = engine(definition)
         val id = crashed.create(definition, "R-1")
-        runBlocking {
-            val pod = launch { crashed.run(id, clock.now + 10.seconds) }
-            inCall.await()
-            pod.cancel()
-        }
+        assertFailsWith<SimulatedCrash> { runBlocking { crashed.run(id, clock.now + 10.seconds) } }
 
         val other = engine(definition)                                          // another pod's engine
         other.resumeAfter(SagaConfig().callLock + 1.seconds)
@@ -176,7 +167,6 @@ class SagaIdempotencyTest {
 
     @Test
     fun `a replay that is not sent leaves the step maybe applied, so cancel still waits for an answer`() {
-        val inCall = CompletableDeferred<Unit>()
         var attempt = 0
         val definition = saga("PAYMENT") {
             step<String>("create-payment") {
@@ -185,7 +175,7 @@ class SagaIdempotencyTest {
                     attempt++
                     payments.getOrPut(idempotencyKey) { "P-1" }                 // applied by the first attempt
                     when (attempt) {
-                        1 -> { inCall.complete(Unit); awaitCancellation() }     // then the pod dies
+                        1 -> throw SimulatedCrash()                             // then the pod dies
                         2 -> throw StepNotSent("connection refused")            // the replay never leaves
                         else -> payments.getValue(idempotencyKey)
                     }
@@ -195,11 +185,7 @@ class SagaIdempotencyTest {
         }
         val engine = engine(definition)
         val id = engine.create(definition, "R-1")
-        runBlocking {
-            val pod = launch { engine.run(id, clock.now + 10.seconds) }
-            inCall.await()
-            pod.cancel()
-        }
+        assertFailsWith<SimulatedCrash> { runBlocking { engine.run(id, clock.now + 10.seconds) } }
         engine.resumeAfter(SagaConfig().callLock + 1.seconds)                   // lock expired: replayed, not sent
 
         assertEquals(StepStatus.UNKNOWN, engine.stored(id).stepStatus)          // not READY: it may be applied

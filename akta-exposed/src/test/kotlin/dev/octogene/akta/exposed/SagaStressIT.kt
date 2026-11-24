@@ -20,9 +20,9 @@ import dev.octogene.akta.StuckCursor
 import dev.octogene.akta.StuckReason
 import dev.octogene.akta.Idempotency
 import dev.octogene.akta.StepStatus
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
@@ -167,15 +167,34 @@ class SagaStressIT {
         @Synchronized fun lookup(key: String): Effect? = applied[key]
     }
 
-    /** The coroutine of a pod (or of a request): a crash cancels all of it, as when a process dies. */
+    /** The coroutine of a pod (or of a request): a crash cancels all of it. */
     private class Pod(val job: Job) : AbstractCoroutineContextElement(Pod) {
         companion object Key : CoroutineContext.Key<Pod>
     }
 
+    /** The process dies: a fatal JVM error, which the engine never catches. Caught where the pod ends. */
+    private class SimulatedCrash : VirtualMachineError("simulated crash: the pod died")
+
+    /**
+     * The pod dies during this call. The call dies with it: its step stays IN_PROGRESS until its lock
+     * expires. The pod is cancelled too: its other calls in flight end and are recorded (the engine
+     * finishes a call it started), and it starts nothing new.
+     */
     private suspend fun crash(): Nothing {
         crashes.incrementAndGet()
         currentCoroutineContext()[Pod]!!.job.cancel()
-        awaitCancellation()
+        throw SimulatedCrash()
+    }
+
+    /** Runs [block] as a pod, in its own coroutine. A crash ends the pod, not the test. */
+    private fun CoroutineScope.launchPod(block: suspend () -> Unit) = launch {
+        withContext(Pod(coroutineContext.job)) {
+            try {
+                block()
+            } catch (_: SimulatedCrash) {
+                // The pod is gone; what it left IN_PROGRESS is for the others to recover.
+            }
+        }
     }
 
     private suspend fun pause() = delay(dice.millis(5))
@@ -396,8 +415,7 @@ class SagaStressIT {
     /** Runs [body] in a pod; when the pod crashes, starts a new one, until cancelled. */
     private suspend fun restarting(name: String, body: suspend () -> Unit) = coroutineScope {
         while (isActive) {
-            val pod = launch { withContext(Pod(coroutineContext.job)) { body() } }
-            pod.join()
+            launchPod { body() }.join()
         }
     }
 
@@ -416,15 +434,13 @@ class SagaStressIT {
                         TransactionManager.current().exec("INSERT INTO item (key, status) VALUES ('$key', 'PENDING')")
                         engine.create(definitions.getValue(type), key, ItemRequest("PII-customer-$i", dice.millis(1_000_000)))
                     }
-                    val request = launch {
-                        withContext(Pod(coroutineContext.job)) {
-                            try {
-                                engine.run(id, Clock.System.now() + dice.millis(100).milliseconds)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                if (!e.isInjected()) violations += "request for $key failed: $e"
-                            }
+                    val request = launchPod {
+                        try {
+                            engine.run(id, Clock.System.now() + dice.millis(100).milliseconds)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            if (!e.isInjected()) violations += "request for $key failed: $e"
                         }
                     }
                     request.join()
@@ -438,15 +454,13 @@ class SagaStressIT {
 
     /** Runs [block] as a pod of its own: a crash ends [block] only. Errors other than injected ones are violations. */
     private suspend fun inOwnPod(what: String, block: suspend () -> Unit) = coroutineScope {
-        launch {
-            withContext(Pod(coroutineContext.job)) {
-                try {
-                    block()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    if (!e.isInjected()) violations += "$what failed: $e"
-                }
+        launchPod {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (!e.isInjected()) violations += "$what failed: $e"
             }
         }.join()
     }

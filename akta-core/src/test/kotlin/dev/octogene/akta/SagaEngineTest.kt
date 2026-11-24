@@ -6,12 +6,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.yield
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import kotlin.test.assertEquals
@@ -259,14 +258,14 @@ class SagaEngineTest {
         var executions = 0
         val stock = object : RefStep("stock") {
             override suspend fun execute(ctx: SagaContext<Unit>): String? {
-                if (++executions == 1) awaitCancellation()                // the pod stops mid-call
+                if (++executions == 1) throw SimulatedCrash()             // the pod dies mid-call
                 return "STK-2"
             }
             override suspend fun check(ctx: SagaContext<Unit>) = CheckResult.NotDone
         }
         val engine = engine(stock)
         val id = runBlocking { InMemorySagaTransactions(repository).inTransaction { engine.create("TEST", "item-1") } }
-        crash({ executions == 1 }) { engine.run(id, clock.now + 10.seconds) }
+        assertFailsWith<SimulatedCrash> { runBlocking { engine.run(id, clock.now + 10.seconds) } }
         assertEquals(StepStatus.IN_PROGRESS, repository.find(id)!!.stepStatus)
 
         engine.resumeAfter(36.seconds)                        // lock (35 s) expired
@@ -274,6 +273,52 @@ class SagaEngineTest {
         engine.resumeAfter(2.minutes)                         // check, then execute again
         assertEquals(SagaState.COMPLETED, repository.find(id)!!.state)
         assertEquals(2, executions)
+    }
+
+    @Test
+    fun `a caller cancelled during a call lets it finish, records its outcome, then stops`() {
+        val started = CompletableDeferred<Unit>()
+        val reply = CompletableDeferred<String>()
+        val stock = object : RefStep("stock") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String? { started.complete(Unit); return reply.await() }
+        }
+        val booking = FakeStep("booking", { "RES-1" })
+        val engine = engine(stock, booking)
+        val id = engine.create("TEST", "item-1")
+
+        runBlocking {
+            val request = launch { engine.run(id, clock.now + 10.seconds) }
+            started.await()
+            request.cancel()                                              // the HTTP client disconnects mid-call
+            reply.complete("STK-1")                                       // the call still ends, normally
+            request.join()
+            assertTrue(request.isCancelled)                               // run() passed the cancellation on
+        }
+
+        val saga = repository.find(id)!!
+        assertEquals(1, saga.stepIndex)                                   // the outcome is recorded
+        assertEquals(StepStatus.READY, saga.stepStatus)                   // the next step is not claimed
+        assertEquals(mapOf("stock" to "STK-1"), results(id))
+        assertEquals(0, booking.executions)
+        engine.resumeAfter(1.seconds)                                     // the recovery job goes on at once
+        assertEquals(SagaState.COMPLETED, repository.find(id)!!.state)
+    }
+
+    @Test
+    fun `a caller cancelled before the claim claims nothing`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        val engine = engine(stock)
+        val id = engine.create("TEST", "item-1")
+
+        runBlocking {
+            launch {
+                coroutineContext.cancel()
+                engine.run(id, clock.now + 10.seconds)
+            }.join()
+        }
+
+        assertEquals(0, stock.executions)
+        assertEquals(StepStatus.READY, repository.find(id)!!.stepStatus)
     }
 
     @Test
@@ -664,15 +709,15 @@ class SagaEngineTest {
             override suspend fun execute(ctx: SagaContext<Unit>) = "STK-1"
             override suspend fun compensate(ctx: SagaContext<Unit>, own: String?) {
                 compensations++
-                awaitCancellation()                                       // the pod stops mid-call
+                throw SimulatedCrash()                                    // the pod dies mid-call
             }
         }
         val booking = FakeStep("booking", { throw StepRejected("refused") })
         val engine = engine(stock, booking, config = SagaConfig(maxAttempts = 2))
         val id = runBlocking { InMemorySagaTransactions(repository).inTransaction { engine.create("TEST", "item-1") } }
-        crash({ stock.compensations == 1 }) { engine.run(id, clock.now + 10.seconds) }
+        assertFailsWith<SimulatedCrash> { runBlocking { engine.run(id, clock.now + 10.seconds) } }
         clock.advance(36.seconds)
-        crash({ stock.compensations == 2 }) { engine.resumeDue() }        // lock expired, 2nd compensation
+        assertFailsWith<SimulatedCrash> { runBlocking { engine.resumeDue() } }   // lock expired, 2nd compensation
         engine.resumeAfter(36.seconds)                        // lock expired again
 
         val stuck = repository.find(id)!!
@@ -864,18 +909,6 @@ class SagaEngineTest {
         assertEquals(0, runBlocking { engine.purgeFinished(olderThan = 30.days) })
     }
 
-    /**
-     * Runs [block] until [inCall] says the external call has started, then cancels it: a pod stopping
-     * mid-call. Waiting matters: resumeDue runs sagas in child coroutines, which start later.
-     */
-    private fun crash(inCall: () -> Boolean, block: suspend () -> Unit) = runBlocking {
-        withTimeout(5.seconds) {
-            val call = launch { block() }
-            do yield() while (!inCall())
-            call.cancelAndJoin()
-        }
-    }
-
     @Test
     fun `only one unfinished saga per key`() {
         val engine = engine(FakeStep("stock", { throw StepNotSent("down") }))
@@ -891,3 +924,9 @@ class SagaEngineTest {
         assertNull(repository.findDue(clock.now, 10, listOf("TEST")).firstOrNull())
     }
 }
+
+/**
+ * The process dies during a call (killed, out of memory): a fatal JVM error, which the engine never catches.
+ * Cancelling the caller does not stand for it: the engine finishes a call it started, and records it.
+ */
+internal class SimulatedCrash : VirtualMachineError("simulated crash: the pod died")

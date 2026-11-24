@@ -23,3 +23,4 @@ The engine's delays and limits are in [Configuration](configuration.md).
 - [ ] Gauges and alerts are in place for stuck sagas and the recovery lag.
 - [ ] An admin screen lists stuck sagas, with access to saga data decided.
 - [ ] The pods' clocks are synchronized (NTP).
+- [ ] The pods' shutdown grace period is above `callLock`: a stopping pod lets its calls in flight end and records them, and one killed before that leaves them to be checked.

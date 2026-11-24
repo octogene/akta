@@ -4,9 +4,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.reflect.KType
@@ -108,22 +111,34 @@ class SagaEngine(
      */
     suspend fun run(id: Uuid, deadline: Instant, skipLocked: Boolean = false): SagaRecord {
         val trace = traceId()      // here, on the caller's coroutine: transactions may switch threads
+        // A step, once claimed, is called and its outcome recorded even if the caller is cancelled (an HTTP
+        // client that disconnects, a shutdown): abandoned, it would stay IN_PROGRESS until its lock expires,
+        // then count as an unknown outcome, to check or stuck. The caller's cancellation only stops the next
+        // claim; run() then throws it. The wait it adds is bounded by callLock. The claim itself is shielded
+        // too: a transaction that commits while its caller is cancelled must still lead to the call.
+        val caller = currentCoroutineContext()
+        caller.ensureActive()
         var cycle = if (currentTime() < deadline) {
-            tx { claim(id, skipLocked, trace) }
+            withContext(NonCancellable) { tx { claim(id, skipLocked, trace) } }
         } else {
             Cycle(saga = null, next = null)
         }
         while (true) {
             val work = cycle.next ?: break
-            val outcome = perform(work)
-            cycle = try {
-                // Records this outcome and, in the same transaction, claims the next step if it is due.
-                tx { record(work, outcome, claimUntil = deadline) }
-            } catch (e: Throwable) {
-                if (e is CancellationException || e.isFatal()) throw e
-                recordAfterFailure(work, outcome, e)
+            cycle = withContext(NonCancellable) {
+                val outcome = perform(work)
+                // Records this outcome and, in the same transaction, claims the next step if it is due,
+                // unless the caller was cancelled meanwhile.
+                val claimUntil = deadline.takeIf { caller.isActive }
+                try {
+                    tx { record(work, outcome, claimUntil) }
+                } catch (e: Throwable) {
+                    if (e.isFatal()) throw e
+                    recordAfterFailure(work, outcome, e)
+                }
             }
         }
+        caller.ensureActive()
         // Read again only when no transaction gave us the saga (deadline already passed, row locked elsewhere).
         return cycle.saga ?: tx { repository.find(id) } ?: error("Saga $id not found")
     }
@@ -758,9 +773,11 @@ class SagaEngine(
         return try {
             withTimeout(budget) { call(work) }
         } catch (e: CancellationException) {
-            // Our coroutine was cancelled: rethrow. The step stays IN_PROGRESS; its lock will expire.
+            // run() calls this shielded from its caller's cancellation, so this is a timeout (ours, or the
+            // step's own): a failed call. Should anything else cancel it, rethrow: the step stays IN_PROGRESS
+            // and its lock will expire.
             currentCoroutineContext().ensureActive()
-            failure(work.action, e)           // a timeout (ours, or the step's own): a failed call
+            failure(work.action, e)
         } catch (e: Throwable) {
             if (e.isFatal()) throw e
             failure(work.action, e)           // an Error too, e.g. a TODO() left in a step

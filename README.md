@@ -339,7 +339,7 @@ suspend fun registerItem(epc: String, storeId: String): HttpStatusCode {
 }
 ```
 
-`run` returns when the saga ends, blocks (waiting for a retry, a check or a human) or the deadline passes. The user gets an answer in seconds either way.
+`run` returns when the saga ends, blocks (waiting for a retry, a check or a human) or the deadline passes. The user gets an answer in seconds either way. If the request is cancelled (the client disconnects), `run` still lets the call in flight end and records it, at most `callLock` later, then passes the cancellation on: the recovery job takes the saga on from there.
 
 `create` throws `DuplicateSagaException` if an unfinished saga already exists for the key. For example, an item cannot be removed from stock while it is still being set up. Your transaction stays usable after it (the insert uses `ON CONFLICT DO NOTHING` rather than failing), so you can catch it and answer 409.
 
