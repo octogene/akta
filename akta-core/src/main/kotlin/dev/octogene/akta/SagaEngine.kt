@@ -163,7 +163,9 @@ public class SagaEngine(
             Cycle(tx { record(work, outcome, claimUntil = null) }.saga, next = null)
         } catch (e: Throwable) {
             if (e is CancellationException || e.isFatal()) throw e
-            Cycle(tx { recordFailed(work, outcome, error) }, next = null)
+            // e, not error: what stopped the outcome alone from being recorded. The first failure may have been
+            // a passing one (a database error before onSignal or a hook ever ran).
+            Cycle(tx { recordFailed(work, outcome, e) }, next = null)
         }
 
     /**
@@ -1148,8 +1150,22 @@ public class SagaEngine(
             log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, outcome), now)
             return current
         }
+        // A signal step's timeout check, whose value or signal is what failed to be recorded (onSignal or a hook
+        // threw on it): the value found is stored as the step's signal (a real one stored first wins), so that
+        // retry uses it at once instead of waiting a whole timeout again; a signal received during the check is
+        // stored already. No refusal is kept then: the step got its value. An explicit StepRejected from the
+        // check still refuses, as in record().
+        @Suppress("UNCHECKED_CAST")
+        val signalStep = (work.step as? AnySignalStep)?.takeIf { work.action == Action.CHECK }
+        val valueOrSignal = outcome is Outcome.Found || outcome == Outcome.CannotTell ||
+            (outcome is Outcome.Rejected && outcome.noSignalFound)
+        if (signalStep != null && outcome is Outcome.Found) {
+            repository.saveSignal(current.id, signalStep.signal, checkNotNull(outcome.done.output), now)
+        }
+        val signalKept = signalStep != null && valueOrSignal && repository.signal(current.id, signalStep.signal) != null
         val then = when {
-            // onSignal threw on a value found by the check, or a signal received during it: nothing to save.
+            signalKept -> "The signal is kept" + (if (outcome is Outcome.Found) " (the value the check found)" else "") +
+                ": fix the cause, then retry, which uses it"
             error is SignalFailed -> "onSignal failed: fix the cause, then retry (a signal received is used; " +
                 "otherwise the step waits again, then checks), or markDone with the value found"
             else -> when (outcome) {
@@ -1165,7 +1181,7 @@ public class SagaEngine(
             else -> "Look in the external system for what the call did, then markDone, retry or abort"
             }
         }
-        val refusal = (outcome as? Outcome.Rejected)?.error
+        val refusal = (outcome as? Outcome.Rejected)?.error?.takeUnless { signalKept }
         val blocked = stuck(current, StuckReason.RECORD_FAILED, "Could not record ${describe(work, outcome)}: $error. $then", now)
             .copy(lockedUntil = null, failureReason = refusal ?: current.failureReason)
         save(blocked, now)

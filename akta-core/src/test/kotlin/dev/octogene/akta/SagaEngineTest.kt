@@ -674,6 +674,34 @@ class SagaEngineTest {
     }
 
     @Test
+    fun `the cause recorded is what stopped the outcome alone, not a passing first failure`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        var transactions = 0
+        val inMemory = InMemorySagaTransactions(repository)
+        val flaky = object : SagaTransactions {
+            override suspend fun <T> inTransaction(block: () -> T): T {
+                val n = ++transactions
+                return inMemory.inTransaction {
+                    block().also { if (n == 2) throw java.sql.SQLException("connection lost: rolled back") }
+                }
+            }
+        }
+        var hookCalls = 0
+        val engine = newEngine(flaky, repository, listOf(definition("TEST", listOf(stock), onCompleted = {
+            if (++hookCalls == 2) error("items table locked")                // fails when recorded again
+        })))
+        val id = engine.create("TEST", "item-1")
+
+        // 1: claim; 2: record, onCompleted passes, then the database rolls it back;
+        // 3: the outcome again, alone: onCompleted throws; 4: STUCK, with that cause, not the database's.
+        val saga = runBlocking { engine.run(id, clock.now + 10.seconds) }
+
+        assertEquals(StuckReason.RECORD_FAILED, saga.stuckReason)
+        assertTrue(saga.lastError!!.contains("items table locked"), saga.lastError)
+        assertTrue("connection lost" !in saga.lastError!!, saga.lastError)
+    }
+
+    @Test
     fun `a throwing onCompleted makes the saga stuck, keeping the output, instead of looping`() {
         var hookFails = true
         val stock = FakeStep("stock", { "STK-1" })

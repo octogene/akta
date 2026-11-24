@@ -601,8 +601,41 @@ class SagaSignalTest {
 
         val stuck = runBlocking { engine.find(id)!! }
         assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)               // not CHECK_FAILING
-        assertTrue(stuck.lastError!!.contains("onSignal failed"), stuck.lastError)
+        assertTrue(stuck.lastError!!.contains("onSignal threw on signal 'payment'"), stuck.lastError)
+        assertTrue(stuck.lastError!!.contains("The signal is kept (the value the check found)"), stuck.lastError)
         assertEquals(1, checks)                                                 // the lookup is not repeated
+
+        onSignalBug = false                                                     // fixed
+        val done = runBlocking { engine.retry(id, "operator") }                 // uses the value found, at once
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals("confirm P-1", calls.last())
+        assertEquals(1, checks)                                                 // no second timeout, no second check
+    }
+
+    @Test
+    fun `a bug in onSignal on a signal received during a check keeps no refusal`() {
+        lateinit var engine: SagaEngine
+        lateinit var id: Uuid
+        val definition = watchedReservation(checkAtTimeout = {
+            engine.pay(id, paymentId = "P-2")                                   // arrives mid-check: stored
+            CheckResult.NotDone
+        })
+        engine = watchedEngine(definition)
+        id = engine.create(definition, "R-1")
+        engine.run(id)
+        onSignalBug = true
+
+        engine.resumeAfter(31.minutes)
+
+        val stuck = runBlocking { engine.find(id)!! }
+        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
+        assertNull(stuck.failureReason)                                         // not "No signal before the timeout"
+        assertTrue(stuck.lastError!!.contains("The signal is kept"), stuck.lastError)
+
+        onSignalBug = false
+        val done = runBlocking { engine.retry(id, "operator") }
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals("confirm P-2", calls.last())
     }
 
     // ---- Cancellation -------------------------------------------------------------------------
