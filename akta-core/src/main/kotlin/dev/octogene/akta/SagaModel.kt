@@ -59,6 +59,13 @@ public enum class StuckReason {
      * (COMPENSATING), the same with its compensation key: undone → `markCompensated`; not → `retry(newKey = true)`.
      */
     KEY_EXPIRED,
+    /**
+     * The saga itself could not be run, [SagaConfig.maxAttempts] times in a row (data that cannot be read, a
+     * step removed from its definition, a hook that throws on a stored signal…): each try is a `RESUME_FAILED`
+     * in its log. The step is not at fault and is left as it was. Fix the cause, then `retry`: a step that may
+     * have been called is checked first. Or `markDone`, or `abort`.
+     */
+    RESUME_FAILING,
 }
 
 /**
@@ -126,6 +133,11 @@ public data class SagaRecord(
     val keySince: Instant? = null,
     /** Bumped by `retry(newKey = true)`: part of the current step's key. Reset when the saga moves to another step. */
     val keyGeneration: Int = 0,
+    /**
+     * Consecutive failures to run the saga at all (`RESUME_FAILED`), whatever its step. Reset when it runs
+     * again. Limited by [SagaConfig.maxAttempts]: past it the saga is STUCK ([StuckReason.RESUME_FAILING]).
+     */
+    val resumeFailures: Int = 0,
 )
 
 /** Where [SagaEngine.findStuck] continues: after this saga. */
@@ -175,7 +187,8 @@ public object SagaEvents {
     public const val RECORD_FAILED: String = "RECORD_FAILED"
     /**
      * resumeDue, or the run after a manual action, could not run the saga (database error, bug…): postponed by
-     * [SagaConfig.resumeFailureDelay]. The manual action itself is committed.
+     * [SagaConfig.resumeFailureDelay], or STUCK ([StuckReason.RESUME_FAILING]) after [SagaConfig.maxAttempts]
+     * in a row. The manual action itself is committed.
      */
     public const val RESUME_FAILED: String = "RESUME_FAILED"
     public const val MANUAL_RETRY: String = "MANUAL_RETRY"
@@ -227,7 +240,10 @@ public data class SagaConfig(
     val settleDelay: Duration = 2.minutes,
     /** Wait before a new check when the check itself failed. */
     val checkRetryDelay: Duration = 1.minutes,
-    /** Calls of one step (executions or compensations), and consecutive failed checks, before it becomes STUCK. */
+    /**
+     * Calls of one step (executions or compensations), consecutive failed checks, and consecutive failures to
+     * run the saga at all (`RESUME_FAILED`), before it becomes STUCK.
+     */
     val maxAttempts: Int = 10,
     val maxBackoff: Duration = 1.hours,
     /** Wait before resumeDue tries again a saga whose run threw, so that it does not block the others. */

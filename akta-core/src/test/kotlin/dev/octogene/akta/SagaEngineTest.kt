@@ -566,6 +566,91 @@ class SagaEngineTest {
         assertEquals(setOf(poison), runBlocking { engine.resumeDue(limit = 1) }.failures.keys)
     }
 
+    /** A repository whose results cannot be read while [broken]: every claim of a due saga throws. */
+    private var broken = false
+    private val unreadable = object : SagaRepository by repository {
+        override fun results(sagaId: Uuid): Map<String, String?> =
+            if (broken) throw IllegalStateException("corrupted row") else repository.results(sagaId)
+    }
+
+    private fun SagaEngine.resumeLater(d: Duration): SagaEngine.ResumeResult {
+        clock.advance(d)
+        return runBlocking { resumeDue() }
+    }
+
+    @Test
+    fun `a saga that cannot be run, maxAttempts times in a row, becomes stuck instead of being postponed for ever`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        val engine = newEngine(
+            InMemorySagaTransactions(repository), unreadable, listOf(definition("TEST", listOf(stock))),
+            config = SagaConfig(maxAttempts = 3),
+        )
+        val id = engine.create("TEST", "item-1")
+        broken = true
+
+        repeat(2) { assertEquals(setOf(id), engine.resumeLater(1.minutes).failures.keys) }
+        assertEquals(StepStatus.READY, repository.find(id)!!.stepStatus)        // postponed twice
+        assertEquals(2, repository.find(id)!!.resumeFailures)
+        assertEquals(setOf(id), engine.resumeLater(1.minutes).failures.keys)    // the third in a row
+
+        val stuck = repository.find(id)!!
+        assertEquals(StuckReason.RESUME_FAILING, stuck.stuckReason)
+        assertTrue(stuck.lastError!!.contains("corrupted row"), stuck.lastError)
+        assertEquals(listOf(stuck), runBlocking { engine.findStuck() })         // an operator sees it
+        assertEquals(3, repository.log.count { it.event == SagaEvents.RESUME_FAILED })
+        assertEquals(0, engine.resumeLater(10.minutes).sagas)                   // left alone: the log stops growing
+
+        broken = false                                                          // fixed
+        val done = runBlocking { engine.retry(id, "operator") }
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals(0, done.resumeFailures)
+        assertEquals(1, stock.executions)
+    }
+
+    @Test
+    fun `resume failures only count in a row, a saga that runs again starts afresh`() {
+        val later = FakeStep("later", { throw StepNotSent("connection refused") })
+        val engine = newEngine(
+            InMemorySagaTransactions(repository), unreadable,
+            listOf(definition("TEST", listOf(FakeStep("stock", { "STK-1" }), later))),
+            config = SagaConfig(maxAttempts = 3),
+        )
+        val id = engine.create("TEST", "item-1")
+        broken = true
+        repeat(2) { engine.resumeLater(1.minutes) }
+        assertEquals(2, repository.find(id)!!.resumeFailures)
+
+        broken = false                                                          // a passing fault
+        assertEquals(emptyMap(), engine.resumeLater(1.minutes).failures)
+        assertEquals(0, repository.find(id)!!.resumeFailures)
+        assertEquals(1, repository.find(id)!!.stepIndex)                        // it ran: on the second step, to retry
+
+        broken = true
+        repeat(2) { engine.resumeLater(2.minutes) }
+        assertEquals(StepStatus.READY, repository.find(id)!!.stepStatus)        // two more, not four: not stuck
+    }
+
+    @Test
+    fun `retry after resume failures checks a step that may have been called, instead of executing it again`() {
+        val stock = FakeStep("stock", { throw IllegalStateException("read timeout") }, checkResult = { CheckResult.Done("STK-1") })
+        val engine = newEngine(
+            InMemorySagaTransactions(repository), unreadable, listOf(definition("TEST", listOf(stock))),
+            config = SagaConfig(maxAttempts = 3),
+        )
+        val id = engine.create("TEST", "item-1")
+        runBlocking { engine.run(id, clock.now + 10.seconds) }                  // unknown outcome: to check
+        broken = true
+        repeat(3) { engine.resumeLater(3.minutes) }                             // the check cannot even be claimed
+        assertEquals(StuckReason.RESUME_FAILING, repository.find(id)!!.stuckReason)
+
+        broken = false
+        val done = runBlocking { engine.retry(id, "operator") }
+
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals(1, stock.executions)                                       // not called a second time
+        assertEquals(1, stock.checks)
+    }
+
     @Test
     fun `a throwing onCompleted makes the saga stuck, keeping the output, instead of looping`() {
         var hookFails = true

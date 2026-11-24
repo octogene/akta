@@ -17,7 +17,7 @@ SagaEngine(..., config = SagaConfig(
 | `callLock` | 35 s | How long a call may run before it counts as interrupted. The engine cuts calls just before it | Above your HTTP clients' timeouts, plus a margin |
 | `settleDelay` | 2 min | The wait before checking an unknown outcome | Above the longest time an external system may spend on a request |
 | `checkRetryDelay` | 1 min | The shortest wait before checking again, after a check that failed | |
-| `maxAttempts` | 10 | Calls of a step (executions, replays or compensations), and failed checks in a row, before it is stuck | |
+| `maxAttempts` | 10 | Calls of a step (executions, replays or compensations), failed checks in a row, and failures to run the saga at all in a row (`RESUME_FAILED`), before it is stuck | |
 | `maxBackoff` | 1 h | The longest wait between attempts. Backoff is 1, 2, 4… minutes, up to this | |
 | `resumeFailureDelay` | 1 min | How long a saga whose run threw in `resumeDue` waits before the next try | |
 | `maxDataBytes` | 16 KB | The largest encoded input, output or signal value | Parameters and identifiers only |

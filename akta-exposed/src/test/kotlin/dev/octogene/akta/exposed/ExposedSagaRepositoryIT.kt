@@ -221,6 +221,33 @@ class ExposedSagaRepositoryIT {
     }
 
     @Test
+    fun `a saga whose data cannot be read becomes stuck after maxAttempts resume failures, and is resumed by retry`() {
+        val definition = saga<Request>("BOOKING") { step<String>("booking") { execute { input.customerId } } }
+        val engine = SagaEngine(
+            ExposedSagaTransactions(database), repository, listOf(definition), serializer,
+            SagaConfig(maxAttempts = 2, resumeFailureDelay = kotlin.time.Duration.ZERO),
+        )
+        val id = runBlocking {
+            ExposedSagaTransactions(database).inTransaction { engine.create(definition, "item-11", Request("C-1", "2026-12-01")) }
+        }
+        transaction(database) { exec("UPDATE saga SET input = 'not json' WHERE id = '$id'") }
+
+        assertEquals(setOf(id), runBlocking { engine.resumeDue() }.failures.keys)
+        assertEquals(1, runBlocking { engine.find(id) }!!.resumeFailures)       // postponed, counted
+        assertEquals(setOf(id), runBlocking { engine.resumeDue() }.failures.keys)
+
+        val stuck = runBlocking { engine.findStuck() }.single()
+        assertEquals(StuckReason.RESUME_FAILING, stuck.stuckReason)
+        assertEquals(2, stuck.resumeFailures)
+        assertEquals(0, runBlocking { engine.resumeDue() }.sagas)               // no longer picked up
+
+        transaction(database) { exec("""UPDATE saga SET input = '{"customerId":"C-1","start":"2026-12-01"}' WHERE id = '$id'""") }
+        val done = runBlocking { engine.retry(id, "operator") }
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals(0, done.resumeFailures)
+    }
+
+    @Test
     fun `a typed input and typed outputs round-trip through PostgreSQL`() {
         var confirmed: Pair<Request, Hold>? = null
         val definition = saga<Request>("BOOKING") {

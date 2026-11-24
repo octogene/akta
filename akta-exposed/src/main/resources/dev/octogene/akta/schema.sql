@@ -20,10 +20,11 @@ CREATE TABLE saga (
     failure_reason  text,                                 -- why it compensates: set when compensation starts, never changed
     stuck_reason    text        CHECK (stuck_reason IN ('CANNOT_TELL', 'CHECK_FAILING', 'TOO_MANY_ATTEMPTS',
                                                         'OUTPUT_UNSTORABLE', 'RECORD_FAILED', 'NO_SIGNAL',
-                                                        'KEY_EXPIRED')),
+                                                        'KEY_EXPIRED', 'RESUME_FAILING')),
     stuck_at        timestamptz,                          -- when it became STUCK
     key_since       timestamptz,                          -- first use of the current step's idempotency key
     key_generation  int         NOT NULL DEFAULT 0 CHECK (key_generation >= 0), -- bumped by retry(newKey = true); reset at each step
+    resume_failures int         NOT NULL DEFAULT 0 CHECK (resume_failures >= 0), -- RESUME_FAILED in a row; reset when the saga runs
     created_at      timestamptz NOT NULL,
     updated_at      timestamptz NOT NULL,
     CONSTRAINT saga_lock CHECK ((step_status = 'IN_PROGRESS') = (locked_until IS NOT NULL)),

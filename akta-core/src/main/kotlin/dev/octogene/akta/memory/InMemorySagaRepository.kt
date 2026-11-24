@@ -63,8 +63,8 @@ public class InMemorySagaRepository : SagaRepository {
 
     /** The CHECK constraints of schema.sql: a test fails where PostgreSQL would refuse the row. */
     private fun SagaRecord.checkConstraints() {
-        check(stepIndex >= 0 && attempts >= 0 && checkFailures >= 0 && keyGeneration >= 0) {
-            "Saga $id: negative step_index, attempts, check_failures or key_generation"
+        check(stepIndex >= 0 && attempts >= 0 && checkFailures >= 0 && keyGeneration >= 0 && resumeFailures >= 0) {
+            "Saga $id: negative step_index, attempts, check_failures, key_generation or resume_failures"
         }
         check((stepStatus == StepStatus.IN_PROGRESS) == (lockedUntil != null)) { "Saga $id violates saga_lock: $stepStatus, lockedUntil $lockedUntil" }
         check((cancelRequestedAt == null) == (cancelReason == null)) { "Saga $id violates saga_cancel" }

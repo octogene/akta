@@ -12,7 +12,7 @@ Call it every 30 seconds or so. Each call:
 
 1. **Finds due sagas:** unfinished, not stuck, `next_attempt_at` passed, of a type this engine knows. A partial index (`saga_due`) keeps this one quick read, whatever the number of finished sagas.
 2. **Runs them**, up to `concurrency` at the same time, each within `budgetPerSaga`. A slow external system holds up only its own sagas.
-3. **Reports failures** without stopping: a saga whose run throws (a database error, a bug, data it cannot read) is returned in `result.failures`, and postponed by `resumeFailureDelay` (logged as `RESUME_FAILED`), so that sagas failing every time cannot fill each batch.
+3. **Reports failures** without stopping: a saga whose run throws (a database error, a bug, data it cannot read) is returned in `result.failures`, and postponed by `resumeFailureDelay` (logged as `RESUME_FAILED`), so that sagas failing every time cannot fill each batch. After `maxAttempts` such failures in a row, the saga becomes `STUCK` (`RESUME_FAILING`), for an operator to see; a saga that runs again starts the count afresh.
 
 "Due" covers every reason a saga needs attention: a retry after backoff, an outcome to check, a lock that expired (the pod died), a signal's timeout.
 
