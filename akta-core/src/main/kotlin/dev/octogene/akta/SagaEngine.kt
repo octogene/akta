@@ -932,7 +932,9 @@ class SagaEngine(
                 is StepNotSent -> Outcome.NotSent(error)
                 else -> Outcome.Unknown(error)
             }
-            Action.CHECK -> Outcome.CheckFailed(error)
+            // A check that finds the call was refused (a record of the attempt, REJECTED): the same answer as
+            // execute's StepRejected, so the saga compensates. Anything else: the lookup failed, check again.
+            Action.CHECK -> if (e is StepRejected) Outcome.Rejected(error) else Outcome.CheckFailed(error)
             Action.COMPENSATE -> Outcome.CompensationFailed(error)
         }
     }

@@ -14,12 +14,13 @@ flowchart LR
     C -->|Done: found| D[Store the output found, next step]
     C -->|NotDone| R[Execute again]
     C -->|CannotTell| S[STUCK: CANNOT_TELL]
+    C -->|throws StepRejected| X[Refused: compensate]
     C -->|the lookup throws| F[Check again later, with backoff]
     F -->|maxAttempts failed checks| S2[STUCK: CHECK_FAILING]
     R -->|maxAttempts executions| S3[STUCK: TOO_MANY_ATTEMPTS]
 ```
 
-A step's `check` answers "was I applied?" with a **read** in the external system: `Done(output)` (found: it becomes the step's output, as if the call had returned it), `NotDone`, or `CannotTell`. `checkByLookup` builds one from a search: no match means not done, one means done, several means the engine cannot tell which is ours.
+A step's `check` answers "was I applied?" with a **read** in the external system: `Done(output)` (found: it becomes the step's output, as if the call had returned it), `NotDone`, or `CannotTell`. When the external system keeps a record of refused attempts and finds ours refused, the check throws `StepRejected`, as `execute` would have: the saga compensates, without calling the step again. Any other exception means the lookup itself failed: it is tried again. `checkByLookup` builds one from a search: no match means not done, one means done, several means the engine cannot tell which is ours.
 
 ### Why wait first
 

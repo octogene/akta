@@ -322,6 +322,29 @@ class SagaEngineTest {
     }
 
     @Test
+    fun `a check that finds the call refused compensates, without calling the step again`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        var checks = 0
+        val booking = FakeStep(
+            "booking", { throw java.io.IOException("read timeout") },               // the outcome is unknown
+            checkResult = { checks++; throw StepRejected("reservation R-9 found, status REJECTED") },
+        )
+        val engine = engine(stock, booking)
+        val saga = engine.start()
+        assertEquals(StepStatus.UNKNOWN, saga.stepStatus)
+
+        engine.resumeAfter(2.minutes)                                         // settleDelay: the check runs
+
+        val failed = engine.state(saga)
+        assertEquals(SagaState.FAILED, failed.state)
+        assertEquals("dev.octogene.akta.StepRejected: reservation R-9 found, status REJECTED", failed.failureReason)
+        assertEquals(1, checks)                                               // not taken for a failing lookup
+        assertEquals(1, booking.executions)                                   // not called again
+        assertEquals(1, stock.compensations)
+        assertTrue(repository.log.any { it.event == "CHECK:Rejected" })
+    }
+
+    @Test
     fun `a timeout inside a step is an unknown outcome, not a cancellation of the engine`() {
         val stock = object : RefStep("stock") {
             override suspend fun execute(ctx: SagaContext<Unit>): String? = withTimeout(1) { awaitCancellation() }

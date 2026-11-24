@@ -141,7 +141,10 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
         compensateBlock = block
     }
 
-    /** After an unknown outcome: was the step applied? [CheckResult.Done] carries the output found. */
+    /**
+     * After an unknown outcome: was the step applied? [CheckResult.Done] carries the output found. Throw
+     * [StepRejected] when the external system shows the call was refused: the saga compensates.
+     */
     fun check(block: suspend SagaContext<I>.() -> CheckResult<O>) {
         checkBlock = block
     }

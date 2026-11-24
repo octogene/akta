@@ -146,7 +146,10 @@ interface SagaStep<I, O> {
 
     /**
      * Called after an unknown outcome, once the settle delay has passed: was the step applied?
-     * Default: cannot tell, the saga waits for a human.
+     * Throw [StepRejected] when the external system shows the call was refused (a record of the attempt,
+     * rejected): the saga compensates, as after a refusal from [execute]. Any other exception means the
+     * lookup failed: it is tried again, then the saga stops (CHECK_FAILING). Default: cannot tell, the saga
+     * waits for a human.
      */
     suspend fun check(ctx: SagaContext<I>): CheckResult<O> = CheckResult.CannotTell
 
