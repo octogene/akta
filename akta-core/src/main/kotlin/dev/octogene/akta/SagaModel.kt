@@ -61,8 +61,16 @@ enum class StuckReason {
     KEY_EXPIRED,
 }
 
-/** The persisted state of a saga: one row. */
-data class SagaRecord(
+/**
+ * The persisted state of a saga: one row. The engine reads it (an admin screen too), and a [SagaRepository]
+ * builds it from its rows and saves it.
+ *
+ * Stability: fields are added as the engine grows (failureReason was), each with a default. Build it with
+ * named arguments and read it by name: its constructor, `copy` and `componentN` change with every field
+ * added, which recompiling absorbs but already compiled code does not. Until 1.0, a new field may come in
+ * any version.
+ */
+public data class SagaRecord(
     val id: Uuid,
     val type: String,
     /** Business key, e.g. the id of the item. Only one unfinished saga per key. */
