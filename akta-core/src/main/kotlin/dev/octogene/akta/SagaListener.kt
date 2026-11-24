@@ -12,15 +12,15 @@ package dev.octogene.akta
  * - [SagaEngine.create] runs in the caller's transaction, whose commit the engine cannot see: creations
  *   are not reported. Count them in the application.
  */
-fun interface SagaListener {
-    fun onEvent(event: SagaEvent)
+public fun interface SagaListener {
+    public fun onEvent(event: SagaEvent)
 }
 
 /**
  * One entry of `saga_log`, with the saga as it stood when the entry was written. It carries what the log
  * carries (ids, event names, the refs from `logAs`, error messages), never an input, output or signal value.
  */
-data class SagaEvent(
+public data class SagaEvent(
     val entry: SagaLogEntry,
     val sagaType: String,
     val state: SagaState,

@@ -28,22 +28,22 @@ import kotlin.time.Duration
  */
 
 @DslMarker
-annotation class SagaDslMarker
+public annotation class SagaDslMarker
 
 /** Builds a saga without input. */
 @JvmName("sagaWithoutInput")      // same JVM signature as the typed saga<I> below, once erased
-fun saga(type: String, block: SagaBuilder<Unit>.() -> Unit): SagaDefinition<Unit> =
+public fun saga(type: String, block: SagaBuilder<Unit>.() -> Unit): SagaDefinition<Unit> =
     SagaBuilder<Unit>(type, inputType = null).apply(block).build()
 
 /**
  * Builds a saga whose input is an [I]: given to `create`, read by every step as `input`.
  * `saga<Unit>` is the same as `saga` without a type argument: no input is stored.
  */
-inline fun <reified I> saga(type: String, noinline block: SagaBuilder<I>.() -> Unit): SagaDefinition<I> =
+public inline fun <reified I> saga(type: String, noinline block: SagaBuilder<I>.() -> Unit): SagaDefinition<I> =
     SagaBuilder<I>(type, typeOf<I>().unlessUnit()).apply(block).build()
 
 @SagaDslMarker
-class SagaBuilder<I> @PublishedApi internal constructor(
+public class SagaBuilder<I> @PublishedApi internal constructor(
     private val type: String,
     private val inputType: KType?,
 ) {
@@ -53,13 +53,13 @@ class SagaBuilder<I> @PublishedApi internal constructor(
 
     /** Declares the next step, without output. Steps run in declaration order. */
     @JvmName("stepWithoutOutput")  // same JVM signature as the typed step<O> below, once erased
-    fun step(name: String, block: StepBuilder<I, Unit>.() -> Unit): StepRef<Unit> = addStep(name, null, block)
+    public fun step(name: String, block: StepBuilder<I, Unit>.() -> Unit): StepRef<Unit> = addStep(name, null, block)
 
     /**
      * Declares the next step, whose call returns an [O]. Steps run in declaration order.
      * `step<Unit>` is the same as `step` without a type argument: no output is stored.
      */
-    inline fun <reified O> step(name: String, noinline block: StepBuilder<I, O>.() -> Unit): StepRef<O> =
+    public inline fun <reified O> step(name: String, noinline block: StepBuilder<I, O>.() -> Unit): StepRef<O> =
         addStep(name, typeOf<O>().unlessUnit(), block)
 
     @PublishedApi
@@ -73,7 +73,7 @@ class SagaBuilder<I> @PublishedApi internal constructor(
      * call, and the value becomes its output. After [timeout], its check decides (`check` or
      * `checkByLookup` in [block]); without one, the saga becomes stuck. Returns a `StepRef<S>`.
      */
-    inline fun <reified S> awaitSignal(
+    public inline fun <reified S> awaitSignal(
         name: String,
         signal: String,
         timeout: Duration,
@@ -93,21 +93,21 @@ class SagaBuilder<I> @PublishedApi internal constructor(
     }
 
     /** Runs INSIDE the transaction that completes the saga. No external calls; the saga's row is written after it. */
-    fun onCompleted(block: SagaContext<I>.() -> Unit) {
+    public fun onCompleted(block: SagaContext<I>.() -> Unit) {
         onCompleted = block
     }
 
     /** Runs INSIDE the transaction that ends the saga after compensation. No external calls; the saga's row is written after it. */
-    fun onFailed(block: SagaContext<I>.() -> Unit) {
+    public fun onFailed(block: SagaContext<I>.() -> Unit) {
         onFailed = block
     }
 
     @PublishedApi
-    internal fun build() = SagaDefinition(type, inputType, steps.toList(), onCompleted, onFailed)
+    internal fun build(): SagaDefinition<I> = SagaDefinition(type, inputType, steps.toList(), onCompleted, onFailed)
 }
 
 @SagaDslMarker
-class StepBuilder<I, O> @PublishedApi internal constructor(
+public class StepBuilder<I, O> @PublishedApi internal constructor(
     private val name: String,
     private val outputType: KType?,
 ) {
@@ -123,7 +123,7 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
      * replayed with the same key instead of checked. Confirm the service's guarantees first: see
      * "Before marking a step idempotent" in https://octogene.github.io/akta/use-cases/idempotent-services/
      */
-    fun idempotent(keyRetention: Duration) {
+    public fun idempotent(keyRetention: Duration) {
         idempotency = Idempotency(keyRetention)
     }
 
@@ -131,13 +131,13 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
      * The call. Returns the step's output.
      * Throw [StepRejected] or [StepNotSent] when you know nothing was applied.
      */
-    fun execute(block: suspend SagaContext<I>.() -> O) {
+    public fun execute(block: suspend SagaContext<I>.() -> O) {
         check(executeBlock == null) { "execute already declared for step '$name'" }
         executeBlock = block
     }
 
     /** Undo. Receives this step's own output. Must be safe to run more than once. */
-    fun compensate(block: suspend SagaContext<I>.(own: O?) -> Unit) {
+    public fun compensate(block: suspend SagaContext<I>.(own: O?) -> Unit) {
         compensateBlock = block
     }
 
@@ -145,7 +145,7 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
      * After an unknown outcome: was the step applied? [CheckResult.Done] carries the output found. Throw
      * [StepRejected] when the external system shows the call was refused: the saga compensates.
      */
-    fun check(block: suspend SagaContext<I>.() -> CheckResult<O>) {
+    public fun check(block: suspend SagaContext<I>.() -> CheckResult<O>) {
         checkBlock = block
     }
 
@@ -153,7 +153,7 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
      * Shortcut for the usual check: look the effect up in the external system.
      * No match → not done; one match → done (it becomes the step's output); several → cannot tell.
      */
-    fun checkByLookup(lookup: suspend SagaContext<I>.() -> List<O>) {
+    public fun checkByLookup(lookup: suspend SagaContext<I>.() -> List<O>) {
         checkBlock = {
             val found = lookup()
             when (found.size) {
@@ -168,7 +168,7 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
      * What `saga_log` records about the output: an identifier, never personal data.
      * Default: the output itself for a `String` output, nothing for any other type.
      */
-    fun logAs(block: (O) -> String?) {
+    public fun logAs(block: (O) -> String?) {
         describeBlock = block
     }
 
@@ -200,7 +200,7 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
 }
 
 @SagaDslMarker
-class SignalStepBuilder<I, S> @PublishedApi internal constructor(
+public class SignalStepBuilder<I, S> @PublishedApi internal constructor(
     private val name: String,
     private val signal: String,
     private val timeout: Duration,
@@ -216,7 +216,7 @@ class SignalStepBuilder<I, S> @PublishedApi internal constructor(
      * timeout check found: no external calls. Anything else it throws is a bug: the transaction rolls back
      * whole, and the saga stops (RECORD_FAILED) with the signal kept, until the bug is fixed and it is retried.
      */
-    fun onSignal(block: SagaContext<I>.(signal: S) -> Unit) {
+    public fun onSignal(block: SagaContext<I>.(signal: S) -> Unit) {
         acceptBlock = block
     }
 
@@ -224,12 +224,12 @@ class SignalStepBuilder<I, S> @PublishedApi internal constructor(
      * At the timeout, asks the external system: [CheckResult.Done] accepts its value, NotDone rejects. A signal
      * received while it runs is used instead of NotDone or CannotTell.
      */
-    fun check(block: suspend SagaContext<I>.() -> CheckResult<S>) {
+    public fun check(block: suspend SagaContext<I>.() -> CheckResult<S>) {
         checkBlock = block
     }
 
     /** At the timeout, looks the value up: none means rejected, one means accepted, several means cannot tell. */
-    fun checkByLookup(lookup: suspend SagaContext<I>.() -> List<S>) {
+    public fun checkByLookup(lookup: suspend SagaContext<I>.() -> List<S>) {
         checkBlock = {
             val found = lookup()
             when (found.size) {
@@ -241,7 +241,7 @@ class SignalStepBuilder<I, S> @PublishedApi internal constructor(
     }
 
     /** What `saga_log` records about the value: an identifier, never personal data. Default: nothing. */
-    fun logAs(block: (S) -> String?) {
+    public fun logAs(block: (S) -> String?) {
         describeBlock = block
     }
 

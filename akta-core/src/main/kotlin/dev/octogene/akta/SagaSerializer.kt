@@ -10,11 +10,11 @@ import kotlin.reflect.KType
  * the [SagaEngine]. The engine asks [supports] for every declared type when it is built, so a type
  * it cannot handle fails at startup, not in a running saga.
  */
-interface SagaSerializer {
+public interface SagaSerializer {
     /** Whether values of [type] can be written and read. */
-    fun supports(type: KType): Boolean
-    fun encode(value: Any?, type: KType): String
-    fun decode(text: String, type: KType): Any?
+    public fun supports(type: KType): Boolean
+    public fun encode(value: Any?, type: KType): String
+    public fun decode(text: String, type: KType): Any?
 }
 
 /**
@@ -25,7 +25,7 @@ interface SagaSerializer {
  * still be read by the previous one during a rolling deploy. Give added fields a default value, so
  * the newer version can read data written by the previous one.
  */
-class KotlinxJsonSagaSerializer(private val json: Json = DefaultJson) : SagaSerializer {
+public class KotlinxJsonSagaSerializer(private val json: Json = DefaultJson) : SagaSerializer {
     override fun supports(type: KType): Boolean = json.serializersModule.serializerOrNull(type) != null
 
     override fun encode(value: Any?, type: KType): String =
@@ -34,7 +34,7 @@ class KotlinxJsonSagaSerializer(private val json: Json = DefaultJson) : SagaSeri
     override fun decode(text: String, type: KType): Any? =
         json.decodeFromString(json.serializersModule.serializer(type), text)
 
-    companion object {
-        val DefaultJson: Json = Json { ignoreUnknownKeys = true }
+    public companion object {
+        public val DefaultJson: Json = Json { ignoreUnknownKeys = true }
     }
 }

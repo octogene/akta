@@ -110,7 +110,7 @@ internal object SagaLogTable : Table("saga_log") {
  * PostgreSQL implementation with Exposed (DSL). Uses the current Exposed transaction, so
  * [dev.octogene.akta.SagaEngine.create] can run inside the application's own transaction.
  */
-class ExposedSagaRepository : SagaRepository {
+public class ExposedSagaRepository : SagaRepository {
 
     /**
      * ON CONFLICT DO NOTHING instead of catching the unique violation: in PostgreSQL an error aborts the

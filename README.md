@@ -71,6 +71,7 @@ It targets Kotlin 2.x on JVM 17+, Exposed 1.x and PostgreSQL 12+. There is no pu
 ./gradlew test             # unit tests, and the PostgreSQL tests (Testcontainers: Docker required)
 ./gradlew stressTest       # many sagas, random failures and crashes, invariants checked (about 10 s)
 ./gradlew benchmark        # the cost of a saga against PostgreSQL (about 40 s)
+./gradlew checkKotlinAbi   # the public API matches api/*.api; after a change made on purpose: ./gradlew updateKotlinAbi
 ```
 
 The documentation is built from `docs/` with Material for MkDocs, and published on every push to `master`:

@@ -7,6 +7,11 @@ plugins {
 
 kotlin {
     jvmToolchain(17)
+    // A library: every public declaration says so, with its type. Nothing becomes public by accident.
+    explicitApi()
+    // The public API, recorded in api/: a change to it fails the build until the record is updated on purpose.
+    @OptIn(org.jetbrains.kotlin.gradle.dsl.abi.ExperimentalAbiValidation::class)
+    abiValidation()
 }
 
 java {

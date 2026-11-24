@@ -28,7 +28,7 @@ import kotlin.uuid.Uuid
  * Golden rule: no external call inside a transaction. Every step follows the same cycle:
  * transaction (claim the step), call, transaction (record the outcome and decide what is next).
  */
-class SagaEngine(
+public class SagaEngine(
     private val transactions: SagaTransactions,
     private val repository: SagaRepository,
     definitions: List<SagaDefinition<*>>,
@@ -83,7 +83,7 @@ class SagaEngine(
      *   [SagaConfig.maxDataBytes]. Nothing is written in either case.
      */
     @OptIn(ExperimentalUuidApi::class)
-    fun <I> create(definition: SagaDefinition<I>, key: String, input: I, traceparent: String? = null): Uuid {
+    public fun <I> create(definition: SagaDefinition<I>, key: String, input: I, traceparent: String? = null): Uuid {
         require(definitions[definition.type] === definition) { "Saga type ${definition.type} is not registered with this engine" }
         val encoded = definition.inputType?.let { type ->
             serializer.encode(input, type).also { text ->
@@ -105,14 +105,14 @@ class SagaEngine(
     }
 
     /** Creates a saga of [definition], which has no input. See the other [create]. */
-    fun create(definition: SagaDefinition<Unit>, key: String, traceparent: String? = null): Uuid =
+    public fun create(definition: SagaDefinition<Unit>, key: String, traceparent: String? = null): Uuid =
         create(definition, key, Unit, traceparent)
 
     /**
      * Moves the saga forward until it ends, blocks (waiting for a retry, an unknown outcome,
      * a human) or [deadline] passes. Returns its state: an HTTP handler can map it to 201, 422 or 202.
      */
-    suspend fun run(id: Uuid, deadline: Instant, skipLocked: Boolean = false): SagaRecord {
+    public suspend fun run(id: Uuid, deadline: Instant, skipLocked: Boolean = false): SagaRecord {
         val trace = traceId()      // here, on the caller's coroutine: transactions may switch threads
         // A step, once claimed, is called and its outcome recorded even if the caller is cancelled (an HTTP
         // client that disconnects, a shutdown): abandoned, it would stay IN_PROGRESS until its lock expires,
@@ -176,7 +176,7 @@ class SagaEngine(
      *
      * A saga that throws does not stop the others: its error is returned in [ResumeResult.failures].
      */
-    suspend fun resumeDue(
+    public suspend fun resumeDue(
         limit: Int = 50,
         budgetPerSaga: Duration = 20.seconds,
         concurrency: Int = 8,
@@ -237,9 +237,9 @@ class SagaEngine(
     }
 
     /** What [resumeDue] did: how many sagas it looked at, and the ones that threw. */
-    data class ResumeResult(val sagas: Int, val failures: Map<Uuid, Throwable>)
+    public data class ResumeResult(val sagas: Int, val failures: Map<Uuid, Throwable>)
 
-    suspend fun find(id: Uuid): SagaRecord? = tx { repository.find(id) }
+    public suspend fun find(id: Uuid): SagaRecord? = tx { repository.find(id) }
 
     // ---- Reads for operators ----------------------------------------------------------------
 
@@ -247,16 +247,16 @@ class SagaEngine(
      * Stuck sagas, stuck longest first: what an admin screen lists. Each carries its [SagaRecord.stuckReason],
      * which says what to do. For the next page, pass `StuckCursor.after(lastOfThePage)` as [after].
      */
-    suspend fun findStuck(limit: Int = 100, types: Collection<String>? = null, after: StuckCursor? = null): List<SagaRecord> {
+    public suspend fun findStuck(limit: Int = 100, types: Collection<String>? = null, after: StuckCursor? = null): List<SagaRecord> {
         require(limit >= 1) { "limit must be at least 1" }
         return tx { repository.findStuck(limit, types, after) }
     }
 
     /** Everything that happened to a saga, oldest first. */
-    suspend fun history(sagaId: Uuid): List<SagaLogEntry> = tx { repository.history(sagaId) }
+    public suspend fun history(sagaId: Uuid): List<SagaLogEntry> = tx { repository.history(sagaId) }
 
     /** What the request with this trace id did to sagas, oldest first. */
-    suspend fun historyByTrace(traceId: String, limit: Int = 200): List<SagaLogEntry> {
+    public suspend fun historyByTrace(traceId: String, limit: Int = 200): List<SagaLogEntry> {
         require(limit >= 1) { "limit must be at least 1" }
         return tx { repository.historyByTrace(traceId, limit) }
     }
@@ -267,7 +267,7 @@ class SagaEngine(
      * unfinished saga (one grouped query on PostgreSQL), never the finished ones: sample it about once a
      * minute, not per request.
      */
-    suspend fun stats(types: Collection<String>? = null): SagaStats = tx { repository.stats(currentTime(), types) }
+    public suspend fun stats(types: Collection<String>? = null): SagaStats = tx { repository.stats(currentTime(), types) }
 
     // ---- Retention --------------------------------------------------------------------------
 
@@ -277,7 +277,7 @@ class SagaEngine(
      * from the job runner (daily keeps each run small). It works in batches of [batchSize] sagas, one
      * short transaction each, so it never holds locks for long. Returns the number of sagas deleted.
      */
-    suspend fun purgeFinished(olderThan: Duration = 30.days, batchSize: Int = 1000): Int {
+    public suspend fun purgeFinished(olderThan: Duration = 30.days, batchSize: Int = 1000): Int {
         require(olderThan.isPositive()) { "olderThan must be positive" }
         require(batchSize >= 1) { "batchSize must be at least 1" }
         val before = currentTime() - olderThan
@@ -308,7 +308,7 @@ class SagaEngine(
      * the step was not applied (after [StuckReason.KEY_EXPIRED], or when the service keeps answering a failure
      * it remembered for the old key).
      */
-    suspend fun retry(id: Uuid, actor: String, newKey: Boolean = false, runFor: Duration = MANUAL_RUN): SagaRecord =
+    public suspend fun retry(id: Uuid, actor: String, newKey: Boolean = false, runFor: Duration = MANUAL_RUN): SagaRecord =
         manual(id, actor, SagaEvents.MANUAL_RETRY, runFor) { r, now ->
             require(r.stepStatus == StepStatus.STUCK) { "Saga $id is not stuck" }
             require(newKey || r.stuckReason != StuckReason.KEY_EXPIRED) {
@@ -337,7 +337,7 @@ class SagaEngine(
      * step's output type before it is saved. Null keeps the output already saved for the step (after a
      * `RECORD_FAILED`), or means no output.
      */
-    suspend fun markDone(id: Uuid, output: String?, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
+    public suspend fun markDone(id: Uuid, output: String?, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
         manual(id, actor, SagaEvents.MANUAL_DONE, runFor) { r, now ->
             require(r.state == SagaState.RUNNING && r.stepStatus == StepStatus.STUCK) { "Saga $id has no stuck forward step" }
             // Set on a saga still running only when its step's refusal could not be recorded (RECORD_FAILED).
@@ -359,7 +359,7 @@ class SagaEngine(
      * after looking in the external system. When true, the current step is compensated too, and
      * receives [output] as its own output (checked as in [markDone]). A step that is READY was never applied.
      */
-    suspend fun abort(
+    public suspend fun abort(
         id: Uuid,
         actor: String,
         currentStepApplied: Boolean,
@@ -389,7 +389,7 @@ class SagaEngine(
      * compensated, and the saga goes on undoing the previous steps (or ends FAILED). Used wrongly, it
      * leaves an effect in the external system, as [markDone] would.
      */
-    suspend fun markCompensated(id: Uuid, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
+    public suspend fun markCompensated(id: Uuid, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
         manual(id, actor, SagaEvents.MANUAL_COMPENSATED, runFor) { r, now ->
             require(r.state == SagaState.COMPENSATING && r.stepStatus == StepStatus.STUCK) { "Saga $id has no stuck compensation" }
             repository.markCompensated(r.id, r.stepIndex, now)
@@ -408,7 +408,7 @@ class SagaEngine(
      *   (already received, or too late), or [SignalResult.NoSaga].
      * @throws IllegalArgumentException if no step of the saga waits for [name], or it expects another type.
      */
-    suspend inline fun <reified S> signal(sagaId: Uuid, name: String, value: S): SignalResult =
+    public suspend inline fun <reified S> signal(sagaId: Uuid, name: String, value: S): SignalResult =
         signal(sagaId, name, value, typeOf<S>())
 
     @PublishedApi
@@ -603,7 +603,7 @@ class SagaEngine(
      * saga stays stuck until a human retries or aborts it. Refused for a finished saga: undoing it is a
      * new saga. [reason] is kept in [SagaRecord.cancelReason]; a second cancellation is only logged.
      */
-    suspend fun cancel(id: Uuid, reason: String, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
+    public suspend fun cancel(id: Uuid, reason: String, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
         manual(id, actor, SagaEvents.CANCEL_REQUESTED, runFor) { r, now ->
             require(!r.state.isFinished) { "Saga $id is finished: undoing it is a new saga" }
             // Already compensating, for another reason: nothing changes, and the history says so.
@@ -1413,4 +1413,4 @@ private fun AnyDefinition.signalStepAt(index: Int): AnySignalStep = steps[index]
  * A saga's input or a step's output cannot be read: it was written by another version of the code, or
  * the serializer's configuration changed. Thrown before any call is made, so nothing is left half done.
  */
-class SagaDataException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)
+public class SagaDataException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)

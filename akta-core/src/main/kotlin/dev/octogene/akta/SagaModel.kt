@@ -8,7 +8,7 @@ import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
 /** Direction of the saga, or its end. */
-enum class SagaState {
+public enum class SagaState {
     /** Executing steps forward. */
     RUNNING,
     /** A step was rejected: undoing the completed steps, last to first. */
@@ -18,11 +18,11 @@ enum class SagaState {
     /** Every completed step was undone. */
     FAILED;
 
-    val isFinished: Boolean get() = this == COMPLETED || this == FAILED
+    public val isFinished: Boolean get() = this == COMPLETED || this == FAILED
 }
 
 /** Status of the current step. */
-enum class StepStatus {
+public enum class StepStatus {
     /** Ready to run (or to be undone) from `nextAttemptAt`. */
     READY,
     /** A call is in flight until `lockedUntil`. */
@@ -36,7 +36,7 @@ enum class StepStatus {
 }
 
 /** Why a saga is STUCK. What an operator should do depends on it. Stored: never rename one. */
-enum class StuckReason {
+public enum class StuckReason {
     /** A check could not tell whether the step was applied. Look in the external system: `markDone` or `retry`. */
     CANNOT_TELL,
     /** A check kept throwing. As [CANNOT_TELL], once the lookup works again. */
@@ -129,16 +129,16 @@ public data class SagaRecord(
 )
 
 /** Where [SagaEngine.findStuck] continues: after this saga. */
-data class StuckCursor(val stuckAt: Instant, val id: Uuid) {
-    companion object {
+public data class StuckCursor(val stuckAt: Instant, val id: Uuid) {
+    public companion object {
         /** The cursor after [record], the last stuck saga of a page. */
-        fun after(record: SagaRecord) =
+        public fun after(record: SagaRecord): StuckCursor =
             StuckCursor(checkNotNull(record.stuckAt) { "Saga ${record.id} is not stuck" }, record.id)
     }
 }
 
 /** What [SagaEngine.stats] measures, for gauges and alerts. Finished sagas are not counted. */
-data class SagaStats(
+public data class SagaStats(
     /** Unfinished sagas by state and step status, e.g. (RUNNING, WAITING) to 12. */
     val unfinished: Map<Pair<SagaState, StepStatus>, Long>,
     val stuckByReason: Map<StuckReason, Long>,
@@ -149,7 +149,7 @@ data class SagaStats(
 )
 
 /** One line of the saga history. */
-data class SagaLogEntry(
+public data class SagaLogEntry(
     val sagaId: Uuid,
     val at: Instant,
     val stepIndex: Int,
@@ -166,46 +166,46 @@ data class SagaLogEntry(
  * Values of [SagaLogEntry.event]. They are stored in the database and read by queries and
  * dashboards: never rename one.
  */
-object SagaEvents {
-    const val CREATED = "CREATED"
-    const val LOCK_EXPIRED = "LOCK_EXPIRED"
+public object SagaEvents {
+    public const val CREATED: String = "CREATED"
+    public const val LOCK_EXPIRED: String = "LOCK_EXPIRED"
     /** A call ended after its lock expired and another instance took over. */
-    const val LATE_RESULT_IGNORED = "LATE_RESULT_IGNORED"
+    public const val LATE_RESULT_IGNORED: String = "LATE_RESULT_IGNORED"
     /** The outcome of a call could not be saved: the saga is STUCK; a successful call's output is kept with its result. */
-    const val RECORD_FAILED = "RECORD_FAILED"
+    public const val RECORD_FAILED: String = "RECORD_FAILED"
     /**
      * resumeDue, or the run after a manual action, could not run the saga (database error, bug…): postponed by
      * [SagaConfig.resumeFailureDelay]. The manual action itself is committed.
      */
-    const val RESUME_FAILED = "RESUME_FAILED"
-    const val MANUAL_RETRY = "MANUAL_RETRY"
-    const val MANUAL_DONE = "MANUAL_DONE"
-    const val MANUAL_ABORT = "MANUAL_ABORT"
+    public const val RESUME_FAILED: String = "RESUME_FAILED"
+    public const val MANUAL_RETRY: String = "MANUAL_RETRY"
+    public const val MANUAL_DONE: String = "MANUAL_DONE"
+    public const val MANUAL_ABORT: String = "MANUAL_ABORT"
     /** A stuck compensation was done by hand ([SagaEngine.markCompensated]). */
-    const val MANUAL_COMPENSATED = "MANUAL_COMPENSATED"
+    public const val MANUAL_COMPENSATED: String = "MANUAL_COMPENSATED"
     /** A signal step started waiting; the detail gives the signal and the deadline. */
-    const val WAIT_STARTED = "WAIT_STARTED"
+    public const val WAIT_STARTED: String = "WAIT_STARTED"
     /** A signal step's timeout passed without its signal: checked, or stuck. */
-    const val WAIT_TIMED_OUT = "WAIT_TIMED_OUT"
+    public const val WAIT_TIMED_OUT: String = "WAIT_TIMED_OUT"
     /** A signal arrived; the detail says delivered, stored, consumed (stored earlier) or ignored. */
-    const val SIGNAL_RECEIVED = "SIGNAL_RECEIVED"
+    public const val SIGNAL_RECEIVED: String = "SIGNAL_RECEIVED"
     /** An idempotent step's key may be forgotten by its service: STUCK ([StuckReason.KEY_EXPIRED]), no call made. */
-    const val KEY_EXPIRED = "KEY_EXPIRED"
+    public const val KEY_EXPIRED: String = "KEY_EXPIRED"
     /**
      * A claimed step was not called: too long a pause after the claim (GC, a stalled thread) left no time
      * before its lock expires. It is released as it was, due at once; no attempt is used.
      */
-    const val NOT_CALLED = "NOT_CALLED"
+    public const val NOT_CALLED: String = "NOT_CALLED"
     /** Compensation passed over a step with nothing to undo ([SagaStep.compensates] false): no call made. */
-    const val NOTHING_TO_UNDO = "NOTHING_TO_UNDO"
+    public const val NOTHING_TO_UNDO: String = "NOTHING_TO_UNDO"
     /** [SagaEngine.cancel] was called; the detail gives the reason. */
-    const val CANCEL_REQUESTED = "CANCEL_REQUESTED"
+    public const val CANCEL_REQUESTED: String = "CANCEL_REQUESTED"
     /**
      * A cancellation that waited took effect when the saga was next claimed (after a manual retry, for
      * example): it compensates. The detail gives the reason. A cancellation applied at once, or when a
      * call's outcome is recorded, shows in that entry instead (CANCEL_REQUESTED, or the call's outcome).
      */
-    const val CANCELLED = "CANCELLED"
+    public const val CANCELLED: String = "CANCELLED"
 
     /*
      * Outcomes of a call are logged as "<action>:<outcome>":
@@ -217,7 +217,7 @@ object SagaEvents {
      */
 }
 
-data class SagaConfig(
+public data class SagaConfig(
     /** How long a call may take before it is considered interrupted: HTTP timeout + margin. */
     val callLock: Duration = 35.seconds,
     /**
@@ -250,6 +250,6 @@ data class SagaConfig(
     }
 
     /** 1, 2, 4… minutes, capped at [maxBackoff]. */
-    fun backoff(attempts: Int): Duration =
+    public fun backoff(attempts: Int): Duration =
         (1 shl (attempts - 1).coerceIn(0, 20)).minutes.coerceAtMost(maxBackoff)
 }

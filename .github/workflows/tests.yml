@@ -1,7 +1,7 @@
 name: Tests
 
-# The unit tests, the PostgreSQL integration tests (Testcontainers, on the runner's Docker) and the
-# stress test, on every push to master and every pull request. The benchmark only measures: run it by hand.
+# The public API check, the unit tests, the PostgreSQL integration tests (Testcontainers, on the runner's
+# Docker) and the stress test, on every push to master and every pull request. The benchmark only measures: run it by hand.
 on:
   push:
     branches: [master]
@@ -40,7 +40,8 @@ jobs:
       # Caches Gradle and its dependencies, and checks the wrapper jar against Gradle's published checksums.
       - uses: gradle/actions/setup-gradle@v4
       # --continue: a failure in one module still runs the others' tests.
-      - run: ./gradlew test stressTest --continue
+      # checkKotlinAbi: the public API must match api/*.api (./gradlew updateKotlinAbi records a change made on purpose).
+      - run: ./gradlew checkKotlinAbi test stressTest --continue
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

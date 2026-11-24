@@ -14,7 +14,7 @@ import java.sql.Connection
  * [database] with `DatabaseConfig { defaultMaxAttempts = 1 }` to keep failures visible.
  * If your application already has its own transaction helper, implement [SagaTransactions] with it instead.
  */
-class ExposedSagaTransactions(private val database: Database? = null) : SagaTransactions {
+public class ExposedSagaTransactions(private val database: Database? = null) : SagaTransactions {
     override suspend fun <T> inTransaction(block: () -> T): T =
         withContext(Dispatchers.IO) {
             // The engine's row locking relies on READ COMMITTED: under REPEATABLE READ, a SELECT FOR UPDATE

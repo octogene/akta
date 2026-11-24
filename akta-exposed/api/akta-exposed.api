@@ -1,0 +1,27 @@
+public final class dev/octogene/akta/exposed/ExposedSagaRepository : dev/octogene/akta/SagaRepository {
+	public fun <init> ()V
+	public fun find (Lkotlin/uuid/Uuid;)Ldev/octogene/akta/SagaRecord;
+	public fun findDue (Lkotlin/time/Instant;ILjava/util/Collection;)Ljava/util/List;
+	public fun findStuck (ILjava/util/Collection;Ldev/octogene/akta/StuckCursor;)Ljava/util/List;
+	public fun history (Lkotlin/uuid/Uuid;)Ljava/util/List;
+	public fun historyByTrace (Ljava/lang/String;I)Ljava/util/List;
+	public fun insert (Ldev/octogene/akta/SagaRecord;Lkotlin/time/Instant;)V
+	public fun lock (Lkotlin/uuid/Uuid;Z)Ldev/octogene/akta/SagaRecord;
+	public fun log (Ldev/octogene/akta/SagaLogEntry;)V
+	public fun markCompensated (Lkotlin/uuid/Uuid;ILkotlin/time/Instant;)V
+	public fun purgeFinished (Lkotlin/time/Instant;I)I
+	public fun results (Lkotlin/uuid/Uuid;)Ljava/util/Map;
+	public fun save (Ldev/octogene/akta/SagaRecord;Lkotlin/time/Instant;)V
+	public fun saveResult (Lkotlin/uuid/Uuid;ILjava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;)V
+	public fun saveSignal (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;)Z
+	public fun signal (Lkotlin/uuid/Uuid;Ljava/lang/String;)Ljava/lang/String;
+	public fun stats (Lkotlin/time/Instant;Ljava/util/Collection;)Ldev/octogene/akta/SagaStats;
+}
+
+public final class dev/octogene/akta/exposed/ExposedSagaTransactions : dev/octogene/akta/SagaTransactions {
+	public fun <init> ()V
+	public fun <init> (Lorg/jetbrains/exposed/v1/jdbc/Database;)V
+	public synthetic fun <init> (Lorg/jetbrains/exposed/v1/jdbc/Database;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun inTransaction (Lkotlin/jvm/functions/Function0;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+}
+

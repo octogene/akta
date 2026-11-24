@@ -17,14 +17,14 @@ import kotlin.uuid.Uuid
  * In-memory repository, FOR TESTS ONLY: lets you test your sagas and steps without a database.
  * Use it with [InMemorySagaTransactions] built on the same repository, so a failed transaction is rolled back.
  */
-class InMemorySagaRepository : SagaRepository {
+public class InMemorySagaRepository : SagaRepository {
     private val sagas = linkedMapOf<Uuid, SagaRecord>()
     private val results = mutableListOf<StoredResult>()
     private val logEntries = mutableListOf<SagaLogEntry>()
     private val updatedAt = hashMapOf<Uuid, Instant>()
     private val signals = linkedMapOf<Pair<Uuid, String>, String>()
 
-    data class StoredResult(
+    public data class StoredResult(
         val sagaId: Uuid,
         val stepIndex: Int,
         val stepName: String,
@@ -34,9 +34,9 @@ class InMemorySagaRepository : SagaRepository {
     )
 
     /** Full history, for assertions. */
-    val log: List<SagaLogEntry> get() = logEntries.toList()
+    public val log: List<SagaLogEntry> get() = logEntries.toList()
 
-    fun storedResults(sagaId: Uuid): List<StoredResult> = results.filter { it.sagaId == sagaId }
+    public fun storedResults(sagaId: Uuid): List<StoredResult> = results.filter { it.sagaId == sagaId }
 
     override fun insert(record: SagaRecord, now: Instant) {
         record.checkConstraints()
@@ -170,7 +170,7 @@ class InMemorySagaRepository : SagaRepository {
  * Runs each "transaction" under one lock, on [repository]: one that throws is rolled back, as in a real
  * database. For tests only. Build the engine with the same repository.
  */
-class InMemorySagaTransactions(private val repository: InMemorySagaRepository) : SagaTransactions {
+public class InMemorySagaTransactions(private val repository: InMemorySagaRepository) : SagaTransactions {
     private val lock = ReentrantLock()
 
     override suspend fun <T> inTransaction(block: () -> T): T = lock.withLock {
