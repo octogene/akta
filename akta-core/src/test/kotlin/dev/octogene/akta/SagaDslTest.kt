@@ -193,14 +193,18 @@ class SagaDslTest {
                 logAs { it.id }
             }
             step<Hold>("silent") { execute { Hold("H-2", "secret") } }               // no logAs: nothing
-            step<String>("ref") { execute { "R-1" } }                                // a String: logged
+            step<String>("token") { execute { "tok-secret" } }                       // a String too: nothing
+            step<String>("ref") {
+                execute { "R-1" }
+                logAs { it }                                                        // an identifier, said so
+            }
         }
         val engine = engine(definition)
         val id = engine.create(definition, "item-1", BookingRequest("C-1", "2026-12-01", "2026-12-03"))
         runBlocking { engine.run(id, now + 10.seconds) }
 
         val details = repository.log.filter { it.event == "EXECUTE:Done" }.map { it.stepName to it.detail }
-        assertEquals(listOf("hold" to "ref=H-1", "silent" to null, "ref" to "ref=R-1"), details)
+        assertEquals(listOf("hold" to "ref=H-1", "silent" to null, "token" to null, "ref" to "ref=R-1"), details)
         val everything = repository.log.joinToString { "${it.detail}" }
         assertTrue("C-1" !in everything && "secret" !in everything && "warehouse" !in everything, everything)
     }

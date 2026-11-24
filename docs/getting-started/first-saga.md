@@ -32,6 +32,7 @@ fun itemSetupSaga(stockClient: StockClient, bookingClient: BookingClient, items:
         step<String>("booking") {
             execute { bookingClient.createResource(input.epc, stockId = requireResult(stock).id) }   // (6)!
             checkByLookup { bookingClient.findResources(input.epc) }
+            logAs { it }                                                  // a resource id: safe to log
         }
 
         onCompleted { items.markAvailable(key, location = requireResult(stock).location) }   // (7)!

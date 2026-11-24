@@ -165,8 +165,8 @@ public class StepBuilder<I, O> @PublishedApi internal constructor(
     }
 
     /**
-     * What `saga_log` records about the output: an identifier, never personal data.
-     * Default: the output itself for a `String` output, nothing for any other type.
+     * What `saga_log` records about the output: an identifier, never personal data. Default: nothing, whatever
+     * the type. A `String` output that is an identifier (a reservation id) is logged with `logAs { it }`.
      */
     public fun logAs(block: (O) -> String?) {
         describeBlock = block
@@ -177,11 +177,8 @@ public class StepBuilder<I, O> @PublishedApi internal constructor(
         val executeBlock = requireNotNull(executeBlock) { "Step '$name' has no execute block" }
         val compensateBlock = compensateBlock
         val checkBlock = checkBlock
-        val describeBlock = describeBlock ?: if (outputType?.classifier == String::class) {
-            { output: O -> output as String? }
-        } else {
-            { _: O -> null }
-        }
+        // Nothing by default, a String too: it may be an email or a token, and only logAs says otherwise.
+        val describeBlock = describeBlock ?: { _: O -> null }
         val stepName = name
         val type = outputType
         val stepIdempotency = idempotency

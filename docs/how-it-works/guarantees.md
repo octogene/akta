@@ -11,7 +11,7 @@
 | An unknown outcome is never replayed blindly | It is checked first, or replayed with an idempotency key |
 | A call's outcome is recorded once | The record verifies the claim is still its own; a late result is ignored |
 | The end of a saga and its business effects happen together | `onCompleted` and `onFailed` run in the saga's last transaction, once |
-| No saga data in the history or the errors | Only what `logAs` returns is logged |
+| No saga data in the history or the errors | The engine logs only what `logAs` returns (nothing by default). Exception messages are logged as they are: keep personal data out of them ([Saga data](saga-data.md#personal-data)) |
 | Nothing is lost when the database or a pod fails | Every decision is in the saga's row; the recovery job finishes what was left |
 
 The stress test checks these under random failures, against simulated external systems that record what was really applied.

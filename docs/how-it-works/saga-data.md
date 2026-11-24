@@ -37,7 +37,9 @@ The input lives on the `saga` row, which is updated about 4 times per saga. Post
 
 ## Personal data
 
-Values are stored only in `saga.input`, `saga_step_result.output` and `saga_signal.value`, never in the history (`saga_log`), in `last_error`, or in listener events. What the history shows about a value is what `logAs` returns: an identifier. All of it is deleted with the saga by `purgeFinished`.
+Values are stored only in `saga.input`, `saga_step_result.output` and `saga_signal.value`, never in the history (`saga_log`), in `last_error`, or in listener events. What the history shows about a value is what `logAs` returns: an identifier. Without `logAs`, nothing is shown, whatever the type: a `String` output may be an email or a token, so logging one that is an identifier takes `logAs { it }`. All of it is deleted with the saga by `purgeFinished`.
+
+**Error messages are logged as they are.** When a step throws, its exception's text goes into the history, `last_error` and, for a refusal, `failure_reason`. The engine never puts a value there itself, but the messages are yours, and your clients': `StepRejected("customer jane@example.com is blocked")` logs the address, and some HTTP and SQL clients put the URL, the query or the response body in their messages. Keep personal data out of the messages you throw (name the customer by id), and wrap a client's exception in your own when its message may carry some.
 
 ## Changing a type
 
