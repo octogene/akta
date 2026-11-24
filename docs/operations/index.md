@@ -18,7 +18,7 @@ The engine's delays and limits are in [Configuration](configuration.md).
 - [ ] Every step client suspends (or uses `runInterruptible`), with a timeout below `callLock`.
 - [ ] `settleDelay` is above the longest processing time of every external system without keys.
 - [ ] `keyRetention` is the documented minimum of every idempotent step's service.
-- [ ] `resumeDue` runs every 30 s, and `purgeFinished` daily.
+- [ ] `resumeDue` runs every 30 s, from a random start offset per pod (not on the clock), and `purgeFinished` daily.
 - [ ] The `traceId` provider is wired, so the history links to traces.
 - [ ] Gauges and alerts are in place for stuck sagas and the recovery lag.
 - [ ] An admin screen lists stuck sagas, with access to saga data decided.

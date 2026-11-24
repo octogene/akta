@@ -34,6 +34,21 @@ sequenceDiagram
 
 Rows are locked one at a time, for the length of a short transaction, never during a call.
 
+!!! tip "Spread the pods' runs over the period"
+    Pods that call `resumeDue` at the same instant read the same oldest due sagas: one pod takes each saga, and the others spend a short transaction each finding it taken. That costs little in normal times, but during a backlog (hundreds of sagas due after an outage), synchronized pods work on the same batch, and adding pods does not speed up the catch-up. A pod that runs a moment later does not see the sagas already claimed, and takes the next ones.
+
+    So start each pod's job at a random offset within the period, rather than on the clock (every 30 seconds on the half-minute, as many schedulers do):
+
+    ```kotlin
+    launch {
+        delay(Random.nextLong(30_000))                    // a random start offset, once per pod
+        while (isActive) {
+            engine.resumeDue()
+            delay(30.seconds)
+        }
+    }
+    ```
+
 ## Rolling deployments
 
 `resumeDue` only picks up the saga types its engine knows. During a rolling deployment, pods still on the old version leave a new saga type to the new pods. A saga type that is removed leaves its unfinished sagas untouched: finish or migrate them first.
