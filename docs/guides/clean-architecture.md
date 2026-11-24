@@ -221,7 +221,7 @@ Each is a use case of its own, called from its adapter:
 
 | Entry point | Use case | Engine call |
 |---|---|---|
-| A Kafka listener | `HandlePaymentEvent` | `signal(sagaId, "payment", value)`, then commit the offset |
+| A Kafka listener | `HandlePaymentEvent` | `signal(sagaId, "payment", value)`, then commit the offset, then `run` in the background ([example](../use-cases/reservation-payment.md#the-kafka-listener)) |
 | A customer cancels | `CancelReservation` | `cancel(sagaId, reason, actor)` |
 | An admin screen | `ListStuckSagas`, `RetrySaga`, `MarkStepDone`, `AbortSaga` | `findStuck`, `retry`, `markDone`, `abort`, with your authorisation checks |
 
