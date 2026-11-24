@@ -57,6 +57,9 @@ public interface SagaRepository {
     /** Stuck sagas of [types] (null: all), by `stuckAt` then id, after [after]. */
     public fun findStuck(limit: Int, types: Collection<String>?, after: StuckCursor?): List<SagaRecord>
 
+    /** The sagas of business [key], newest first (by createdAt, then id): at most one unfinished, then finished ones. */
+    public fun findByKey(key: String, limit: Int): List<SagaRecord>
+
     /** The log of a saga, oldest first; entries of the same instant in the order they were written. */
     public fun history(sagaId: Uuid): List<SagaLogEntry>
 
@@ -72,5 +75,15 @@ public interface SagaTransactions {
     public suspend fun <T> inTransaction(block: () -> T): T
 }
 
-public class DuplicateSagaException(key: String, cause: Throwable? = null) :
-    IllegalStateException("An unfinished saga already exists for key $key", cause)
+/**
+ * An unfinished saga already holds [key]. [existingSagaId] is that saga, for an endpoint that answers with it
+ * (an idempotent POST, say): null in the rare case where it finished between the insert and the lookup.
+ */
+public class DuplicateSagaException(
+    public val key: String,
+    public val existingSagaId: Uuid? = null,
+    cause: Throwable? = null,
+) : IllegalStateException(
+    "An unfinished saga already exists for key $key" + (existingSagaId?.let { " (saga $it)" } ?: ""),
+    cause,
+)

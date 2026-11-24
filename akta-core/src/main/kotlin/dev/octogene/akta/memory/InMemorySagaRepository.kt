@@ -40,7 +40,8 @@ public class InMemorySagaRepository : SagaRepository {
 
     override fun insert(record: SagaRecord, now: Instant) {
         record.checkConstraints()
-        if (sagas.values.any { it.key == record.key && !it.state.isFinished }) throw DuplicateSagaException(record.key)
+        sagas.values.firstOrNull { it.key == record.key && !it.state.isFinished }
+            ?.let { throw DuplicateSagaException(record.key, existingSagaId = it.id) }
         sagas[record.id] = record.truncated()
         updatedAt[record.id] = now
     }
@@ -129,6 +130,11 @@ public class InMemorySagaRepository : SagaRepository {
 
     // By time, then in the order written, like the database's (at, id): sortedBy is stable, and
     // logEntries is in the order written.
+    override fun findByKey(key: String, limit: Int): List<SagaRecord> =
+        sagas.values.filter { it.key == key }
+            .sortedWith(compareByDescending<SagaRecord> { it.createdAt }.thenByDescending { it.id })
+            .take(limit)
+
     override fun history(sagaId: Uuid): List<SagaLogEntry> =
         logEntries.filter { it.sagaId == sagaId }.sortedBy { it.at }
 

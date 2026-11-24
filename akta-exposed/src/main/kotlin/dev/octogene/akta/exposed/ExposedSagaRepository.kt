@@ -26,6 +26,7 @@ import org.jetbrains.exposed.v1.core.isNull
 import org.jetbrains.exposed.v1.core.less
 import org.jetbrains.exposed.v1.core.lessEq
 import org.jetbrains.exposed.v1.core.neq
+import org.jetbrains.exposed.v1.core.or
 import org.jetbrains.exposed.v1.core.statements.UpdateBuilder
 import org.jetbrains.exposed.v1.core.vendors.ForUpdateOption
 import org.jetbrains.exposed.v1.datetime.timestampWithTimeZone
@@ -126,7 +127,14 @@ public class ExposedSagaRepository : SagaRepository {
             it[input] = record.input                // written once: write() below never touches it
             write(it, record, now)
         }.insertedCount
-        if (inserted == 0) throw DuplicateSagaException(record.key)
+        if (inserted == 0) {
+            // The transaction is still usable (no error was raised): find the saga that holds the key. ON CONFLICT
+            // waited for a concurrent insert to commit, so this new statement sees it, unless it finished meanwhile.
+            val existing = SagaTable.select(SagaTable.id)
+                .where { (SagaTable.businessKey eq record.key) and (SagaTable.state inList UNFINISHED) }
+                .singleOrNull()?.get(SagaTable.id)
+            throw DuplicateSagaException(record.key, existingSagaId = existing)
+        }
     }
 
     override fun lock(id: Uuid, skipLocked: Boolean): SagaRecord? {
@@ -298,6 +306,17 @@ public class ExposedSagaRepository : SagaRepository {
                 op
             }
             .orderBy(SagaTable.stuckAt to SortOrder.ASC, SagaTable.id to SortOrder.ASC)
+            .limit(limit)
+            .map { it.toRecord() }
+
+    /** Both states are named, so that PostgreSQL combines the two partial indexes on business_key. */
+    override fun findByKey(key: String, limit: Int): List<SagaRecord> =
+        SagaTable.selectAll()
+            .where {
+                (SagaTable.businessKey eq key) and
+                    ((SagaTable.state inList UNFINISHED) or (SagaTable.state inList FINISHED))
+            }
+            .orderBy(SagaTable.createdAt to SortOrder.DESC, SagaTable.id to SortOrder.DESC)
             .limit(limit)
             .map { it.toRecord() }
 

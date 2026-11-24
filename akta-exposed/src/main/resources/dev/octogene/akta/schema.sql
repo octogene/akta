@@ -46,6 +46,10 @@ CREATE INDEX saga_stuck ON saga (stuck_at, id) WHERE step_status = 'STUCK';
 -- Retention (SagaEngine.purgeFinished): finished sagas, oldest first.
 CREATE INDEX saga_finished ON saga (updated_at) WHERE state IN ('COMPLETED', 'FAILED');
 
+-- Lookup by business key (SagaEngine.findByKey), with saga_one_running_per_key for the unfinished ones.
+-- Partial: a saga enters it once, when it finishes, and is never updated after.
+CREATE INDEX saga_finished_key ON saga (business_key) WHERE state IN ('COMPLETED', 'FAILED');
+
 CREATE TABLE saga_step_result (
     saga_id        uuid        NOT NULL REFERENCES saga (id),
     step_index     int         NOT NULL,

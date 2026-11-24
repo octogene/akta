@@ -252,6 +252,15 @@ public class SagaEngine(
         return tx { repository.findStuck(limit, types, after) }
     }
 
+    /**
+     * The sagas of a business key, newest first: the unfinished one if any, then the finished ones still kept.
+     * What an operator searches by ("why is item 3034… stuck?"); then [history] for one of them.
+     */
+    public suspend fun findByKey(key: String, limit: Int = 20): List<SagaRecord> {
+        require(limit >= 1) { "limit must be at least 1" }
+        return tx { repository.findByKey(key, limit) }
+    }
+
     /** Everything that happened to a saga, oldest first. */
     public suspend fun history(sagaId: Uuid): List<SagaLogEntry> = tx { repository.history(sagaId) }
 

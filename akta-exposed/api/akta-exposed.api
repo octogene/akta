@@ -1,6 +1,7 @@
 public final class dev/octogene/akta/exposed/ExposedSagaRepository : dev/octogene/akta/SagaRepository {
 	public fun <init> ()V
 	public fun find (Lkotlin/uuid/Uuid;)Ldev/octogene/akta/SagaRecord;
+	public fun findByKey (Ljava/lang/String;I)Ljava/util/List;
 	public fun findDue (Lkotlin/time/Instant;ILjava/util/Collection;)Ljava/util/List;
 	public fun findStuck (ILjava/util/Collection;Ldev/octogene/akta/StuckCursor;)Ljava/util/List;
 	public fun history (Lkotlin/uuid/Uuid;)Ljava/util/List;

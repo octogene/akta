@@ -1045,10 +1045,29 @@ class SagaEngineTest {
     }
 
     @Test
-    fun `only one unfinished saga per key`() {
+    fun `only one unfinished saga per key, and the refusal names it`() {
         val engine = engine(FakeStep("stock", { throw StepNotSent("down") }))
-        engine.start("item-1")
-        assertFailsWith<DuplicateSagaException> { engine.start("item-1") }
+        val first = engine.start("item-1")
+        val duplicate = assertFailsWith<DuplicateSagaException> { engine.start("item-1") }
+        assertEquals("item-1", duplicate.key)
+        assertEquals(first.id, duplicate.existingSagaId)
+    }
+
+    @Test
+    fun `findByKey lists a key's sagas, the unfinished one first, then newest first`() {
+        var down = false
+        val engine = engine(FakeStep("stock", { if (down) throw StepNotSent("down") else "STK-1" }))
+        val old = engine.start("item-1")                                   // completed
+        clock.advance(1.hours)
+        val recent = engine.start("item-1")                                // completed, later
+        clock.advance(1.hours)
+        down = true
+        val running = engine.start("item-1")                               // unfinished, holds the key
+        engine.start("item-2")
+
+        assertEquals(listOf(running.id, recent.id, old.id), runBlocking { engine.findByKey("item-1") }.map { it.id })
+        assertEquals(listOf(running.id), runBlocking { engine.findByKey("item-1", limit = 1) }.map { it.id })
+        assertEquals(emptyList(), runBlocking { engine.findByKey("unknown") })
     }
 
     @Test

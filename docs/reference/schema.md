@@ -16,8 +16,20 @@ Indexes worth knowing:
 | `saga_due` (partial: unfinished, not stuck) | The recovery job's search for due sagas |
 | `saga_stuck` (partial: stuck) | `findStuck`, by `stuck_at` |
 | `saga_finished` (partial: finished) | The purge, by `updated_at` |
-| `saga_one_running_per_key` (unique, partial: unfinished) | One unfinished saga per business key |
+| `saga_one_running_per_key` (unique, partial: unfinished) | One unfinished saga per business key; with `saga_finished_key`, `findByKey` |
+| `saga_finished_key` (partial: finished) | `findByKey` for finished sagas. A saga enters it once, when it finishes, and is never updated after |
 | `saga_log_saga`, `saga_log_trace` | `history`, `historyByTrace` |
+
+A query by business key names both states, `state IN ('RUNNING', 'COMPENSATING') OR state IN ('COMPLETED', 'FAILED')`, so that PostgreSQL combines the two partial indexes; on `business_key` alone, it scans the whole table.
+
+## Upgrading
+
+The script creates the schema from scratch. A database created by an earlier version needs, in a new migration:
+
+| Since | Migration |
+|---|---|
+| `failure_reason` (why a saga failed, never overwritten) | `ALTER TABLE saga ADD COLUMN failure_reason text;` |
+| `findByKey` | `CREATE INDEX saga_finished_key ON saga (business_key) WHERE state IN ('COMPLETED', 'FAILED');` (on a large table: `CREATE INDEX CONCURRENTLY`, outside a transaction) |
 
 ```sql title="akta-exposed/src/main/resources/dev/octogene/akta/schema.sql"
 --8<-- "akta-exposed/src/main/resources/dev/octogene/akta/schema.sql"

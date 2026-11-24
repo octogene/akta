@@ -8,11 +8,13 @@ A saga stops for a human when the engine cannot decide safely on its own. Each s
 val page = engine.findStuck(limit = 50)                                        // stuck longest first
 val next = engine.findStuck(limit = 50, after = StuckCursor.after(page.last()))
 val history = engine.history(page.first().id)                                  // everything that happened, in order
+val sagas = engine.findByKey("item:3034257BF7194E4000001A85")                  // from the business key
 ```
 
 | Call | Returns |
 |---|---|
 | `findStuck(limit, types, after)` | Stuck sagas, by `stuckAt`, with their `stuckReason` |
+| `findByKey(key, limit)` | A business key's sagas, newest first: the unfinished one if any, then those finished and still kept. Where an operator starts from "why is this item stuck?" |
 | `history(sagaId)` | A saga's whole history, oldest first |
 | `historyByTrace(traceId)` | What one request did, from its trace id |
 | `find(id)` | One saga |

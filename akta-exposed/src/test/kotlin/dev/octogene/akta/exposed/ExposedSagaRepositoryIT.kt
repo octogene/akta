@@ -142,6 +142,22 @@ class ExposedSagaRepositoryIT {
     }
 
     @Test
+    fun `findByKey lists a key's sagas newest first, and a duplicate names the saga that holds the key`() {
+        val done = engine("stock" to { "STK-1" }).start("item-1")
+        val running = engine("stock" to { throw StepNotSent("down") }).start("item-1")
+        engine("stock" to { "STK-2" }).start("item-2")
+        val tx = ExposedSagaTransactions(database)
+
+        val found = runBlocking { tx.inTransaction { repository.findByKey("item-1", 10) } }
+        assertEquals(listOf(running.id, done.id), found.map { it.id })
+
+        val duplicate = assertFailsWith<DuplicateSagaException> {
+            runBlocking { tx.inTransaction { engine("stock" to { "X" }).create(current!!, "item-1") } }
+        }
+        assertEquals(running.id, duplicate.existingSagaId)
+    }
+
+    @Test
     fun `a duplicate saga leaves the caller's transaction usable`() {
         val engine = engine("stock" to { throw StepNotSent("down") })
         engine.start("item-5")

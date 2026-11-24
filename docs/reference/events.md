@@ -55,10 +55,13 @@ engine.history(sagaId).forEach { println("${it.at} ${it.stepName} ${it.event} ${
 ```
 
 ```sql
--- Everything that happened to one business key
+-- Everything that happened to one business key. Both states are named, so that PostgreSQL uses the two
+-- partial indexes on business_key; on business_key alone, it would scan the whole saga table.
 SELECT l.at, s.type, l.step_name, l.event, l.detail, l.actor, l.trace_id
 FROM saga_log l JOIN saga s ON s.id = l.saga_id
-WHERE s.business_key = :key ORDER BY l.at, l.id;
+WHERE s.business_key = :key
+  AND (s.state IN ('RUNNING', 'COMPENSATING') OR s.state IN ('COMPLETED', 'FAILED'))
+ORDER BY l.at, l.id;
 ```
 
 No entry ever contains an input, an output or a signal value: only identifiers given by `logAs`, and error messages.

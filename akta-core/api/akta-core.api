@@ -27,8 +27,10 @@ public final class dev/octogene/akta/CheckResult$NotDone : dev/octogene/akta/Che
 }
 
 public final class dev/octogene/akta/DuplicateSagaException : java/lang/IllegalStateException {
-	public fun <init> (Ljava/lang/String;Ljava/lang/Throwable;)V
-	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/Throwable;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Ljava/lang/String;Lkotlin/uuid/Uuid;Ljava/lang/Throwable;)V
+	public synthetic fun <init> (Ljava/lang/String;Lkotlin/uuid/Uuid;Ljava/lang/Throwable;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getExistingSagaId ()Lkotlin/uuid/Uuid;
+	public final fun getKey ()Ljava/lang/String;
 }
 
 public final class dev/octogene/akta/Idempotency {
@@ -137,6 +139,8 @@ public final class dev/octogene/akta/SagaEngine {
 	public static synthetic fun create$default (Ldev/octogene/akta/SagaEngine;Ldev/octogene/akta/SagaDefinition;Ljava/lang/String;Ljava/lang/Object;Ljava/lang/String;ILjava/lang/Object;)Lkotlin/uuid/Uuid;
 	public static synthetic fun create$default (Ldev/octogene/akta/SagaEngine;Ldev/octogene/akta/SagaDefinition;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lkotlin/uuid/Uuid;
 	public final fun find (Lkotlin/uuid/Uuid;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun findByKey (Ljava/lang/String;ILkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static synthetic fun findByKey$default (Ldev/octogene/akta/SagaEngine;Ljava/lang/String;ILkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun findStuck (ILjava/util/Collection;Ldev/octogene/akta/StuckCursor;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun findStuck$default (Ldev/octogene/akta/SagaEngine;ILjava/util/Collection;Ldev/octogene/akta/StuckCursor;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun history (Lkotlin/uuid/Uuid;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
@@ -302,6 +306,7 @@ public abstract interface class dev/octogene/akta/SagaRepository {
 	public static final field Companion Ldev/octogene/akta/SagaRepository$Companion;
 	public static final field MAX_TEXT I
 	public abstract fun find (Lkotlin/uuid/Uuid;)Ldev/octogene/akta/SagaRecord;
+	public abstract fun findByKey (Ljava/lang/String;I)Ljava/util/List;
 	public abstract fun findDue (Lkotlin/time/Instant;ILjava/util/Collection;)Ljava/util/List;
 	public abstract fun findStuck (ILjava/util/Collection;Ldev/octogene/akta/StuckCursor;)Ljava/util/List;
 	public abstract fun history (Lkotlin/uuid/Uuid;)Ljava/util/List;
@@ -531,6 +536,7 @@ public final class dev/octogene/akta/StuckReason : java/lang/Enum {
 public final class dev/octogene/akta/memory/InMemorySagaRepository : dev/octogene/akta/SagaRepository {
 	public fun <init> ()V
 	public fun find (Lkotlin/uuid/Uuid;)Ldev/octogene/akta/SagaRecord;
+	public fun findByKey (Ljava/lang/String;I)Ljava/util/List;
 	public fun findDue (Lkotlin/time/Instant;ILjava/util/Collection;)Ljava/util/List;
 	public fun findStuck (ILjava/util/Collection;Ldev/octogene/akta/StuckCursor;)Ljava/util/List;
 	public final fun getLog ()Ljava/util/List;
