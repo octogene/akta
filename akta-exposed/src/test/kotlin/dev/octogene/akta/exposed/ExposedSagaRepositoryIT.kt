@@ -347,6 +347,34 @@ class ExposedSagaRepositoryIT {
     }
 
     @Test
+    fun `an empty list of types matches no saga, where null matches every type`() {
+        val down = saga("DOWN") { step("call") { execute { throw StepNotSent("connection refused") } } }
+        val tx = ExposedSagaTransactions(database)
+        fun start(config: SagaConfig, key: String) = runBlocking {
+            val engine = SagaEngine(tx, repository, listOf(down), serializer, config)
+            engine.run(tx.inTransaction { engine.create(down, key) }, Clock.System.now() + 10.seconds)
+        }
+        start(SagaConfig(), "due")                                      // retried later: due within the hour
+        start(SagaConfig(maxAttempts = 1), "stuck")
+        val later = Clock.System.now() + 2.hours
+
+        // Exposed writes an empty IN list as FALSE: valid SQL, and no saga (an engine with no definitions).
+        runBlocking {
+            tx.inTransaction {
+                assertEquals(emptyList(), repository.findDue(later, 10, emptyList()))
+                assertEquals(emptyList(), repository.findStuck(10, emptyList(), null))
+                val none = repository.stats(later, emptyList())
+                assertEquals(emptyMap(), none.unfinished)
+                assertNull(none.oldestDueAt)
+
+                assertEquals(1, repository.findDue(later, 10, listOf("DOWN")).size)
+                assertEquals(1, repository.findStuck(10, null, null).size)
+                assertEquals(2L, repository.stats(later, null).unfinished.values.sum())
+            }
+        }
+    }
+
+    @Test
     fun `skip locked ignores a saga locked by another transaction`() {
         val saga = engine("stock" to { throw StepNotSent("down") }).start("item-4")
         transaction(database) {
