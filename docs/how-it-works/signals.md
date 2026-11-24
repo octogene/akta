@@ -68,7 +68,7 @@ Either way the signal goes through `onSignal`, like any other. **A business dead
 | Waits for a signal, or is ready | Compensates at once |
 | Has a call in flight, or an outcome still unknown | Compensates as soon as that outcome is recorded, the call included if it was applied |
 | Is stuck | Stays stuck: the cancellation is applied when a human retries or marks it done |
-| Is already compensating | Nothing more to do |
+| Is already compensating | Nothing more to do. The request is logged, marked `already compensating: nothing changed`, and `failure_reason` keeps the original cause |
 | Is finished | Refused: undoing a completed saga is a new saga |
 
 The first cancellation counts: its time and reason stay on the row (`cancel_requested_at`, `cancel_reason`), and nothing overwrites them. Who cancelled is in the history (`CANCEL_REQUESTED`). A cancellation that waited and takes effect later is logged as `CANCELLED`.

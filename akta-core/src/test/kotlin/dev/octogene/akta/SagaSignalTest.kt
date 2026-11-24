@@ -595,6 +595,27 @@ class SagaSignalTest {
     }
 
     @Test
+    fun `cancelling a saga already compensating changes nothing, and the history says so`() {
+        val definition = saga("REFUSED") {
+            step<String>("create-payment") {
+                execute { "P-1" }
+                compensate { throw java.io.IOException("refund service down") }    // keeps it compensating
+            }
+            step("confirm") { execute { throw StepRejected("seat taken") } }
+        }
+        val engine = engine(definition)
+        val id = engine.create(definition, "R-1")
+        assertEquals(SagaState.COMPENSATING, engine.run(id).state)
+
+        val after = runBlocking { engine.cancel(id, "customer left", "support", runFor = Duration.ZERO) }
+
+        assertEquals(SagaState.COMPENSATING, after.state)
+        assertNull(after.cancelRequestedAt)                                     // not cancelled: already failing
+        assertEquals("dev.octogene.akta.StepRejected: seat taken", after.failureReason)
+        assertEquals(listOf("customer left (already compensating: nothing changed)"), details(SagaEvents.CANCEL_REQUESTED))
+    }
+
+    @Test
     fun `a finished saga cannot be cancelled`() {
         val definition = reservation()
         val engine = engine(definition)

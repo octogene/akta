@@ -606,7 +606,8 @@ class SagaEngine(
     suspend fun cancel(id: Uuid, reason: String, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
         manual(id, actor, SagaEvents.CANCEL_REQUESTED, runFor) { r, now ->
             require(!r.state.isFinished) { "Saga $id is finished: undoing it is a new saga" }
-            if (r.state != SagaState.RUNNING) return@manual ManualChange(r, detail = reason)   // already compensating
+            // Already compensating, for another reason: nothing changes, and the history says so.
+            if (r.state != SagaState.RUNNING) return@manual ManualChange(r, detail = "$reason (already compensating: nothing changed)")
             // The first cancellation counts: a second one is only logged.
             val requested = if (r.cancelRequestedAt != null) r else r.copy(cancelRequestedAt = now, cancelReason = reason)
             ManualChange(cancelIfRequested(requested, now), detail = reason)
