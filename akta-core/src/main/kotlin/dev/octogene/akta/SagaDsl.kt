@@ -209,7 +209,9 @@ class SignalStepBuilder<I, S> @PublishedApi internal constructor(
 
     /**
      * Decides on a received value: return to accept it, throw [StepRejected] to fail the saga and
-     * compensate. Runs inside the engine's transaction: no external calls.
+     * compensate. Runs inside the engine's transaction, for a signal delivered or stored and for a value the
+     * timeout check found: no external calls. Anything else it throws is a bug: the transaction rolls back
+     * whole, and the saga stops (RECORD_FAILED) with the signal kept, until the bug is fixed and it is retried.
      */
     fun onSignal(block: SagaContext<I>.(signal: S) -> Unit) {
         acceptBlock = block

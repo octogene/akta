@@ -389,6 +389,119 @@ class SagaSignalTest {
         assertEquals(StepStatus.STUCK, runBlocking { engine.find(id)!! }.stepStatus)
     }
 
+    // ---- onSignal: inside a transaction, and a bug in it ------------------------------------------
+
+    private var onSignalBug = false
+    private val inTransaction = ThreadLocal.withInitial { false }
+    private val onSignalInTransaction = mutableListOf<Boolean>()
+
+    /** The reservation, whose onSignal notes whether it runs in a transaction, and throws while [onSignalBug]. */
+    private fun watchedReservation(checkAtTimeout: (suspend SagaContext<Unit>.() -> CheckResult<PaymentResult>)? = null) =
+        saga("RESERVATION") {
+            step<String>("create-payment") {
+                execute { "P-1" }
+                compensate { own -> released += own }
+            }
+            val paid = awaitSignal<PaymentResult>("await-payment", signal = "payment", timeout = 30.minutes) {
+                onSignal {
+                    onSignalInTransaction += inTransaction.get()
+                    if (onSignalBug) error("mapping bug")
+                    if (!it.succeeded) throw StepRejected("payment ${it.paymentId} failed")
+                }
+                checkAtTimeout?.let { check(it) }
+                logAs { it.paymentId }
+            }
+            step<String>("confirm") {
+                execute { calls += "confirm ${requireResult(paid).paymentId}"; "C-1" }
+            }
+        }
+
+    /** An engine whose transactions say they are open, for onSignal to see. */
+    private fun watchedEngine(definition: SagaDefinition<Unit>): SagaEngine {
+        val inner = InMemorySagaTransactions(repository)
+        val flagging = object : SagaTransactions {
+            override suspend fun <T> inTransaction(block: () -> T): T = inner.inTransaction {
+                inTransaction.set(true)
+                try { block() } finally { inTransaction.set(false) }
+            }
+        }
+        return SagaEngine(flagging, repository, listOf(definition), KotlinxJsonSagaSerializer(), SagaConfig(), clock)
+    }
+
+    @Test
+    fun `onSignal runs inside a transaction, for a signal and for a value its check found`() {
+        val definition = watchedReservation(checkAtTimeout = { CheckResult.Done(PaymentResult("P-1", succeeded = true)) })
+        val engine = watchedEngine(definition)
+        val delivered = engine.create(definition, "R-1")
+        engine.run(delivered)
+        engine.pay(delivered)
+        val checked = engine.create(definition, "R-2")
+        engine.run(checked)
+
+        engine.resumeAfter(31.minutes)                                          // R-2: the check finds it
+
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.find(checked)!! }.state)
+        assertEquals(listOf(true, true), onSignalInTransaction)
+    }
+
+    @Test
+    fun `a bug in onSignal keeps the signal and stops the saga, instead of failing the listener`() {
+        val definition = watchedReservation()
+        val engine = watchedEngine(definition)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+        onSignalBug = true
+
+        assertEquals(SignalResult.Stored(id), engine.pay(id))                   // the listener can commit its offset
+
+        val stuck = runBlocking { engine.find(id)!! }
+        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
+        assertTrue(stuck.lastError!!.startsWith("onSignal threw on signal 'payment'"), stuck.lastError)
+        assertEquals("stored: onSignal failed ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).single())
+
+        onSignalBug = false                                                     // fixed
+        val done = runBlocking { engine.retry(id, "operator") }                 // uses the signal kept
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals("confirm P-1", calls.last())
+    }
+
+    @Test
+    fun `a bug in onSignal on a signal stored earlier stops the saga, instead of failing every resume`() {
+        val definition = watchedReservation()
+        val engine = watchedEngine(definition)
+        val id = engine.create(definition, "R-1")
+        assertEquals(SignalResult.Stored(id), engine.pay(id))                   // faster than the request
+        onSignalBug = true
+
+        engine.run(id)
+        engine.resumeAfter(1.seconds)                                           // no failure reported
+
+        val stuck = runBlocking { engine.find(id)!! }
+        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
+        assertTrue(stuck.lastError!!.contains("The signal is kept"), stuck.lastError)
+        assertTrue(repository.log.none { it.event == SagaEvents.RESUME_FAILED })
+
+        onSignalBug = false
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.retry(id, "operator") }.state)
+    }
+
+    @Test
+    fun `a bug in onSignal on a value its check found is not taken for a failing lookup`() {
+        var checks = 0
+        val definition = watchedReservation(checkAtTimeout = { checks++; CheckResult.Done(PaymentResult("P-1", succeeded = true)) })
+        val engine = watchedEngine(definition)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+        onSignalBug = true
+
+        engine.resumeAfter(31.minutes)
+
+        val stuck = runBlocking { engine.find(id)!! }
+        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)               // not CHECK_FAILING
+        assertTrue(stuck.lastError!!.contains("onSignal failed"), stuck.lastError)
+        assertEquals(1, checks)                                                 // the lookup is not repeated
+    }
+
     // ---- Cancellation -------------------------------------------------------------------------
 
     @Test

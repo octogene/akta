@@ -13,7 +13,7 @@ val paid = awaitSignal<PaymentResult>("await-payment", signal = "payment", timeo
 ```
 
 - **`signal`** names the event, not the step. A name is used by one step of a saga, checked at startup.
-- **`onSignal`** runs inside the engine's transaction: it decides, it does not call anything. Throwing `StepRejected` makes the saga compensate.
+- **`onSignal`** runs inside the engine's transaction, whether the value comes from a signal or from the timeout check: it decides, it does not call anything. Throwing `StepRejected` makes the saga compensate. Anything else it throws is a bug: the transaction rolls back whole, then the signal is stored and the saga stops (`RECORD_FAILED`). `engine.signal` answers `Stored`, so a listener does not redeliver the event for ever. Once the bug is fixed, `retry` uses the signal kept.
 - **While it waits**, the saga is a row with status `WAITING` and `next_attempt_at` set to the timeout. No thread, connection or lock is held.
 
 ### Delivering a signal
