@@ -36,6 +36,7 @@ routing {
 |---|---|
 | `GET /stats?type=` | Counts and ages of the unfinished sagas: by state and step status, stuck ones by reason, the oldest unfinished, the oldest due. `type` may repeat; none means every type. |
 | `GET /stuck?type=&limit=&after=` | Stuck sagas, stuck longest first: `{"sagas": […], "next": "…"}`. Pass `next` as `after` for the following page; it is `null` on the last one. `limit` is 50 by default, at most 500. |
+| `GET /by-key?key=&limit=` | The sagas of a business key, newest first: the unfinished one if any, then the finished ones still kept. Where an operator starts from "why is this item stuck?". `limit` is 20 by default, at most 500. The key goes in the query, so a key holding a `/` needs no care: encode it as any query value. |
 | `GET /{id}` | One saga: its state and step, `lastError`, `failureReason`, `stuckReason`, the cancellation, and its dates. |
 | `GET /{id}/history` | Everything that happened to it, oldest first, with who did each manual action. |
 | `GET /trace/{traceId}?limit=` | What one request did to sagas, from its trace id. |

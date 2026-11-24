@@ -38,8 +38,8 @@ import kotlin.uuid.Uuid
  * refuses the action in the saga's current state (the message says why).
  */
 
-/** Largest page of stuck sagas, and largest trace history, one request may ask for. */
-const val SAGA_ADMIN_MAX_LIMIT = 500
+/** Largest page of stuck sagas, list of a key's sagas, or trace history, one request may ask for. */
+public const val SAGA_ADMIN_MAX_LIMIT: Int = 500
 
 private val json = Json {
     encodeDefaults = true
@@ -52,12 +52,14 @@ private val json = Json {
  *
  * - `GET /stats?type=` — counts and ages of the unfinished sagas, for all types or the given ones.
  * - `GET /stuck?type=&limit=&after=` — stuck sagas, stuck longest first; `after` is the `next` of the previous page.
+ * - `GET /by-key?key=&limit=` — the sagas of a business key, newest first: the unfinished one if any, then
+ *   the finished ones still kept. The key is a query parameter, so that one holding a `/` needs no care.
  * - `GET /trace/{traceId}?limit=` — what the request with this trace id did to sagas.
  * - `GET /{id}` — one saga (without its input).
  * - `GET /{id}/history` — everything that happened to it, oldest first.
  */
 @OptIn(ExperimentalUuidApi::class)
-fun Route.sagaAdminRead(engine: SagaEngine) {
+public fun Route.sagaAdminRead(engine: SagaEngine) {
     get("stats") {
         call.answer { engine.stats(call.types()).toView() }
     }
@@ -66,6 +68,12 @@ fun Route.sagaAdminRead(engine: SagaEngine) {
             val limit = call.limit(default = 50)
             val page = engine.findStuck(limit, call.types(), call.request.queryParameters["after"]?.let(::parseCursor))
             StuckPage(page.map { it.toView() }, next = page.takeIf { it.size == limit }?.last()?.let(::cursorOf))
+        }
+    }
+    get("by-key") {
+        call.answer {
+            val key = call.request.queryParameters["key"]?.takeIf { it.isNotBlank() } ?: throw BadRequest("key is required")
+            engine.findByKey(key, call.limit(default = 20)).map { it.toView() }
         }
     }
     get("trace/{traceId}") {
@@ -100,7 +108,7 @@ fun Route.sagaAdminRead(engine: SagaEngine) {
  * Each is the [SagaEngine] method of the same name: read its documentation before exposing it.
  */
 @OptIn(ExperimentalUuidApi::class)
-fun Route.sagaAdminActions(engine: SagaEngine, actor: (ApplicationCall) -> String?) {
+public fun Route.sagaAdminActions(engine: SagaEngine, actor: (ApplicationCall) -> String?) {
     post("{id}/retry") {
         call.action(actor) { id, who ->
             val body = call.body(RetryRequest())

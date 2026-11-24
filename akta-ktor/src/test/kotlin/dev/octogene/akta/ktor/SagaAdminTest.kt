@@ -148,6 +148,26 @@ class SagaAdminTest {
     }
 
     @Test
+    fun `the sagas of a business key come newest first, the unfinished one included`() = api {
+        down = false
+        val done = stuckStock("item/1")                                   // completed; a key holding a slash
+        down = true
+        val stuck = stuckStock("item/1")                                  // unfinished, holds the key now
+        stuckStock("item/2")
+
+        val response = client.get("/admin/sagas/by-key") { url.parameters.append("key", "item/1") }
+        val text = response.bodyAsText()
+        val sagas = response.read<List<SagaView>>()
+
+        assertEquals(listOf(stuck.toString(), done.toString()), sagas.map { it.id })
+        assertTrue("customer-42" !in text, text)                         // still no input
+        assertEquals(1, client.get("/admin/sagas/by-key?key=item%2F1&limit=1").read<List<SagaView>>().size)
+        assertEquals(emptyList(), client.get("/admin/sagas/by-key?key=unknown").read<List<SagaView>>())
+        assertEquals(HttpStatusCode.BadRequest, client.get("/admin/sagas/by-key").status)
+        assertEquals(HttpStatusCode.BadRequest, client.get("/admin/sagas/by-key?key=x&limit=0").status)
+    }
+
+    @Test
     fun `an unknown or malformed id answers 404 or 400`() = api {
         val unknown = Uuid.random()
         assertEquals("Saga $unknown not found", client.get("/admin/sagas/$unknown").read<ErrorView>(HttpStatusCode.NotFound).error)
