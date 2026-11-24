@@ -195,7 +195,8 @@ public interface SignalStep<I, S> : SagaStep<I, S> {
      * Decides on a received value: return to accept it, throw [StepRejected] to fail the saga and
      * compensate. Runs inside the engine's transaction, wherever the value comes from (a signal delivered or
      * stored, a value [check] found): no external calls. Anything else it throws is a bug: the saga stops
-     * (RECORD_FAILED) with the signal kept, until fixed and retried. Default: accept.
+     * (RECORD_FAILED) with the signal kept, until fixed and retried; so does a hook that throws when the
+     * signal ends the saga. Default: accept.
      */
     public fun accept(ctx: SagaContext<I>, value: S) {}
 

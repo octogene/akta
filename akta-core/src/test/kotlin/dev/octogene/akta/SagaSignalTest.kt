@@ -486,6 +486,109 @@ class SagaSignalTest {
     }
 
     @Test
+    fun `a bug in onSignal after its timeout check died stops the saga, instead of being claimed for ever`() {
+        lateinit var engine: SagaEngine
+        var dies = true
+        val definition = watchedReservation(checkAtTimeout = {
+            if (dies) {
+                engine.pay(sagaId)                                              // the event, during the lookup
+                throw OutOfMemoryError("the pod dies during the check")
+            }
+            CheckResult.NotDone
+        })
+        engine = watchedEngine(definition)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+        clock.advance(31.minutes)
+        assertFailsWith<OutOfMemoryError> { engine.run(id) }                    // left IN_PROGRESS, the signal stored
+        dies = false
+        onSignalBug = true
+
+        engine.resumeAfter(10.minutes)                                          // long after the lock and the settle delay
+
+        val stuck = runBlocking { engine.find(id)!! }
+        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
+        assertNull(stuck.lockedUntil)
+        assertTrue(stuck.lastError!!.contains("The signal is kept"), stuck.lastError)
+
+        onSignalBug = false
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.retry(id, "operator") }.state)
+    }
+
+    // ---- A hook that throws when a signal ends the saga -------------------------------------------
+
+    private var hookBug = true
+
+    /** A saga that a signal ends: completed when accepted, failed (nothing to undo) when rejected. */
+    private fun endedBySignal() = saga("APPROVAL") {
+        awaitSignal<PaymentResult>("await-payment", signal = "payment", timeout = 30.minutes) {
+            onSignal { if (!it.succeeded) throw StepRejected("payment ${it.paymentId} failed") }
+            logAs { it.paymentId }
+        }
+        onCompleted { if (hookBug) error("hook bug"); completed += key }
+        onFailed { if (hookBug) error("hook bug"); failed += key }
+    }
+
+    @Test
+    fun `a hook that throws on a delivered signal keeps the signal and stops the saga, instead of failing the listener`() {
+        val definition = endedBySignal()
+        val engine = engine(definition)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+
+        assertEquals(SignalResult.Stored(id), engine.pay(id))                   // the listener can commit its offset
+        assertEquals(SignalResult.Ignored(id), engine.pay(id))                  // a redelivery changes nothing
+
+        val stuck = runBlocking { engine.find(id)!! }
+        assertEquals(SagaState.RUNNING, stuck.state)
+        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
+        assertTrue(stuck.lastError!!.startsWith("onCompleted threw on signal 'payment'"), stuck.lastError)
+        assertEquals("stored: onCompleted failed ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).first())
+        assertEquals(emptyList(), completed)
+
+        hookBug = false                                                         // fixed
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.retry(id, "operator") }.state)
+        assertEquals(listOf("R-1"), completed)
+    }
+
+    @Test
+    fun `a hook that throws on a rejected signal keeps the signal and stops the saga`() {
+        val definition = endedBySignal()
+        val engine = engine(definition)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+
+        assertEquals(SignalResult.Stored(id), engine.pay(id, succeeded = false))
+
+        val stuck = runBlocking { engine.find(id)!! }
+        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
+        assertTrue(stuck.lastError!!.startsWith("onFailed threw on signal 'payment'"), stuck.lastError)
+
+        hookBug = false
+        val done = runBlocking { engine.retry(id, "operator") }                 // the signal kept is rejected again
+        assertEquals(SagaState.FAILED, done.state)
+        assertEquals(listOf("R-1"), failed)
+    }
+
+    @Test
+    fun `a hook that throws on a signal stored earlier stops the saga, instead of failing every resume`() {
+        val definition = endedBySignal()
+        val engine = engine(definition)
+        val id = engine.create(definition, "R-1")
+        assertEquals(SignalResult.Stored(id), engine.pay(id))                   // faster than the request
+
+        engine.resumeAfter(1.seconds)                                           // no failure reported
+
+        val stuck = runBlocking { engine.find(id)!! }
+        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
+        assertTrue(stuck.lastError!!.startsWith("onCompleted threw on signal 'payment'"), stuck.lastError)
+        assertTrue(repository.log.none { it.event == SagaEvents.RESUME_FAILED })
+
+        hookBug = false
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.retry(id, "operator") }.state)
+    }
+
+    @Test
     fun `a bug in onSignal on a value its check found is not taken for a failing lookup`() {
         var checks = 0
         val definition = watchedReservation(checkAtTimeout = { checks++; CheckResult.Done(PaymentResult("P-1", succeeded = true)) })

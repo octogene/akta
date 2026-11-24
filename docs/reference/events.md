@@ -39,7 +39,7 @@ Logged as `<action>:<outcome>`, on the step that ran.
 | Event | Meaning |
 |---|---|
 | `WAIT_STARTED` | A signal step started waiting. The detail gives the signal and the deadline |
-| `SIGNAL_RECEIVED` | A signal arrived. The detail says `delivered`, `stored`, `stored: onSignal failed` (the saga is stuck), `consumed (stored earlier)`, or `ignored` with why |
+| `SIGNAL_RECEIVED` | A signal arrived. The detail says `delivered`, `stored`, `stored: onSignal failed` (the saga is stuck; `onCompleted failed` or `onFailed failed` when the hook of a saga the signal ended threw), `consumed (stored earlier)`, or `ignored` with why |
 | `WAIT_TIMED_OUT` | The timeout passed without the signal: checked, or stuck |
 | `CANCEL_REQUESTED` | `cancel` was called. The detail gives the reason, followed by `(already compensating: nothing changed)` when the saga was already undoing its steps for another reason; the actor, who |
 | `CANCELLED` | A cancellation that waited took effect at the next claim (after a manual retry, for example) |
