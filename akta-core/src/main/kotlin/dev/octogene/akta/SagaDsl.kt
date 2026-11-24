@@ -120,7 +120,8 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
     /**
      * The step's service accepts an idempotency key, sent from `idempotencyKey`, and remembers it for
      * [keyRetention] (what the service documents; take its minimum). After an unknown outcome, the call is
-     * replayed with the same key instead of checked. Confirm the service's guarantees first (see the README).
+     * replayed with the same key instead of checked. Confirm the service's guarantees first: see
+     * "Before marking a step idempotent" in https://octogene.github.io/akta/use-cases/idempotent-services/
      */
     fun idempotent(keyRetention: Duration) {
         idempotency = Idempotency(keyRetention)
