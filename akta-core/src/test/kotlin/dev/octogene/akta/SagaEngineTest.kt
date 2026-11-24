@@ -722,6 +722,50 @@ class SagaEngineTest {
     }
 
     @Test
+    fun `an Error from the transactions while postponing does not end the batch`() {
+        val stock = FakeStep("stock", { throw StepNotSent("down") })
+        var allowed = Int.MAX_VALUE                                       // transactions left before the layer breaks
+        val inMemory = InMemorySagaTransactions(repository)
+        val transactions = object : SagaTransactions {
+            override suspend fun <T> inTransaction(block: () -> T): T {
+                if (allowed-- <= 0) throw AssertionError("transaction layer broken")   // an Error, not fatal
+                return inMemory.inTransaction(block)
+            }
+        }
+        val engine = newEngine(transactions, repository, listOf(definition("TEST", listOf(stock))))
+        val ids = listOf("item-1", "item-2").map { engine.start(it).id }
+        clock.advance(2.minutes)                                          // both due
+
+        allowed = 1                                                       // findDue works; every run, and postpone, fail
+        val result = runBlocking { engine.resumeDue() }                   // returns, does not throw
+
+        assertEquals(2, result.sagas)
+        assertEquals(ids.toSet(), result.failures.keys)
+        assertTrue(result.failures.values.all { it is AssertionError })
+    }
+
+    @Test
+    fun `the trace of the caller is logged with a resume failure`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        val booking = FakeStep("booking", { throw StepNotSent("down") })
+        val engine = newEngine(
+            InMemorySagaTransactions(repository), repository,
+            listOf(definition("TEST", listOf(stock, booking))), config = SagaConfig(maxAttempts = 3), traceId = { "trace-job" },
+        )
+        val saga = engine.start()
+        // A pod that does not know the type: running the saga on after the action fails, and is logged.
+        val other = newEngine(
+            InMemorySagaTransactions(repository), repository, listOf(definition("OTHER", listOf(FakeStep("x", { "X" })))),
+            traceId = { "trace-operator" },
+        )
+
+        runBlocking { other.cancel(saga.id, "customer left", "support") }
+
+        val failure = repository.log.last { it.event == SagaEvents.RESUME_FAILED }
+        assertEquals("trace-operator", failure.traceId)
+    }
+
+    @Test
     fun `a manual action with runFor zero commits and leaves the saga to resumeDue`() {
         var down = true
         val stock = FakeStep("stock", { if (down) throw StepNotSent("down") else "STK-1" })

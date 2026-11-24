@@ -183,6 +183,7 @@ class SagaEngine(
     ): ResumeResult {
         require(concurrency >= 1) { "concurrency must be at least 1" }
         // Only the types this engine knows: during a rolling deploy, old pods leave new types to new pods.
+        val trace = traceId()      // here, on the caller's coroutine, for the failures logged below
         val ids = tx { repository.findDue(currentTime(), limit, definitions.keys) }
         val permits = Semaphore(concurrency)
         val failures = coroutineScope {
@@ -196,7 +197,7 @@ class SagaEngine(
                             // Any non-fatal error, even an Error such as a TODO() left in a step, stays with
                             // its saga: escaping, it would cancel the other sagas of the batch mid-call.
                             if (e is CancellationException || e.isFatal()) throw e
-                            postpone(id, e)
+                            postpone(id, e, trace)
                             id to e
                         }
                     }
@@ -211,7 +212,7 @@ class SagaEngine(
      * so that sagas failing on every attempt cannot fill each batch and starve the others.
      * Best effort: if this fails too, the error is already reported by [resumeDue].
      */
-    private suspend fun postpone(id: Uuid, error: Throwable) {
+    private suspend fun postpone(id: Uuid, error: Throwable, trace: String?) {
         try {
             tx {
                 val r = lock(id, skipLocked = true) ?: return@tx
@@ -221,12 +222,12 @@ class SagaEngine(
                 // lastError keeps the step's own error: the resume failure goes to the log only.
                 val postponed = r.copy(nextAttemptAt = maxOf(r.nextAttemptAt, now + config.resumeFailureDelay))
                 save(postponed, now)
-                log(r.id, r.stepIndex, null, SagaEvents.RESUME_FAILED, error.toString(), now, trace = null)
+                log(r.id, r.stepIndex, null, SagaEvents.RESUME_FAILED, error.toString(), now, trace)
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            // The database is probably down: nothing more to do here.
+        } catch (e: Throwable) {
+            // The database is probably down: nothing more to do here. Any non-fatal error, as in resumeDue:
+            // escaping, it would end the batch (or fail a manual action that is already committed).
+            if (e is CancellationException || e.isFatal()) throw e
         }
     }
 
@@ -650,11 +651,11 @@ class SagaEngine(
             run(id, deadline = now + runFor)
         } catch (e: Throwable) {
             if (e is CancellationException || e.isFatal()) throw e
-            postpone(id, e)
+            postpone(id, e, trace)
             try {
                 tx { repository.find(id) } ?: committed
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
+            } catch (e: Throwable) {
+                if (e is CancellationException || e.isFatal()) throw e
                 committed
             }
         }
