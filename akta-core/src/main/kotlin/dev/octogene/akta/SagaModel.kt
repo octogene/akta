@@ -45,7 +45,11 @@ enum class StuckReason {
     TOO_MANY_ATTEMPTS,
     /** The call was made, but its output could not be encoded or is too large. `markDone` with the output, or `abort`. */
     OUTPUT_UNSTORABLE,
-    /** The outcome could not be recorded (a hook threw…). Fix it, then `markDone(id, null)`: the output is saved. */
+    /**
+     * The outcome could not be recorded (a hook threw, a constraint failed). What it established is kept, and
+     * lastError says what follows: after a success, `markDone(id, null)` (the output is saved); after an undo,
+     * `markCompensated`; after a refusal, `abort(currentStepApplied = false)` (markDone is refused).
+     */
     RECORD_FAILED,
     /** A signal step's timeout passed, and it has no check. Deliver the signal and `retry`, or `abort`. */
     NO_SIGNAL,
@@ -98,7 +102,8 @@ data class SagaRecord(
      * Why the saga compensates, then ended FAILED: the refusal of a step or signal (`StepRejected`), a signal
      * that never came, `Cancelled: <cancelReason>`, or `Aborted by <actor>`. Set when compensation starts and
      * never changed, unlike [lastError], which a compensation that fails and is retried overwrites. Null while
-     * the saga runs forward, and when it completes.
+     * the saga runs forward, and when it completes; except on a running saga stuck with `RECORD_FAILED` after
+     * a refusal, which keeps the refusal here until an operator aborts (it stays the reason) or retries.
      */
     val failureReason: String? = null,
     /** Why the saga is STUCK; null when it is not. */

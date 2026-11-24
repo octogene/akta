@@ -316,6 +316,8 @@ class SagaEngine(
                 r.copy(
                     stepStatus = if (replay) StepStatus.UNKNOWN else StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now, lastError = null,
                     stuckReason = null, stuckAt = null,
+                    // Forward, a refusal kept by RECORD_FAILED is dropped: the step is called again.
+                    failureReason = if (r.state == SagaState.RUNNING) null else r.failureReason,
                     keySince = if (newKey) null else r.keySince, keyGeneration = generation,
                 ),
                 detail = if (newKey) "newKey: generation $generation" else null,
@@ -331,6 +333,11 @@ class SagaEngine(
     suspend fun markDone(id: Uuid, output: String?, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
         manual(id, actor, SagaEvents.MANUAL_DONE, runFor) { r, now ->
             require(r.state == SagaState.RUNNING && r.stepStatus == StepStatus.STUCK) { "Saga $id has no stuck forward step" }
+            // Set on a saga still running only when its step's refusal could not be recorded (RECORD_FAILED).
+            require(r.failureReason == null) {
+                "The stuck step of saga $id was refused (${r.failureReason}): it cannot be marked done. " +
+                    "abort(currentStepApplied = false) gives up; retry calls it again"
+            }
             val def = definition(r.type)
             val step = def.stepAt(r.stepIndex)
             val (encoded, decoded) = manualOutput(r, step, output)
@@ -990,9 +997,16 @@ class SagaEngine(
 
     /**
      * Fallback transaction, after [record] was rolled back: the saga becomes STUCK on the step that
-     * ran, for a human to resolve with [markDone], [retry] or [abort] once the cause is fixed. The
-     * outcome is described in lastError and the log. A successful call's output is saved with the
-     * step's result, never in lastError (it may hold personal data): `markDone(id, null)` continues with it.
+     * ran, for a human to resolve once the cause is fixed (a hook that throws, a constraint). What the
+     * outcome established is kept, and lastError says which action follows from it:
+     *
+     * - Done: the output is saved with the step's result (never in lastError: it may hold personal
+     *   data), and `markDone(id, null)` continues with it.
+     * - Compensated: the step is marked undone, and `markCompensated` goes on, without undoing it again.
+     * - Rejected: nothing was applied. The refusal is kept as failureReason, which makes markDone refuse
+     *   the saga (it would turn a refusal into a success) and abort keep it as the reason.
+     * - Any other outcome (only a database failure can stop those, no hook runs): look in the external
+     *   system, then markDone, retry or abort.
      */
     private fun recordFailed(work: Work, outcome: Outcome, error: Throwable): SagaRecord? {
         val current = lock(work.saga.id) ?: return null
@@ -1001,10 +1015,21 @@ class SagaEngine(
             log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, outcome), now)
             return current
         }
-        if (outcome is Outcome.Done) repository.saveResult(current.id, current.stepIndex, work.step.name, outcome.output, now)
-        val kept = if (outcome is Outcome.Done) ". The output is saved: markDone(id, null) continues with it" else ""
-        val blocked = stuck(current, StuckReason.RECORD_FAILED, "Could not record ${describe(work, outcome)}: $error$kept", now)
-            .copy(lockedUntil = null)
+        val then = when (outcome) {
+            is Outcome.Done -> {
+                repository.saveResult(current.id, current.stepIndex, work.step.name, outcome.output, now)
+                "The output is saved: markDone(id, null) continues with it"
+            }
+            Outcome.Compensated -> {
+                repository.markCompensated(current.id, current.stepIndex, now)
+                "The undo was done: markCompensated(id) goes on with the previous steps"
+            }
+            is Outcome.Rejected -> "The step was refused, nothing applied: abort(id, currentStepApplied = false) gives up, as the refusal asked"
+            else -> "Look in the external system for what the call did, then markDone, retry or abort"
+        }
+        val refusal = (outcome as? Outcome.Rejected)?.error
+        val blocked = stuck(current, StuckReason.RECORD_FAILED, "Could not record ${describe(work, outcome)}: $error. $then", now)
+            .copy(lockedUntil = null, failureReason = refusal ?: current.failureReason)
         save(blocked, now)
         log(work, SagaEvents.RECORD_FAILED, blocked.lastError, now)
         return blocked
@@ -1045,7 +1070,8 @@ class SagaEngine(
      */
     private fun startCompensation(r: SagaRecord, index: Int, reason: String, now: Instant): SagaRecord {
         check(r.state == SagaState.RUNNING) { "Saga ${r.id} is already ${r.state}" }
-        return compensateFrom(r.copy(failureReason = reason), index, now)
+        // A refusal kept by RECORD_FAILED stays the reason, when an operator then aborts.
+        return compensateFrom(r.copy(failureReason = r.failureReason ?: reason), index, now)
     }
 
     private fun cancelled(r: SagaRecord) = "Cancelled: ${r.cancelReason}"

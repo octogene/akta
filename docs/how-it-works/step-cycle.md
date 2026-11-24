@@ -56,7 +56,10 @@ When the saga ends, `onCompleted` or `onFailed` runs in this same transaction, s
 If the record transaction rolls back (a hook that throws, a constraint, the database), the call's outcome must not be lost:
 
 1. The engine records the outcome again, alone, without claiming the next step.
-2. If that fails too, the saga becomes `STUCK` (`RECORD_FAILED`) on the step that ran. A successful call's output is saved with the step's result: once the cause is fixed, `markDone(id, null, actor)` continues with it.
+2. If that fails too, the saga becomes `STUCK` (`RECORD_FAILED`) on the step that ran. What the outcome established is kept, and `last_error` says what follows, once the cause is fixed:
+    - **a success:** its output is saved with the step's result, and `markDone(id, null, actor)` continues with it;
+    - **an undo:** the step is marked undone, and `markCompensated(id, actor)` goes on without undoing it again;
+    - **a refusal:** nothing was applied. The refusal is kept as the saga's `failure_reason`: `abort(id, actor, currentStepApplied = false)` gives up with it as the reason, and `markDone` is refused, since it would turn the refusal into a success.
 
 ## The time budget
 

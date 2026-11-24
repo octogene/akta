@@ -570,6 +570,74 @@ class SagaEngineTest {
         assertEquals(1, stock.executions)
     }
 
+    /** An engine whose onFailed throws while [hookFails] says so: a bug, then fixed. */
+    private var hookFails = true
+    private fun engineWithFailingOnFailed(vararg steps: SagaStep<Unit, *>) = newEngine(
+        InMemorySagaTransactions(repository), repository,
+        listOf(definition("TEST", steps.toList(), onFailed = {
+            check(!hookFails) { "items table locked" }
+            failed += key
+        })),
+        clock = clock,
+    )
+
+    @Test
+    fun `a refusal that cannot be recorded keeps the refusal, and markDone cannot turn it into a success`() {
+        val stock = FakeStep("stock", { throw StepRejected("unknown EPC") })   // String?: markDone(null) would pass
+        val engine = engineWithFailingOnFailed(stock)
+        val saga = runBlocking { engine.create("TEST", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
+
+        assertEquals(StepStatus.STUCK, saga.stepStatus)
+        assertEquals(StuckReason.RECORD_FAILED, saga.stuckReason)
+        assertEquals(SagaState.RUNNING, saga.state)                       // FAILED was rolled back with the hook
+        assertEquals("dev.octogene.akta.StepRejected: unknown EPC", saga.failureReason)
+        assertTrue(saga.lastError!!.contains("abort(id, currentStepApplied = false)"), saga.lastError)
+        val refused = assertFailsWith<IllegalArgumentException> { runBlocking { engine.markDone(saga.id, null, "alice") } }
+        assertTrue(refused.message!!.contains("was refused"), refused.message)
+
+        hookFails = false                                                 // the bug is fixed
+        val after = runBlocking { engine.abort(saga.id, "alice", currentStepApplied = false) }
+        assertEquals(SagaState.FAILED, after.state)
+        assertEquals("dev.octogene.akta.StepRejected: unknown EPC", after.failureReason)   // not "Aborted by alice"
+        assertEquals(listOf("item-1"), failed)
+        assertEquals(1, stock.executions)
+    }
+
+    @Test
+    fun `retry after a refusal that cannot be recorded calls the step again, dropping the refusal`() {
+        val stock = FakeStep("stock", { throw StepRejected("no stock yet") }, { "STK-1" })
+        val engine = engineWithFailingOnFailed(stock)
+        val saga = runBlocking { engine.create("TEST", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
+        assertEquals(StuckReason.RECORD_FAILED, saga.stuckReason)
+
+        val after = runBlocking { engine.retry(saga.id, "alice") }       // accepted this time
+
+        assertEquals(SagaState.COMPLETED, after.state)
+        assertNull(after.failureReason)
+        assertEquals(2, stock.executions)
+    }
+
+    @Test
+    fun `an undo that cannot be recorded is kept, and markCompensated goes on without undoing it again`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        val booking = FakeStep("booking", { throw StepRejected("no slot") })
+        val engine = engineWithFailingOnFailed(stock, booking)
+        val saga = runBlocking { engine.create("TEST", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
+
+        assertEquals(StuckReason.RECORD_FAILED, saga.stuckReason)
+        assertEquals(SagaState.COMPENSATING, saga.state)
+        assertEquals(1, stock.compensations)
+        assertEquals(emptyMap(), results(saga.id))                        // the undo is recorded on the result
+        assertTrue(saga.lastError!!.contains("markCompensated"), saga.lastError)
+
+        hookFails = false
+        val after = runBlocking { engine.markCompensated(saga.id, "alice") }
+        assertEquals(SagaState.FAILED, after.state)
+        assertEquals("dev.octogene.akta.StepRejected: no slot", after.failureReason)
+        assertEquals(1, stock.compensations)                              // not undone a second time
+        assertEquals(listOf("item-1"), failed)
+    }
+
     /**
      * Transactions after the first of which the clock jumps by [pause], as a long GC pause between a claim and
      * its call would, and [meanwhile] runs: what another pod does during the pause.
