@@ -179,6 +179,8 @@ object SagaEvents {
      * before its lock expires. It is released as it was, due at once; no attempt is used.
      */
     const val NOT_CALLED = "NOT_CALLED"
+    /** Compensation passed over a step with nothing to undo ([SagaStep.compensates] false): no call made. */
+    const val NOTHING_TO_UNDO = "NOTHING_TO_UNDO"
     /** [SagaEngine.cancel] was called; the detail gives the reason. */
     const val CANCEL_REQUESTED = "CANCEL_REQUESTED"
     /**

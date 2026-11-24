@@ -112,7 +112,7 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
     private val outputType: KType?,
 ) {
     private var executeBlock: (suspend SagaContext<I>.() -> O)? = null
-    private var compensateBlock: suspend SagaContext<I>.(own: O?) -> Unit = {}
+    private var compensateBlock: (suspend SagaContext<I>.(own: O?) -> Unit)? = null
     private var checkBlock: suspend SagaContext<I>.() -> CheckResult<O> = { CheckResult.CannotTell }
     private var describeBlock: ((O) -> String?)? = null
     private var idempotency: Idempotency? = null
@@ -186,7 +186,8 @@ class StepBuilder<I, O> @PublishedApi internal constructor(
             override val outputType = type
             override val idempotency = stepIdempotency
             override suspend fun execute(ctx: SagaContext<I>): O = ctx.executeBlock()
-            override suspend fun compensate(ctx: SagaContext<I>, own: O?) = ctx.compensateBlock(own)
+            override val compensates = compensateBlock != null
+            override suspend fun compensate(ctx: SagaContext<I>, own: O?) { compensateBlock?.invoke(ctx, own) }
             override suspend fun check(ctx: SagaContext<I>): CheckResult<O> = ctx.checkBlock()
             override fun describe(output: O): String? = describeBlock(output)
             override fun toString() = "SagaStep($stepName)"

@@ -110,6 +110,31 @@ class SagaDslTest {
     }
 
     @Test
+    fun `compensation passes over a step with nothing to undo, without calling it`() {
+        val undone = mutableListOf<String?>()
+        val failed = mutableListOf<String>()
+        val definition = saga("ITEM_SETUP") {
+            step("notify") { execute { } }                                    // no compensate: nothing to undo
+            step<String>("hold") {
+                execute { "H-1" }
+                compensate { own -> undone += own }
+            }
+            step("book") { execute { throw StepRejected("no slot") } }
+            onFailed { failed += key }
+        }
+        assertEquals(listOf(false, true, false), definition.steps.map { it.compensates })
+
+        val saga = definition.runFor("item-1")
+
+        assertEquals(SagaState.FAILED, saga.state)
+        assertEquals(listOf<String?>("H-1"), undone)
+        assertEquals(listOf("item-1"), failed)                               // reached FAILED through the skip
+        assertEquals(emptyMap(), repository.results(saga.id))                // every result marked compensated
+        val undo = repository.log.filter { it.event.startsWith("COMPENSATE") || it.event == SagaEvents.NOTHING_TO_UNDO }
+        assertEquals(listOf("COMPENSATE:Compensated" to "hold", SagaEvents.NOTHING_TO_UNDO to "notify"), undo.map { it.event to it.stepName })
+    }
+
+    @Test
     fun `compensation receives the step's own output`() {
         val released = mutableListOf<Hold?>()
         val failed = mutableListOf<String>()

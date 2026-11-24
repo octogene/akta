@@ -697,6 +697,16 @@ class SagaEngine(
             return claimLocked(cancelled, trace)
         }
         val step = def.stepAt(r.stepIndex)
+        // A step with nothing to undo: marked undone at once, no call, and on to the previous one, all in
+        // this transaction (usually the one that recorded the refusal or the previous undo).
+        if (r.state == SagaState.COMPENSATING && !step.compensates) {
+            repository.markCompensated(r.id, r.stepIndex, now)
+            val undone = compensateFrom(r, r.stepIndex - 1, now)
+            save(undone, now)
+            log(r.id, r.stepIndex, step.name, SagaEvents.NOTHING_TO_UNDO, null, now, trace)
+            finishIfNeeded(r, undone)
+            return claimLocked(undone, trace)
+        }
         val signalStep = (step as? SignalStep<*, *>)?.takeIf { r.state == SagaState.RUNNING }
         // A signal step's timeout passed without its signal, and nothing will check: stuck, no data needed.
         if (signalStep != null && r.stepStatus == StepStatus.WAITING && !signalStep.checksOnTimeout) {

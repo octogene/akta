@@ -40,6 +40,10 @@ Read it to tell a caller why a saga failed. `last_error` is the latest problem o
 
 Its own step's output, as stored when the step completed: `compensate { own -> … }`. `own` is `null` when the step stored none, so write the undo to cope with it. When an operator aborts a step that is stuck but was applied (`abort(currentStepApplied = true)`), they give the output the compensation should receive.
 
+## Steps with nothing to undo
+
+A step declared without `compensate { … }`, and a signal step, which makes no call, have nothing to undo. Compensation passes over them at once: no call, no transaction of their own, one `NOTHING_TO_UNDO` entry in the history. A step written by hand says so with `compensates = false`; by default it is called.
+
 ## Undoing must be safe to repeat
 
 A compensation runs again:

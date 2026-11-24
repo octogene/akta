@@ -156,6 +156,13 @@ interface SagaStep<I, O> {
      */
     fun describe(output: O): String? = null
 
+    /**
+     * Whether the step has anything to undo. False: compensation passes over it without calling
+     * [compensate], in the same transaction (logged as NOTHING_TO_UNDO). Default: true. The DSL sets it
+     * from whether `compensate { … }` was declared.
+     */
+    val compensates: Boolean get() = true
+
     /** A handle to read this step's output from the steps after it. */
     val ref: StepRef<O> get() = StepRef(name)
 }
@@ -186,6 +193,9 @@ interface SignalStep<I, S> : SagaStep<I, S> {
      * compensate. Runs inside the engine's transaction: no external calls. Default: accept.
      */
     fun accept(ctx: SagaContext<I>, value: S) {}
+
+    /** A signal step makes no call, so it has nothing to undo. Override with [compensate] if yours has. */
+    override val compensates: Boolean get() = false
 
     /** A signal step makes no call. */
     override suspend fun execute(ctx: SagaContext<I>): S =

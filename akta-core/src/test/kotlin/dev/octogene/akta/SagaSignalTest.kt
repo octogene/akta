@@ -133,6 +133,29 @@ class SagaSignalTest {
     }
 
     @Test
+    fun `compensation passes over a signal step, which made no call`() {
+        val definition = saga("RESERVATION") {
+            step<String>("create-payment") {
+                execute { "P-1" }
+                compensate { own -> released += own }
+            }
+            awaitSignal<PaymentResult>("await-payment", signal = "payment", timeout = 30.minutes)
+            step("confirm") { execute { throw StepRejected("reservation expired") } }
+        }
+        val engine = engine(definition)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+
+        engine.pay(id)
+        val done = engine.run(id)
+
+        assertEquals(SagaState.FAILED, done.state)
+        assertEquals(listOf<String?>("P-1"), released)
+        assertEquals(listOf("await-payment"), repository.log.filter { it.event == SagaEvents.NOTHING_TO_UNDO }.map { it.stepName })
+        assertTrue(repository.log.none { it.event.startsWith("COMPENSATE") && it.stepName == "await-payment" })
+    }
+
+    @Test
     fun `a signal for a name no step waits for, or of another type, is refused`() {
         val definition = reservation()
         val engine = engine(definition)
