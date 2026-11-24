@@ -227,12 +227,12 @@ public class SagaDefinition<I>(
     public val steps: List<SagaStep<I, *>>,
     /**
      * Runs INSIDE the transaction that completes the saga. Must not call external systems.
-     * The saga's own row is written as the transaction ends: read the saga from the context, not the saga table.
+     * The saga's row already reads COMPLETED or FAILED: the hook may start the next saga for the same key.
      */
     public val onCompleted: SagaContext<I>.() -> Unit = {},
     /**
      * Runs INSIDE the transaction that ends the saga after compensation. Must not call external systems.
-     * The saga's own row is written as the transaction ends: read the saga from the context, not the saga table.
+     * The saga's row already reads COMPLETED or FAILED: the hook may start the next saga for the same key.
      */
     public val onFailed: SagaContext<I>.() -> Unit = {},
 ) {

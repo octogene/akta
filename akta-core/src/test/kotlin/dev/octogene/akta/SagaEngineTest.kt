@@ -652,6 +652,28 @@ class SagaEngineTest {
     }
 
     @Test
+    fun `a hook can start the next saga for the same key`() {
+        lateinit var engine: SagaEngine
+        val next = definition("NEXT", listOf(FakeStep("audit", { throw StepNotSent("later") })))
+        val completing = definition("COMPLETING", listOf(FakeStep("stock", { "STK-1" })),
+            onCompleted = { engine.create(next, key) })
+        val failing = definition("FAILING", listOf(FakeStep("stock", { throw StepRejected("no stock") })),
+            onFailed = { engine.create(next, key) })
+        engine = newEngine(InMemorySagaTransactions(repository), repository, listOf(next, completing, failing))
+
+        val done = runBlocking { engine.create("COMPLETING", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
+        val refused = runBlocking { engine.create("FAILING", "item-2").let { engine.run(it, clock.now + 10.seconds) } }
+
+        assertEquals(SagaState.COMPLETED, done.state)                     // not STUCK on its own key
+        assertEquals(SagaState.FAILED, refused.state)
+        for (key in listOf("item-1", "item-2")) {
+            val sagas = runBlocking { engine.findByKey(key) }
+            assertEquals(listOf("NEXT", if (key == "item-1") "COMPLETING" else "FAILING"), sagas.map { it.type })
+            assertEquals(SagaState.RUNNING, sagas.first().state)
+        }
+    }
+
+    @Test
     fun `a throwing onCompleted makes the saga stuck, keeping the output, instead of looping`() {
         var hookFails = true
         val stock = FakeStep("stock", { "STK-1" })

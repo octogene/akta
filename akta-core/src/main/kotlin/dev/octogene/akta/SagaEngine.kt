@@ -1293,6 +1293,11 @@ public class SagaEngine(
     /** Business effects of the end of the saga, in the same transaction. */
     private fun finishIfNeeded(before: SagaRecord, after: SagaRecord) {
         if (before.state == after.state || !after.state.isFinished) return
+        // Written before the hook, not when the transaction ends: the hook may read the saga table, or create
+        // the next saga for the same key, which the unique index on unfinished sagas would refuse while this
+        // row still read RUNNING or COMPENSATING. A finished saga is not saved again in this transaction (a
+        // claim returns at once), so this adds no UPDATE.
+        txEvents.get()?.let(::writeUnsaved)
         val def = definition(after.type)
         val ctx = context(after, def)
         if (after.state == SagaState.COMPLETED) def.onCompleted(ctx) else def.onFailed(ctx)
@@ -1376,6 +1381,12 @@ public class SagaEngine(
      */
     private val txEvents = ThreadLocal<PendingEvents?>()
 
+    /** Writes the sagas the transaction changed and has not written yet, once each. */
+    private fun writeUnsaved(pending: PendingEvents) {
+        for ((record, at) in pending.unsaved.values) repository.save(record, at)
+        pending.unsaved.clear()
+    }
+
     /** One transaction; its events go to the listeners once it has committed. A retried attempt starts afresh. */
     private suspend fun <T> tx(block: () -> T): T {
         var committed: PendingEvents? = null
@@ -1388,7 +1399,7 @@ public class SagaEngine(
                 block().also {
                     // Each saga the block changed, written once: a step recorded and the next one claimed in the
                     // same transaction is one UPDATE, not two (each is a new row version, a dead one to vacuum).
-                    for ((record, at) in pending.unsaved.values) repository.save(record, at)
+                    writeUnsaved(pending)
                 }
             } finally {
                 // remove(), not set(null): pooled threads are left exactly as they were found.

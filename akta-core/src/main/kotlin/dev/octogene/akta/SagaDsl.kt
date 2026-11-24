@@ -92,12 +92,18 @@ public class SagaBuilder<I> @PublishedApi internal constructor(
         return StepRef(name)
     }
 
-    /** Runs INSIDE the transaction that completes the saga. No external calls; the saga's row is written after it. */
+    /**
+     * Runs INSIDE the transaction that completes the saga. No external calls. The saga's row already reads
+     * COMPLETED: the hook may start the next saga for the same key.
+     */
     public fun onCompleted(block: SagaContext<I>.() -> Unit) {
         onCompleted = block
     }
 
-    /** Runs INSIDE the transaction that ends the saga after compensation. No external calls; the saga's row is written after it. */
+    /**
+     * Runs INSIDE the transaction that ends the saga after compensation. No external calls. The saga's row
+     * already reads FAILED: the hook may start the next saga for the same key.
+     */
     public fun onFailed(block: SagaContext<I>.() -> Unit) {
         onFailed = block
     }

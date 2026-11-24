@@ -158,6 +158,24 @@ class ExposedSagaRepositoryIT {
     }
 
     @Test
+    fun `onCompleted can start the next saga for the same key, past the unique index`() {
+        lateinit var engine: SagaEngine
+        val next = saga("NEXT") { step("audit") { execute { throw StepNotSent("later") } } }
+        val first = saga("FIRST") {
+            step<String>("stock") { execute { "STK-1" } }
+            onCompleted { engine.create(next, key) }                     // the row must already read COMPLETED
+        }
+        engine = SagaEngine(ExposedSagaTransactions(database), repository, listOf(first, next), serializer)
+        val tx = ExposedSagaTransactions(database)
+
+        val done = runBlocking { engine.run(tx.inTransaction { engine.create(first, "item-1") }, Clock.System.now() + 10.seconds) }
+
+        assertEquals(SagaState.COMPLETED, done.state)
+        val sagas = runBlocking { tx.inTransaction { repository.findByKey("item-1", 10) } }
+        assertEquals(listOf("NEXT" to SagaState.RUNNING, "FIRST" to SagaState.COMPLETED), sagas.map { it.type to it.state })
+    }
+
+    @Test
     fun `a duplicate saga leaves the caller's transaction usable`() {
         val engine = engine("stock" to { throw StepNotSent("down") })
         engine.start("item-5")
