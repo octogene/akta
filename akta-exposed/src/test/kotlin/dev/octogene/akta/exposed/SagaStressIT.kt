@@ -582,6 +582,9 @@ class SagaStressIT {
                     else -> provider.lookup(key).let { it to it?.let { e -> Json.encodeToString(e) } }
                 }
                 val action = when {
+                    // An undo's key may be forgotten: effect gone → undone by hand; still there → a fresh key.
+                    state == SagaState.COMPENSATING && saga.stuckReason == StuckReason.KEY_EXPIRED ->
+                        if (truth == null) "markCompensated" else "retry(newKey)"
                     // A compensation stuck while its effect is already gone (removed, then the undo failed): done by hand.
                     state == SagaState.COMPENSATING -> if (truth == null && dice.chance(0.6)) "markCompensated" else "retry"
                     truth is PaymentEvent && !truth.succeeded -> "abort"   // declined: the saga gives up
