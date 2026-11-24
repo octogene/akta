@@ -12,6 +12,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlin.time.Clock
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -272,6 +273,43 @@ class SagaIdempotencyTest {
         assertEquals("$id/create-payment/execute/1", keys.last())
         assertEquals(StepStatus.UNKNOWN, retried.stepStatus)
         assertEquals("newKey: generation 1", repository.log.last { it.event == SagaEvents.MANUAL_RETRY }.detail)
+    }
+
+    @Test
+    fun `an undo is not sent again with a key its service may have forgotten`() {
+        var undoFails = true
+        val definition = saga("PAYMENT") {
+            step<String>("create-payment") {
+                idempotent(24.hours)
+                execute { "P-1" }
+                compensate { own ->
+                    keys += idempotencyKey                                      // the refund relies on its key
+                    if (undoFails) throw IOException("refund service down")
+                    undone += own
+                }
+            }
+            step("confirm") { execute { throw StepRejected("seat taken") } }
+        }
+        val engine = engine(definition, SagaConfig(maxAttempts = 2))
+        val id = engine.create(definition, "R-1")
+        engine.run(id)                                                          // refused: the undo fails
+        engine.resumeAfter(1.minutes)                                           // fails again: stuck
+        assertEquals(StuckReason.TOO_MANY_ATTEMPTS, engine.stored(id).stuckReason)
+
+        clock.advance(2.days)                                                   // the operator comes back late
+        undoFails = false
+        val expired = runBlocking { engine.retry(id, "operator") }
+
+        assertEquals(StuckReason.KEY_EXPIRED, expired.stuckReason)              // not sent with a forgotten key
+        assertTrue(expired.lastError!!.contains("undo"), expired.lastError)
+        assertEquals(2, keys.size)
+        assertFailsWith<IllegalArgumentException> { runBlocking { engine.retry(id, "operator") } }
+
+        // Looked in the provider: not refunded. A fresh key.
+        val done = runBlocking { engine.retry(id, "operator", newKey = true) }
+        assertEquals(SagaState.FAILED, done.state)
+        assertEquals(listOf<String?>("P-1"), undone)
+        assertEquals(listOf("$id/create-payment/compensate", "$id/create-payment/compensate", "$id/create-payment/compensate/1"), keys)
     }
 
     @Test

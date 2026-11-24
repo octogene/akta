@@ -748,14 +748,19 @@ class SagaEngine(
         }
         var keySince = r.keySince
         val replay = idempotency != null && keySince != null
-        if (idempotency != null) {
+        // The key's window holds for the undo too: an idempotent step's compensation may rely on its key
+        // (`/compensate`) to be safe to repeat, so an expired key is not sent again either. Only forward does
+        // the key also replace the check.
+        val keyWindow = step.idempotency
+        if (keyWindow != null) {
             val since = keySince ?: now
             // The whole call must end while the service still knows the key: past that, a replay could duplicate.
-            if (now + config.callLock >= since + idempotency.keyRetention) {
+            if (now + config.callLock >= since + keyWindow.keyRetention) {
+                val call = if (action == Action.COMPENSATE) "undo" else "call"
                 val expired = stuck(
                     r, StuckReason.KEY_EXPIRED,
-                    "The idempotency key of step '${step.name}', first used at $since, may be forgotten by its " +
-                        "service (kept ${idempotency.keyRetention}): a replay could duplicate",
+                    "The idempotency key of the $call of step '${step.name}', first used at $since, may be forgotten " +
+                        "by its service (kept ${keyWindow.keyRetention}): sending it again could duplicate the $call",
                     now,
                 )
                 save(expired, now)

@@ -30,6 +30,7 @@ The engine derives it from what never changes during a saga, so every pod comput
 
 - **A used key means "maybe applied".** Once a request may have left with the key, the step stays `UNKNOWN` until a replay answers. Meanwhile `abort` is refused, and `cancel` waits, then undoes the step too if the replay finds it done.
 - **The key's window.** A service forgets keys after a while. The engine never starts a call that could end after `keyRetention` since the key's first use: the step stops with `KEY_EXPIRED` instead. If the step was not applied, an operator sends a fresh key with `retry(id, actor, newKey = true)`.
+- **The undo has its own key, and the same window.** A compensation that sends `idempotencyKey` (`…/compensate`) may rely on it to be safe to repeat: a refund, say. Its window starts at the first undo call; past it, the undo stops with `KEY_EXPIRED` too, typically when an operator retries a stuck compensation days later. Look in the service: undone → `markCompensated`; not undone → `retry(id, actor, newKey = true)`.
 - **A request that never left does not use the key.** A first attempt that throws `StepNotSent` does not start the window.
 
 ## Before marking a step idempotent

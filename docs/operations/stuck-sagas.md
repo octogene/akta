@@ -29,7 +29,7 @@ The records carry the saga's encoded input, which may hold personal data: decide
 | `OUTPUT_UNSTORABLE` | The call was made, but its output cannot be encoded or is over `maxDataBytes` | `markDone` with an output that fits, or `abort(currentStepApplied = true)` |
 | `RECORD_FAILED` | The outcome could not be recorded (a hook threw, a constraint failed). What it established is kept; `last_error` names it | Fix the cause, then, by the outcome: a success → `markDone(id, null, actor)` (the output is saved); an undo → `markCompensated` (it is marked done, not run again); a refusal → `abort(currentStepApplied = false)`, which keeps the refusal as the reason (`markDone` is refused); anything else → look in the external system first |
 | `NO_SIGNAL` | A signal step's timeout passed, and it has no check | Deliver the event with `signal`, then `retry`; or `abort` |
-| `KEY_EXPIRED` | An idempotent step's service may have forgotten its key | Look in the service. Applied: `markDone`. Not applied: `retry(id, actor, newKey = true)`. Or `abort` |
+| `KEY_EXPIRED` | An idempotent step's service may have forgotten its key, for its call or its undo | Look in the service. Applied: `markDone`. Not applied: `retry(id, actor, newKey = true)`. Or `abort`. For an undo (`COMPENSATING`): undone, `markCompensated`; not undone, `retry(id, actor, newKey = true)` |
 
 ## The actions
 

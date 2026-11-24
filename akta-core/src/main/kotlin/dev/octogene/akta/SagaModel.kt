@@ -55,7 +55,8 @@ enum class StuckReason {
     NO_SIGNAL,
     /**
      * An idempotent step's key may be forgotten by its service: a replay could duplicate. Look in the
-     * service: applied → `markDone`; not applied → `retry(newKey = true)`; or `abort`.
+     * service: applied → `markDone`; not applied → `retry(newKey = true)`; or `abort`. For its undo
+     * (COMPENSATING), the same with its compensation key: undone → `markCompensated`; not → `retry(newKey = true)`.
      */
     KEY_EXPIRED,
 }
@@ -110,7 +111,10 @@ data class SagaRecord(
     val stuckReason: StuckReason? = null,
     /** When the saga became STUCK; null when it is not. */
     val stuckAt: Instant? = null,
-    /** First use of the current step's idempotency key, for an idempotent step: its retention starts here. */
+    /**
+     * First use of the current step's idempotency key, for an idempotent step: its retention starts here. While
+     * compensating, the key of the step's undo, whose window starts afresh.
+     */
     val keySince: Instant? = null,
     /** Bumped by `retry(newKey = true)`: part of the current step's key. Reset when the saga moves to another step. */
     val keyGeneration: Int = 0,
