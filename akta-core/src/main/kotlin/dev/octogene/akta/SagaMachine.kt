@@ -103,9 +103,16 @@ internal class SagaMachine(private val config: SagaConfig) {
     fun canMoveOn(r: SagaRecord, now: Instant): Boolean =
         !r.state.isFinished && r.stepStatus != StepStatus.STUCK && r.nextAttemptAt <= now
 
-    /** False when the lock of the call claimed as [claimed] expired during it, and another instance took over. */
+    /**
+     * False when the call claimed as [claimed] is no longer the one in flight: its lock expired and another instance
+     * took over, or its outcome was already recorded and another call claimed (a commit reported as failed). The same
+     * step and lock time are not enough: the state and the call must be the same too, or the undo of a step claimed
+     * in the same instant would be taken for its execution.
+     */
     fun stillClaimed(current: SagaRecord, claimed: SagaRecord): Boolean =
         current.stepStatus == StepStatus.IN_PROGRESS &&
+            current.state == claimed.state &&
+            current.callAction == claimed.callAction &&
             current.stepIndex == claimed.stepIndex &&
             current.lockedUntil == claimed.lockedUntil
 

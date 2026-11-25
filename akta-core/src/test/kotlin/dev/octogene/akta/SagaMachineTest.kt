@@ -149,6 +149,18 @@ class SagaMachineTest {
     }
 
     @Test
+    fun `a claim is ours only if the same call is in flight, not the undo claimed at the same instant`() {
+        val lock = now + 35.seconds
+        val execution = saga(stepIndex = 1, status = StepStatus.IN_PROGRESS).copy(lockedUntil = lock, callAction = CallAction.EXECUTE)
+        assertEquals(true, machine.stillClaimed(execution, execution))
+        // Its outcome was recorded, the saga cancelled meanwhile undoes it, and the undo was claimed in the same
+        // transaction, at the same time, which committed but was reported as failed.
+        val undo = execution.copy(state = SagaState.COMPENSATING, callAction = CallAction.COMPENSATE, failureReason = "Cancelled: x")
+        assertEquals(false, machine.stillClaimed(undo, execution))
+        assertEquals(false, machine.stillClaimed(execution.copy(callAction = CallAction.CHECK), execution))
+    }
+
+    @Test
     fun `a second cancellation changes nothing`() {
         val first = machine.cancel(saga(status = StepStatus.IN_PROGRESS).copy(lockedUntil = now), "first", now).record
         assertEquals("first", first.cancelReason)                       // a call in flight: compensates later

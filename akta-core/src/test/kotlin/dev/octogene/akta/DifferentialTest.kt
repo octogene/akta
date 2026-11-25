@@ -15,6 +15,7 @@ import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
@@ -320,6 +321,7 @@ class DifferentialTest {
                     result
                 }
                 statuses += record().run { "$state/$stepIndex/$stepStatus" }       // each commit, not only the last one
+                clock.now += 1.microseconds                                      // as a real one: two commits, two times
                 if (fails in 4..6) throw IOException("lost after commit")
                 if (plan.pauses && database.nextInt(100) < 10) clock.now += 34.seconds
                 return result
