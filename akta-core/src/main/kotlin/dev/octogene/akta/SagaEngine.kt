@@ -904,6 +904,9 @@ public class SagaEngine(
         val claimed = r.copy(
             stepStatus = StepStatus.IN_PROGRESS,
             attempts = if (action == Action.CHECK) r.attempts else r.attempts + 1,
+            // Counted now, as an attempt is, and reset by any outcome but a failure: a check that ends without
+            // recording one (its pod died, the record failed) is limited too.
+            checkFailures = if (action == Action.CHECK) r.checkFailures + 1 else r.checkFailures,
             lockedUntil = lockedUntil,
             nextAttemptAt = lockedUntil,      // the recovery job looks again when the lock expires
             keySince = keySince,
@@ -1064,7 +1067,7 @@ public class SagaEngine(
             // Past maxAttempts: STUCK, as when a check cannot tell, so that alerts see it and a human
             // can decide (markDone, abort, or retry once the step is known not to be applied).
             is Outcome.CheckFailed -> {
-                val failures = current.checkFailures + 1
+                val failures = current.checkFailures               // this check was counted when claimed
                 if (failures >= config.maxAttempts) {
                     stuck(
                         r, StuckReason.CHECK_FAILING,
@@ -1269,7 +1272,8 @@ public class SagaEngine(
         }
 
     /**
-     * Lock expired. Forward: the call may have left, so the outcome is unknown and will be checked.
+     * Lock expired. Forward: the call may have left, so the outcome is unknown and will be checked. A check
+     * whose lock expires counts as a failed one, up to [SagaConfig.maxAttempts].
      * Compensation: compensations are safe to repeat, so it simply runs again, up to [SagaConfig.maxAttempts].
      */
     private fun lockExpired(r: SagaRecord, since: Instant, now: Instant): SagaRecord =
@@ -1283,10 +1287,16 @@ public class SagaEngine(
                     lastError = "Lock expired during the call; retrying with the same key",
                 )
             }
+        } else if (r.state == SagaState.RUNNING && r.checkFailures >= config.maxAttempts) {
+            // A check: an execution is claimed with no failed check. It never recorded an outcome, again and again.
+            stuck(
+                r, StuckReason.CHECK_FAILING,
+                "Check keeps failing, the step may have been applied: lock expired during the check", now,
+            ).copy(lockedUntil = null)
         } else if (r.state == SagaState.RUNNING) {
             r.copy(
                 stepStatus = StepStatus.UNKNOWN, lockedUntil = null, nextAttemptAt = since + config.settleDelay,
-                lastError = "Lock expired during the call",
+                lastError = "Lock expired during the ${if (r.checkFailures > 0) "check" else "call"}",
             )
         } else if (r.attempts >= config.maxAttempts) {
             stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the compensation", now)
@@ -1365,6 +1375,13 @@ public class SagaEngine(
 
     private fun String.utf8Size() = encodeToByteArray().size
 
+    /**
+     * Free text (an error message, a reason, what describe() returned) as a database can keep it: PostgreSQL
+     * refuses U+0000, which an exception quoting a binary response may carry. Refused, the text would prevent
+     * the outcome it describes from being recorded at all, RECORD_FAILED included.
+     */
+    private fun String.storable(): String = replace('\u0000', '\uFFFD')
+
     private fun log(
         sagaId: Uuid,
         stepIndex: Int,
@@ -1375,7 +1392,7 @@ public class SagaEngine(
         trace: String?,
         actor: String? = null,
     ) {
-        val entry = SagaLogEntry(sagaId, now, stepIndex, stepName, event, detail, actor, trace)
+        val entry = SagaLogEntry(sagaId, now, stepIndex, stepName, event, detail?.storable(), actor, trace)
         repository.log(entry)
         // Reported after commit, with the saga as this transaction last read or wrote it. None from create(),
         // which runs in the caller's transaction.
@@ -1445,11 +1462,16 @@ public class SagaEngine(
         repository.lock(id, skipLocked)?.also { txEvents.get()?.latest?.put(it.id, it) }
 
     /**
-     * Saves [r] when the transaction's block ends, so that a saga changed several times in one transaction is
+     * Saves [record] when the transaction's block ends, so that a saga changed several times in one transaction is
      * written once. Nothing in a transaction reads a saga row back after changing it: each works on the
      * record it locked. Outside the engine's transactions (none today), it writes at once.
      */
-    private fun save(r: SagaRecord, now: Instant) {
+    private fun save(record: SagaRecord, now: Instant) {
+        val r = record.copy(
+            lastError = record.lastError?.storable(),
+            failureReason = record.failureReason?.storable(),
+            cancelReason = record.cancelReason?.storable(),
+        )
         check((r.stepStatus == StepStatus.STUCK) == (r.stuckReason != null && r.stuckAt != null)) {
             "Saga ${r.id}: ${r.stepStatus} with stuck reason ${r.stuckReason}"
         }

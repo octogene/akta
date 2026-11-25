@@ -408,6 +408,75 @@ class SagaEngineTest {
     }
 
     @Test
+    fun `a check that never records its outcome is limited too`() {
+        val stock = FakeStep("stock", { throw RuntimeException("timeout") }, checkResult = { throw SimulatedCrash() })
+        val engine = engine(stock, config = SagaConfig(maxAttempts = 3))
+        val saga = engine.start()
+        repeat(3) {
+            clock.advance(3.minutes)                                      // the lock and the settle delay
+            assertFailsWith<SimulatedCrash> { runBlocking { engine.resumeDue() } }   // the pod dies in the check
+            assertEquals(it + 1, engine.state(saga).checkFailures)
+        }
+        engine.resumeAfter(3.minutes)                                     // the third lock expired: no fourth check
+
+        val stuck = engine.state(saga)
+        assertEquals(StuckReason.CHECK_FAILING, stuck.stuckReason)
+        assertNull(stuck.lockedUntil)
+        assertEquals(3, stock.checks)
+        assertEquals(1, stock.executions)
+    }
+
+    @Test
+    fun `an execution whose lock expires is checked, even with a single attempt allowed`() {
+        var checks = 0
+        val stock = object : RefStep("stock") {
+            override suspend fun execute(ctx: SagaContext<Unit>): String? = throw SimulatedCrash()
+            override suspend fun check(ctx: SagaContext<Unit>) = CheckResult.Done("STK-1").also { checks++ }
+        }
+        val engine = engine(stock, config = SagaConfig(maxAttempts = 1))
+        val id = engine.create("TEST", "item-1")
+        assertFailsWith<SimulatedCrash> { runBlocking { engine.run(id, clock.now + 10.seconds) } }
+
+        engine.resumeAfter(3.minutes)
+
+        assertEquals(SagaState.COMPLETED, repository.find(id)!!.state)    // not counted as a failed check
+        assertEquals(1, checks)
+    }
+
+    // ---- Error messages a database refuses: PostgreSQL's text has no U+0000 -------------------------
+
+    @Test
+    fun `a check whose error holds a NUL character is recorded, and gets stuck as any failing check`() {
+        val stock = FakeStep(
+            "stock", { throw RuntimeException("time\u0000out") }, checkResult = { throw RuntimeException("lookup\u0000down") },
+        )
+        val engine = engine(stock, config = SagaConfig(maxAttempts = 2))
+        val saga = engine.start()
+        assertEquals("java.lang.RuntimeException: time\uFFFDout", engine.state(saga).lastError)
+
+        engine.resumeAfter(2.minutes)
+        engine.resumeAfter(1.minutes)
+
+        val stuck = engine.state(saga)
+        assertEquals(StuckReason.CHECK_FAILING, stuck.stuckReason)
+        assertTrue(stuck.lastError!!.endsWith("lookup\uFFFDdown"), stuck.lastError)
+        assertEquals(2, stock.checks)
+        assertEquals(0, repository.log.count { it.event == SagaEvents.LOCK_EXPIRED })
+    }
+
+    @Test
+    fun `a refusal whose message holds a NUL character compensates`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        val engine = engine(stock, FakeStep("booking", { throw StepRejected("ref\u0000used") }))
+
+        val saga = engine.start()
+
+        assertEquals(SagaState.FAILED, saga.state)
+        assertEquals("dev.octogene.akta.StepRejected: ref\uFFFDused", repository.find(saga.id)!!.failureReason)
+        assertEquals(1, stock.compensations)
+    }
+
+    @Test
     fun `a repeated error is logged every time`() {
         val down = { throw StepNotSent("connection refused") }
         val engine = engine(FakeStep("stock", down, down, down, { "STK-1" }))

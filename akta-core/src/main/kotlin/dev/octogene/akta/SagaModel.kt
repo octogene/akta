@@ -39,7 +39,7 @@ public enum class StepStatus {
 public enum class StuckReason {
     /** A check could not tell whether the step was applied. Look in the external system: `markDone` or `retry`. */
     CANNOT_TELL,
-    /** A check kept throwing. As [CANNOT_TELL], once the lookup works again. */
+    /** A check kept throwing, or never recorded its outcome. As [CANNOT_TELL], once the lookup works again. */
     CHECK_FAILING,
     /** [SagaConfig.maxAttempts] reached (not sent, re-executed, failing compensations…). Fix the cause, then `retry`. */
     TOO_MANY_ATTEMPTS,
@@ -100,9 +100,10 @@ public data class SagaRecord(
     val traceparent: String?,
     val createdAt: Instant,
     /**
-     * Consecutive failed checks of the current step (the lookup itself threw). Counted apart from
-     * [attempts], so that a lookup outage does not use up the step's executions. Limited by
-     * [SagaConfig.maxAttempts]: past it the step is STUCK, like a check that cannot tell.
+     * Consecutive failed checks of the current step (the lookup itself threw, or its lock expired before it
+     * recorded an outcome), the one in flight included. Counted apart from [attempts], so that a lookup outage
+     * does not use up the step's executions. Limited by [SagaConfig.maxAttempts]: past it the step is STUCK,
+     * like a check that cannot tell.
      */
     val checkFailures: Int = 0,
     /** The saga's input, as written by the engine's [SagaSerializer]. Null when the saga has none. Never changes. */

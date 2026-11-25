@@ -71,7 +71,7 @@ When the deadline passes, nothing is lost: the saga is left `READY` (or `UNKNOWN
 
 If the pod dies during the call, the row stays `IN_PROGRESS` until `locked_until`. The next claim after that, by any pod, sees an expired lock:
 
-- **Forward**, the call may have been applied: the step becomes `UNKNOWN` and is checked after the settle delay. An idempotent step is replayed at once with its key.
+- **Forward**, the call may have been applied: the step becomes `UNKNOWN` and is checked after the settle delay. An idempotent step is replayed at once with its key. If it was a check that the pod was running, it counts as a failed check, up to `maxAttempts`.
 - **During a compensation**, the compensation simply runs again: compensations are safe to repeat.
 
 Logged as `LOCK_EXPIRED`. The [next page](unknown-outcomes.md) explains what happens to an unknown outcome.

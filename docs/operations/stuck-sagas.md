@@ -26,7 +26,7 @@ The records carry the saga's encoded input, which may hold personal data: decide
 | Reason | What happened | What to do |
 |---|---|---|
 | `CANNOT_TELL` | A check could not tell whether the step was applied (also at a signal's timeout) | Look in the external system. Applied: `markDone` with the output found. Not applied: `retry` |
-| `CHECK_FAILING` | The check kept throwing | The same, once the lookup works again |
+| `CHECK_FAILING` | The check kept throwing, or its pod kept dying before recording an outcome | The same, once the lookup works again |
 | `TOO_MANY_ATTEMPTS` | `maxAttempts` reached: requests not sent, re-executions, failing compensations | Fix the cause, then `retry`. For a compensation done by hand: `markCompensated` |
 | `OUTPUT_UNSTORABLE` | The call was made, but its output cannot be encoded or is over `maxDataBytes` | `markDone` with an output that fits, or `abort(currentStepApplied = true)` |
 | `RECORD_FAILED` | The outcome could not be recorded (a hook threw, a constraint failed). What it established is kept; `last_error` names it | Fix the cause, then, by the outcome: a success → `markDone(id, null, actor)` (the output is saved); an undo → `markCompensated` (it is marked done, not run again); a refusal → `abort(currentStepApplied = false)`, which keeps the refusal as the reason (`markDone` is refused); `onSignal` or a hook threw on a signal → fix it, then `retry`, which uses the signal kept (a value the timeout check found is kept as the signal too, so the step does not wait a new timeout); anything else → look in the external system first |

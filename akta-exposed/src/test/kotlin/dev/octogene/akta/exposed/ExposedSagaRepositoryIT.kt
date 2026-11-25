@@ -135,6 +135,19 @@ class ExposedSagaRepositoryIT {
     }
 
     @Test
+    fun `an error message with a NUL character, which PostgreSQL refuses, does not prevent recording the outcome`() {
+        val engine = engine("stock" to { "STK-1" }, "booking" to { throw StepRejected("ref\u0000used") })
+
+        val saga = engine.start("item-12")
+
+        assertEquals(SagaState.FAILED, saga.state)
+        val stored = runBlocking { engine.find(saga.id)!! }
+        assertEquals("dev.octogene.akta.StepRejected: ref\uFFFDused", stored.failureReason)
+        val rejected = runBlocking { engine.history(saga.id) }.single { it.event == "EXECUTE:Rejected" }
+        assertEquals("dev.octogene.akta.StepRejected: ref\uFFFDused", rejected.detail)
+    }
+
+    @Test
     fun `refuses a second unfinished saga for the same key`() {
         val engine = engine("stock" to { throw StepNotSent("down") })
         engine.start("item-3")

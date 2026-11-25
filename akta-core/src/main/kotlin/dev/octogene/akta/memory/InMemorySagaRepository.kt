@@ -70,7 +70,12 @@ public class InMemorySagaRepository : SagaRepository {
         check((cancelRequestedAt == null) == (cancelReason == null)) { "Saga $id violates saga_cancel" }
         check((stepStatus == StepStatus.STUCK) == (stuckReason != null && stuckAt != null)) { "Saga $id violates saga_stuck_reason" }
         check((stuckReason == null) == (stuckAt == null)) { "Saga $id violates saga_stuck_at" }
+        checkText(type, key, lastError, traceparent, input, cancelReason, failureReason)
     }
+
+    /** PostgreSQL's text type refuses U+0000. */
+    private fun checkText(vararg values: String?) =
+        values.forEach { check(it == null || '\u0000' !in it) { "invalid byte sequence for encoding \"UTF8\": 0x00" } }
 
     /** As a database column would keep it: see [SagaRepository.MAX_TEXT]. */
     private fun SagaRecord.truncated() = copy(
@@ -89,6 +94,7 @@ public class InMemorySagaRepository : SagaRepository {
         results.filter { it.sagaId == sagaId && it.compensatedAt == null }.associate { it.stepName to it.output }
 
     override fun saveResult(sagaId: Uuid, stepIndex: Int, stepName: String, output: String?, now: Instant) {
+        checkText(stepName, output)
         results.removeAll { it.sagaId == sagaId && it.stepIndex == stepIndex }
         results += StoredResult(sagaId, stepIndex, stepName, output, now)
     }
@@ -99,6 +105,7 @@ public class InMemorySagaRepository : SagaRepository {
     }
 
     override fun log(entry: SagaLogEntry) {
+        with(entry) { checkText(stepName, event, detail, actor, traceId) }
         logEntries += entry.copy(detail = entry.detail?.take(SagaRepository.MAX_TEXT))
     }
 
@@ -116,8 +123,10 @@ public class InMemorySagaRepository : SagaRepository {
         return ids.size
     }
 
-    override fun saveSignal(sagaId: Uuid, name: String, value: String, now: Instant): Boolean =
-        signals.putIfAbsent(sagaId to name, value) == null
+    override fun saveSignal(sagaId: Uuid, name: String, value: String, now: Instant): Boolean {
+        checkText(name, value)
+        return signals.putIfAbsent(sagaId to name, value) == null
+    }
 
     override fun signal(sagaId: Uuid, name: String): String? = signals[sagaId to name]
 

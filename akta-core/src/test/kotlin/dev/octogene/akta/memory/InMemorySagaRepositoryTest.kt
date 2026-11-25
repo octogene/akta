@@ -101,6 +101,8 @@ class InMemorySagaRepositoryTest {
         assertFailsWith<IllegalStateException> {                           // saga_stuck_reason
             repository.save(record(lastError = null).copy(stepStatus = StepStatus.STUCK), t0)
         }
+        assertFailsWith<IllegalStateException> { repository.save(record(lastError = "a\u0000b"), t0) }   // text has no U+0000
+        assertFailsWith<IllegalStateException> { repository.log(entry(t0, "EXECUTE:Unknown", detail = "a\u0000b")) }
         assertFailsWith<IllegalStateException> {                           // attempts >= 0
             repository.save(record(lastError = null).copy(attempts = -1), t0)
         }

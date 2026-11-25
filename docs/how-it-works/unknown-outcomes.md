@@ -28,7 +28,7 @@ A request that timed out on our side may still be **in progress** on the other s
 
 ### When the lookup itself fails
 
-Failed checks are counted apart from executions, so a lookup outage does not use up a step's attempts. They are retried with backoff, at least `checkRetryDelay` (1 minute) apart. After `maxAttempts` failures in a row, the saga stops (`CHECK_FAILING`), like a check that cannot tell. The call may have been applied, so a human must look before retrying.
+Failed checks are counted apart from executions, so a lookup outage does not use up a step's attempts. They are retried with backoff, at least `checkRetryDelay` (1 minute) apart. A check whose lock expires before it records an outcome (its pod died) counts as a failed one. After `maxAttempts` failures in a row, the saga stops (`CHECK_FAILING`), like a check that cannot tell. The call may have been applied, so a human must look before retrying.
 
 ### Without a check
 
