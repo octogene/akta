@@ -515,6 +515,63 @@ class SagaSignalTest {
         assertEquals(SagaState.COMPLETED, runBlocking { engine.retry(id, "operator") }.state)
     }
 
+    // ---- A waiting saga that cannot be run -------------------------------------------------------
+
+    private var broken = false
+    private val unreadable = object : SagaRepository by repository {
+        override fun results(sagaId: Uuid): Map<String, String?> =
+            if (broken) throw IllegalStateException("corrupted row") else repository.results(sagaId)
+    }
+
+    /** A reservation stopped by resume failures at its timeout, its check never run; then readable again. */
+    private fun stoppedAtTimeout(check: (suspend SagaContext<Unit>.() -> CheckResult<PaymentResult>)): Pair<SagaEngine, Uuid> {
+        val definition = reservation(check)
+        val engine = SagaEngine(
+            InMemorySagaTransactions(repository), unreadable, listOf(definition), KotlinxJsonSagaSerializer(), SagaConfig(maxAttempts = 2), clock,
+        )
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+        broken = true
+        clock.advance(31.minutes)
+        repeat(2) { runBlocking { engine.resumeDue() }; clock.advance(1.minutes) }
+        broken = false
+        val stuck = repository.find(id)!!
+        assertEquals(StuckReason.RESUME_FAILING, stuck.stuckReason)
+        assertEquals(StepStatus.WAITING, stuck.stuckFrom)
+        return engine to id
+    }
+
+    @Test
+    fun `retry after resume failures at a signal's timeout checks at once, instead of waiting a whole timeout again`() {
+        val (engine, id) = stoppedAtTimeout { CheckResult.Done(PaymentResult("P-1", succeeded = true)) }
+
+        val done = runBlocking { engine.retry(id, "operator") }
+
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals("confirm P-1", calls.last())
+    }
+
+    @Test
+    fun `retry after resume failures at a signal's timeout uses a signal received while stuck`() {
+        var checks = 0
+        val (engine, id) = stoppedAtTimeout { checks++; CheckResult.CannotTell }
+        assertEquals(SignalResult.Stored(id), engine.pay(id))
+
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.retry(id, "operator") }.state)
+        assertEquals(0, checks)
+    }
+
+    @Test
+    fun `retry after resume failures at a signal's timeout applies a cancellation requested while stuck`() {
+        var checks = 0
+        val (engine, id) = stoppedAtTimeout { checks++; CheckResult.CannotTell }
+        runBlocking { engine.cancel(id, "changed my mind", "customer") }
+
+        assertEquals(SagaState.FAILED, runBlocking { engine.retry(id, "operator") }.state)
+        assertEquals(0, checks)
+        assertEquals(listOf<String?>("P-1"), released)
+    }
+
     // ---- A hook that throws when a signal ends the saga -------------------------------------------
 
     private var hookBug = true

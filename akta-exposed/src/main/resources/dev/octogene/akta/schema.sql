@@ -22,6 +22,7 @@ CREATE TABLE saga (
                                                         'OUTPUT_UNSTORABLE', 'RECORD_FAILED', 'NO_SIGNAL',
                                                         'KEY_EXPIRED', 'RESUME_FAILING')),
     stuck_at        timestamptz,                          -- when it became STUCK
+    stuck_from      text        CHECK (stuck_from IN ('READY', 'IN_PROGRESS', 'WAITING', 'UNKNOWN')), -- step_status before RESUME_FAILING
     key_since       timestamptz,                          -- first use of the current step's idempotency key
     key_generation  int         NOT NULL DEFAULT 0 CHECK (key_generation >= 0), -- bumped by retry(newKey = true); reset at each step
     resume_failures int         NOT NULL DEFAULT 0 CHECK (resume_failures >= 0), -- RESUME_FAILED in a row; reset when the saga runs

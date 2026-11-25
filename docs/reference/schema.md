@@ -30,6 +30,7 @@ The script creates the schema from scratch. A database created by an earlier ver
 |---|---|
 | `failure_reason` (why a saga failed, never overwritten) | `ALTER TABLE saga ADD COLUMN failure_reason text;` |
 | `RESUME_FAILING` (a saga that cannot be run becomes stuck) | `ALTER TABLE saga ADD COLUMN resume_failures int NOT NULL DEFAULT 0 CHECK (resume_failures >= 0);` then `ALTER TABLE saga DROP CONSTRAINT saga_stuck_reason_check, ADD CONSTRAINT saga_stuck_reason_check CHECK (stuck_reason IN ('CANNOT_TELL', 'CHECK_FAILING', 'TOO_MANY_ATTEMPTS', 'OUTPUT_UNSTORABLE', 'RECORD_FAILED', 'NO_SIGNAL', 'KEY_EXPIRED', 'RESUME_FAILING'));` |
+| `stuck_from` (`retry` resumes a step as it was after `RESUME_FAILING`) | `ALTER TABLE saga ADD COLUMN stuck_from text CHECK (stuck_from IN ('READY', 'IN_PROGRESS', 'WAITING', 'UNKNOWN'));` |
 | `findByKey` | `CREATE INDEX saga_finished_key ON saga (business_key) WHERE state IN ('COMPLETED', 'FAILED');` (on a large table: `CREATE INDEX CONCURRENTLY`, outside a transaction) |
 
 ```sql title="akta-exposed/src/main/resources/dev/octogene/akta/schema.sql"

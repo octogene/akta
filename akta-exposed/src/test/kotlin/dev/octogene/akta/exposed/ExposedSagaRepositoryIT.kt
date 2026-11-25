@@ -270,6 +270,7 @@ class ExposedSagaRepositoryIT {
         val stuck = runBlocking { engine.findStuck() }.single()
         assertEquals(StuckReason.RESUME_FAILING, stuck.stuckReason)
         assertEquals(2, stuck.resumeFailures)
+        assertEquals(StepStatus.READY, stuck.stuckFrom)
         assertEquals(0, runBlocking { engine.resumeDue() }.sagas)               // no longer picked up
 
         transaction(database) { exec("""UPDATE saga SET input = '{"customerId":"C-1","start":"2026-12-01"}' WHERE id = '$id'""") }

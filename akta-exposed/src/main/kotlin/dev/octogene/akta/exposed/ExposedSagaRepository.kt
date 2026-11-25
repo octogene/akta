@@ -69,6 +69,7 @@ internal object SagaTable : Table("saga") {
     val keySince = timestampWithTimeZone("key_since").nullable()
     val keyGeneration = integer("key_generation")
     val resumeFailures = integer("resume_failures")
+    val stuckFrom = text("stuck_from").nullable()
     val createdAt = timestampWithTimeZone("created_at")
     val updatedAt = timestampWithTimeZone("updated_at")
     override val primaryKey = PrimaryKey(id)
@@ -218,6 +219,7 @@ public class ExposedSagaRepository : SagaRepository {
         s[SagaTable.keySince] = r.keySince?.utc()
         s[SagaTable.keyGeneration] = r.keyGeneration
         s[SagaTable.resumeFailures] = r.resumeFailures
+        s[SagaTable.stuckFrom] = r.stuckFrom?.name
         s[SagaTable.nextAttemptAt] = r.nextAttemptAt.utc()
         s[SagaTable.lockedUntil] = r.lockedUntil?.utc()
         s[SagaTable.lastError] = r.lastError?.take(SagaRepository.MAX_TEXT)
@@ -248,6 +250,7 @@ public class ExposedSagaRepository : SagaRepository {
         keySince = this[SagaTable.keySince]?.toKotlin(),
         keyGeneration = this[SagaTable.keyGeneration],
         resumeFailures = this[SagaTable.resumeFailures],
+        stuckFrom = this[SagaTable.stuckFrom]?.let(StepStatus::valueOf),
     )
 
     private fun ResultRow.toEntry() = SagaLogEntry(

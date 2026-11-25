@@ -139,6 +139,8 @@ public data class SagaRecord(
      * again. Limited by [SagaConfig.maxAttempts]: past it the saga is STUCK ([StuckReason.RESUME_FAILING]).
      */
     val resumeFailures: Int = 0,
+    /** What the step was when [StuckReason.RESUME_FAILING] stopped the saga, for `retry` to resume it; null otherwise. */
+    val stuckFrom: StepStatus? = null,
 )
 
 /** Where [SagaEngine.findStuck] continues: after this saga. */

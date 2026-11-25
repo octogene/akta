@@ -700,6 +700,50 @@ class SagaEngineTest {
     }
 
     @Test
+    fun `retry after resume failures executes a step that was only waiting to be sent again, without checking it`() {
+        val stock = FakeStep("stock", { throw StepNotSent("connection refused") }, { "STK-1" })   // no check: CANNOT_TELL
+        val engine = newEngine(
+            InMemorySagaTransactions(repository), unreadable, listOf(definition("TEST", listOf(stock))),
+            config = SagaConfig(maxAttempts = 3),
+        )
+        val id = engine.create("TEST", "item-1")
+        runBlocking { engine.run(id, clock.now + 10.seconds) }
+        broken = true
+        repeat(3) { engine.resumeLater(3.minutes) }
+        assertEquals(StepStatus.READY, repository.find(id)!!.stuckFrom)
+
+        broken = false
+        val done = runBlocking { engine.retry(id, "operator") }
+
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertNull(done.stuckFrom)
+        assertEquals(2, stock.executions)
+        assertEquals(0, stock.checks)
+    }
+
+    @Test
+    fun `retry after resume failures on an expired lock checks, once the settle delay has passed`() {
+        val stock = FakeStep("stock", { throw SimulatedCrash() }, checkResult = { CheckResult.Done("STK-1") })
+        val engine = newEngine(
+            InMemorySagaTransactions(repository), unreadable, listOf(definition("TEST", listOf(stock))),
+            config = SagaConfig(maxAttempts = 1),
+        )
+        val id = engine.create("TEST", "item-1")
+        assertFailsWith<SimulatedCrash> { runBlocking { engine.run(id, clock.now + 10.seconds) } }
+        broken = true
+        engine.resumeLater(10.minutes)                                          // rolled back, the lock's expiry too
+        assertEquals(StepStatus.IN_PROGRESS, repository.find(id)!!.stuckFrom)
+
+        broken = false
+        assertEquals(StepStatus.UNKNOWN, runBlocking { engine.retry(id, "operator") }.stepStatus)   // not executed
+        engine.resumeLater(2.minutes)
+
+        assertEquals(SagaState.COMPLETED, repository.find(id)!!.state)
+        assertEquals(1, stock.executions)
+        assertEquals(1, stock.checks)
+    }
+
+    @Test
     fun `retry after resume failures checks a step that may have been called, instead of executing it again`() {
         val stock = FakeStep("stock", { throw IllegalStateException("read timeout") }, checkResult = { CheckResult.Done("STK-1") })
         val engine = newEngine(

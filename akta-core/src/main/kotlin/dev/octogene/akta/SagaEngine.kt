@@ -232,7 +232,7 @@ public class SagaEngine(
                         "Could not run the saga, $failures times in a row: $error. Fix the cause, then retry: " +
                             "the step resumes as it was, checked first if it may have been called",
                         now,
-                    ).copy(lockedUntil = null, resumeFailures = failures)
+                    ).copy(lockedUntil = null, resumeFailures = failures, stuckFrom = r.stepStatus)
                 } else {
                     // lastError keeps the step's own error: the resume failure goes to the log only.
                     r.copy(nextAttemptAt = maxOf(r.nextAttemptAt, now + config.resumeFailureDelay), resumeFailures = failures)
@@ -333,8 +333,9 @@ public class SagaEngine(
      * the step was not applied (after [StuckReason.KEY_EXPIRED], or when the service keeps answering a failure
      * it remembered for the old key).
      *
-     * After [StuckReason.RESUME_FAILING] the step itself was not at fault: it resumes as it was, its attempts
-     * kept. A step that may have been called is checked first (or replayed with its key), not executed blindly.
+     * After [StuckReason.RESUME_FAILING] the step itself was not at fault: it resumes as it was
+     * ([SagaRecord.stuckFrom]), its attempts kept. A step that may have been called is checked first (or replayed
+     * with its key), not executed blindly; a signal step that was waiting keeps its timeout, or checks if it passed.
      */
     public suspend fun retry(id: Uuid, actor: String, newKey: Boolean = false, runFor: Duration = MANUAL_RUN): SagaRecord =
         manual(id, actor, SagaEvents.MANUAL_RETRY, runFor) { r, now ->
@@ -347,15 +348,18 @@ public class SagaEngine(
             val step = if (r.state == SagaState.RUNNING) definition(r.type).stepAt(r.stepIndex) else null
             // An idempotent step whose key was used may be applied: it is replayed, and stays UNKNOWN meanwhile.
             val replay = step?.idempotency != null && !newKey && r.keySince != null
-            // Stopped by resume failures, not by the step: what it was is not stored, so a call that was
-            // attempted counts as possibly applied, and is checked. A signal step makes no call: it waits again.
+            // Stopped by resume failures, not by the step: it resumes as it was.
             val resuming = r.stuckReason == StuckReason.RESUME_FAILING
-            val checkFirst = resuming && step != null && step !is SignalStep<*, *> && step.idempotency == null && r.attempts > 0
+            val (status, due) = when {
+                replay -> StepStatus.UNKNOWN to now
+                resuming && step != null -> resumeAs(r, step, now)
+                else -> StepStatus.READY to now
+            }
             ManualChange(
                 r.copy(
-                    stepStatus = if (replay || checkFirst) StepStatus.UNKNOWN else StepStatus.READY,
+                    stepStatus = status, nextAttemptAt = due,
                     attempts = if (resuming) r.attempts else 0, checkFailures = if (resuming) r.checkFailures else 0,
-                    nextAttemptAt = now, lastError = null, stuckReason = null, stuckAt = null, resumeFailures = 0,
+                    lastError = null, stuckReason = null, stuckAt = null, stuckFrom = null, resumeFailures = 0,
                     // Forward, a refusal kept by RECORD_FAILED is dropped: the step is called again.
                     failureReason = if (r.state == SagaState.RUNNING) null else r.failureReason,
                     keySince = if (newKey) null else r.keySince, keyGeneration = generation,
@@ -363,6 +367,34 @@ public class SagaEngine(
                 detail = if (newKey) "newKey: generation $generation" else null,
             )
         }
+
+    /**
+     * What the forward [step] of [r], stopped by [StuckReason.RESUME_FAILING], goes back to, and when it is due.
+     * A compensation needs none of this: it simply runs again.
+     */
+    private fun resumeAs(r: SagaRecord, step: AnyStep, now: Instant): Pair<StepStatus, Instant> {
+        // An idempotent step whose key was used is replayed (see retry): here its key is fresh, and it is called.
+        if (step.idempotency != null) return StepStatus.READY to now
+        return when (r.stuckFrom) {
+            StepStatus.UNKNOWN -> StepStatus.UNKNOWN to now
+            // Its pod died during the call, and its lock's expiry could not be recorded: checked after the settle
+            // delay, which starts at the expiry, before the saga was stopped.
+            StepStatus.IN_PROGRESS -> StepStatus.UNKNOWN to maxOf(now, (r.stuckAt ?: now) + config.settleDelay)
+            // Its timeout still stands, passed or not. Except for what must be acted on at once: a signal received
+            // while it was stuck (READY uses it), or a cancellation.
+            StepStatus.WAITING ->
+                if (r.cancelRequestedAt != null || step !is SignalStep<*, *> || repository.signal(r.id, step.signal) != null) {
+                    StepStatus.READY to now
+                } else {
+                    StepStatus.WAITING to r.nextAttemptAt
+                }
+            // Nothing that may have been applied, even if it was attempted (its request never left).
+            StepStatus.READY -> StepStatus.READY to now
+            // Stopped before stuckFrom was stored: a call that was attempted counts as possibly applied.
+            StepStatus.STUCK, null ->
+                (if (step !is SignalStep<*, *> && r.attempts > 0) StepStatus.UNKNOWN else StepStatus.READY) to now
+        }
+    }
 
     /**
      * The stuck step was found done by hand: move on to the next one. [output] is the step's output as
@@ -1214,13 +1246,13 @@ public class SagaEngine(
         val index = r.stepIndex + 1
         return if (index == def.steps.size) {
             r.copy(
-                state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null, stuckReason = null, stuckAt = null,
+                state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null, stuckReason = null, stuckAt = null, stuckFrom = null,
                 keySince = null, keyGeneration = 0, checkFailures = 0, resumeFailures = 0,
             )
         } else {
             r.copy(
                 stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now,
-                lastError = null, stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0, resumeFailures = 0,
+                lastError = null, stuckReason = null, stuckAt = null, stuckFrom = null, keySince = null, keyGeneration = 0, resumeFailures = 0,
             )
         }
     }
@@ -1242,13 +1274,13 @@ public class SagaEngine(
     private fun compensateFrom(r: SagaRecord, index: Int, now: Instant): SagaRecord =
         if (index < 0) {
             r.copy(
-                state = SagaState.FAILED, stepStatus = StepStatus.READY, checkFailures = 0, stuckReason = null, stuckAt = null,
+                state = SagaState.FAILED, stepStatus = StepStatus.READY, checkFailures = 0, stuckReason = null, stuckAt = null, stuckFrom = null,
                 keySince = null, keyGeneration = 0, resumeFailures = 0,
             )
         } else {
             r.copy(
                 state = SagaState.COMPENSATING, stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0,
-                nextAttemptAt = now, stuckReason = null, stuckAt = null, keySince = null, keyGeneration = 0, resumeFailures = 0,
+                nextAttemptAt = now, stuckReason = null, stuckAt = null, stuckFrom = null, keySince = null, keyGeneration = 0, resumeFailures = 0,
             )
         }
 
