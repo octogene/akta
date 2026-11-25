@@ -68,7 +68,8 @@ import kotlin.uuid.Uuid
  * requests not sent, lost requests and responses, calls outliving their lock, failing checks and
  * compensations, hooks that throw, and pods dying mid-call. Several pods resume sagas concurrently,
  * and an operator resolves stuck sagas by looking at the external systems, as a human would.
- * Payment sagas wait for the provider's event, which a listener delivers early, late, twice or never;
+ * Some sagas wait for a provider's event (first, between two calls, or last), which a listener delivers early,
+ * late, twice or never, and whose onSignal has bugs; some steps have nothing to undo; some refusals are only found by a check;
  * customers cancel sagas at random moments.
  *
  * The external systems are simulated and record the truth: what was really applied. At the end,
@@ -136,7 +137,6 @@ class SagaStressIT {
         }
     }
 
-    /** An external system without idempotency keys. It knows what is really applied, for each item. */
     /** A saga's input: the request, with a customer marked as personal data (it must never be logged). */
     @Serializable
     data class ItemRequest(val customer: String, val nonce: Long)
@@ -148,8 +148,10 @@ class SagaStressIT {
     /**
      * An external system. It knows what is really applied, for each item. With [keys], it accepts an
      * idempotency key: a request with a key it remembers returns the first result, applying nothing.
+     * Without [undoable], what it applied stays (a notification): its step has nothing to undo.
      */
-    private inner class ExternalSystem(val name: String, val keys: Boolean = false) {
+    private inner class ExternalSystem(val name: String, val keys: Boolean = false, val undoable: Boolean = true) {
+        private val refused = HashSet<String>()
         private val applied = HashMap<String, Effect>()
         private val remembered = HashMap<String, Effect>()
         private var counter = 0
@@ -159,12 +161,16 @@ class SagaStressIT {
             applied[key]?.let { violations += "$name: applied a second time for $key (already ${it.ref}): duplicate" }
             return Effect("$name-${++counter}", request.customer).also {
                 applied[key] = it
+                refused -= key
                 if (keys) remembered[idempotencyKey!!] = it
             }
         }
         @Synchronized fun remove(key: String) { applied.remove(key) }
         @Synchronized fun remembers(idempotencyKey: String) = keys && idempotencyKey in remembered
         @Synchronized fun lookup(key: String): Effect? = applied[key]
+        /** A refusal the system keeps a record of: a check finds it. */
+        @Synchronized fun refuse(key: String) { if (key !in applied) refused += key }
+        @Synchronized fun refuses(key: String) = key in refused
     }
 
     /** The coroutine of a pod (or of a request): a crash cancels all of it. */
@@ -199,13 +205,13 @@ class SagaStressIT {
 
     private suspend fun pause() = delay(dice.millis(5))
 
-    private enum class Call { OK, REJECTED, NOT_SENT, LOST_REQUEST, LOST_RESPONSE, OUTLIVES_LOCK, CRASH, JVM_ERROR }
+    private enum class Call { OK, REJECTED, NOT_SENT, LOST_REQUEST, LOST_RESPONSE, LOST_REFUSAL, OUTLIVES_LOCK, CRASH, JVM_ERROR }
     private enum class Undo { OK, FAILS_BEFORE, FAILS_AFTER, CRASH }
     private enum class Lookup { TRUTH, FAILS, CANNOT_TELL, CRASH }
 
     private val callWeights = mapOf(
         Call.OK to 70, Call.REJECTED to 3, Call.NOT_SENT to 8, Call.LOST_REQUEST to 5,
-        Call.LOST_RESPONSE to 6, Call.OUTLIVES_LOCK to 3, Call.CRASH to 5, Call.JVM_ERROR to 2,
+        Call.LOST_RESPONSE to 6, Call.LOST_REFUSAL to 3, Call.OUTLIVES_LOCK to 3, Call.CRASH to 5, Call.JVM_ERROR to 2,
     )
 
     /** About 1 item in 25 per system has a lookup that always throws: its check can never answer. */
@@ -213,12 +219,14 @@ class SagaStressIT {
     private val undoWeights = mapOf(Undo.OK to 80, Undo.FAILS_BEFORE to 8, Undo.FAILS_AFTER to 7, Undo.CRASH to 5)
     private val lookupWeights = mapOf(Lookup.TRUTH to 80, Lookup.FAILS to 10, Lookup.CANNOT_TELL to 7, Lookup.CRASH to 3)
     private val hookFailure = 0.1
+    private val onSignalFailure = 0.08
 
     /** A step calling [system]. It also checks that it sees the output of the previous step. */
     private inner class ChaosStep(val system: ExternalSystem, private val previous: ChaosStep?) : SagaStep<ItemRequest, Effect> {
         override val name = system.name
         override val outputType = typeOf<Effect>()
         // A short window (3 calls' locks): retries after crashes and slow calls sometimes outlive it.
+        override val compensates = system.undoable
         override val idempotency = if (system.keys) Idempotency(keyRetention = 3.seconds) else null
 
         private fun apply(ctx: SagaContext<ItemRequest>) =
@@ -237,8 +245,15 @@ class SagaStressIT {
                 // A service that remembers the key answers a replay with its first result: never a refusal.
                 Call.REJECTED -> if (system.remembers(ctx.idempotencyKey)) apply(ctx) else throw StepRejected("refused")
                 Call.NOT_SENT -> throw StepNotSent("connection refused")
-                Call.LOST_REQUEST -> throw IOException("read timeout (request lost, not applied)")
+                // A message PostgreSQL would refuse (U+0000), and a character cut in two by a truncation.
+                Call.LOST_REQUEST -> throw IOException("read timeout (request lost, not applied) \u0000 " + "\uD83D\uDE00".repeat(1200))
                 Call.LOST_RESPONSE -> { apply(ctx); pause(); throw IOException("read timeout (applied)") }
+                // Refused, and recorded there; but the answer is lost. A check finds the refusal. With keys, a replay
+                // is simply a new call.
+                Call.LOST_REFUSAL -> {
+                    if (!system.keys) system.refuse(ctx.key)
+                    throw IOException("read timeout (refused)")
+                }
                 Call.OUTLIVES_LOCK -> apply(ctx).also { delay(config.callLock + 200.milliseconds) }
                 Call.CRASH -> { if (dice.chance(0.5)) apply(ctx); crash() }
                 // A JVM Error, not an Exception (a TODO() or an assertion in a client), applied or not.
@@ -260,76 +275,93 @@ class SagaStressIT {
             pause()
             if (lookupBroken(system, ctx.key)) throw IOException("lookup broken for ${ctx.key}")
             return when (dice.pick(lookupWeights)) {
-                Lookup.TRUTH -> system.lookup(ctx.key)?.let { CheckResult.Done(it) } ?: CheckResult.NotDone
-                Lookup.FAILS -> throw IOException("lookup unavailable")
+                Lookup.TRUTH -> system.lookup(ctx.key)?.let { CheckResult.Done(it) }
+                    ?: if (system.refuses(ctx.key)) throw StepRejected("found refused") else CheckResult.NotDone
+                Lookup.FAILS -> throw IOException("lookup unavailable \u0000")
                 Lookup.CANNOT_TELL -> CheckResult.CannotTell
                 Lookup.CRASH -> crash()
             }
         }
     }
 
-    /** Steps calling one system each; each step checks the reference of the one before it. */
-    /** Steps calling one system each; a name ending with `+keys` is a system that accepts idempotency keys. */
+    /**
+     * Steps calling one system each; each step checks the reference of the one before it. A name ending with `+keys`
+     * is a system that accepts idempotency keys; with `+final`, one whose effect is not undone.
+     */
     private fun chain(vararg systems: String) =
-        systems.map { ExternalSystem(it.removeSuffix("+keys"), keys = it.endsWith("+keys")) }
+        systems.map { ExternalSystem(it.substringBefore('+'), keys = it.endsWith("+keys"), undoable = !it.endsWith("+final")) }
             .fold(emptyList<ChaosStep>()) { acc, s -> acc + ChaosStep(s, acc.lastOrNull()) }
 
     private val stepsByType = mapOf(
         "ITEM_SETUP" to chain("stock", "booking+keys", "promo"),     // booking: replayed, never checked
         "ITEM_EXIT" to chain("unstock", "archive"),      // the type an old pod does not know (rolling deploy)
         "ITEM_PAY" to chain("charge", "ship"),           // with a wait for the payment between them
+        "ITEM_NOTIFY" to chain("notify+final", "label"), // a refusal of label: nothing to undo, then onFailed
+        "ITEM_APPROVE" to chain("grant"),                // between two waits: the first and the last step are signals
     )
 
     /** A payment provider's event: the outcome of the payment of an item. */
     @Serializable
     data class PaymentEvent(val paymentId: String, val succeeded: Boolean, val customer: String)
 
-    /** The payment provider: it decides each payment once; its events say so (see [listener]). */
-    private inner class PaymentProvider {
+    /** The provider of a kind of event: it decides each item once; its events say so (see [listener]). */
+    private inner class EventProvider(private val prefix: String) {
         private val decided = HashMap<String, PaymentEvent>()
         private var counter = 0
 
-        /** Decides the payment of [key] the first time: null when it was already decided. */
+        /** Decides the event of [key] the first time: null when it was already decided. */
         @Synchronized fun decide(key: String, customer: String): PaymentEvent? {
             if (key in decided) return null
-            return PaymentEvent("pay-${++counter}", succeeded = dice.chance(0.85), customer).also { decided[key] = it }
+            return PaymentEvent("$prefix-${++counter}", succeeded = dice.chance(0.85), customer).also { decided[key] = it }
         }
         @Synchronized fun lookup(key: String): PaymentEvent? = decided[key]
     }
 
-    private val provider = PaymentProvider()
-    private val charge = stepsByType.getValue("ITEM_PAY").first().system
-
-    /** Waits for the payment event. At its timeout, asks the provider (which fails like any lookup). */
-    private inner class PaymentWait : SignalStep<ItemRequest, PaymentEvent> {
-        override val name = "await-payment"
-        override val signal = "payment"
+    /**
+     * Waits for an event. At its timeout, asks the provider (which fails like any lookup). The event of an item comes
+     * once [ready]: when what it follows was done.
+     */
+    private inner class EventWait(override val signal: String, val ready: (key: String) -> Boolean) : SignalStep<ItemRequest, PaymentEvent> {
+        val provider = EventProvider(signal)
+        override val name = "await-$signal"
         override val timeout = 1500.milliseconds
         override val checksOnTimeout = true
         override val outputType = typeOf<PaymentEvent>()
         override fun describe(output: PaymentEvent) = output.paymentId       // never the customer
 
         override fun accept(ctx: SagaContext<ItemRequest>, value: PaymentEvent) {
-            if (!value.succeeded) throw StepRejected("payment ${value.paymentId} declined")
+            if (dice.chance(onSignalFailure)) error("onSignal failed for ${ctx.key}")
+            if (!value.succeeded) throw StepRejected("$signal ${value.paymentId} declined")
         }
 
         override suspend fun check(ctx: SagaContext<ItemRequest>): CheckResult<PaymentEvent> {
             pause()
             return when (dice.pick(lookupWeights)) {
                 Lookup.TRUTH -> provider.lookup(ctx.key)?.let { CheckResult.Done(it) } ?: CheckResult.NotDone
-                Lookup.FAILS -> throw IOException("payment lookup unavailable")
+                Lookup.FAILS -> throw IOException("$signal lookup unavailable")
                 Lookup.CANNOT_TELL -> CheckResult.CannotTell
                 Lookup.CRASH -> crash()
             }
         }
     }
 
-    private val paymentWait = PaymentWait()
+    private fun applied(type: String): (String) -> Boolean = { key -> stepsByType.getValue(type).first().system.lookup(key) != null }
 
-    /** The steps of a saga type: those calling systems, plus the payment wait of ITEM_PAY. */
+    /** The waits of each saga type that has some. */
+    private val waitsByType = mapOf(
+        "ITEM_PAY" to listOf(EventWait("payment", ready = applied("ITEM_PAY"))),
+        "ITEM_APPROVE" to listOf(EventWait("approval", ready = { true }), EventWait("receipt", ready = applied("ITEM_APPROVE"))),
+    )
+
+    /** The steps of a saga type: those calling systems, and its waits. */
     private fun stepsOf(type: String): List<SagaStep<ItemRequest, *>> {
         val calls = stepsByType.getValue(type)
-        return if (type == "ITEM_PAY") listOf(calls[0], paymentWait, calls[1]) else calls
+        val waits = waitsByType[type].orEmpty()
+        return when (type) {
+            "ITEM_PAY" -> listOf(calls[0], waits[0], calls[1])
+            "ITEM_APPROVE" -> listOf(waits[0], calls[0], waits[1])
+            else -> calls
+        }
     }
 
     /** The business change of the hooks, in the engine's transaction; throws sometimes, after writing. */
@@ -355,6 +387,9 @@ class SagaStressIT {
 
     /** A database failure injected by [FlakyTransactions]. */
     private class InjectedDatabaseFailure(message: String) : SQLException(message)
+
+    /** A hook's failure, in a transaction it rolled back. */
+    private fun Throwable.isHook() = this is IllegalStateException && message.orEmpty().startsWith("hook failed")
 
     private fun Throwable.isInjected() = generateSequence(this) { it.cause }.any { it is InjectedDatabaseFailure }
 
@@ -428,7 +463,7 @@ class SagaStressIT {
             permits.acquire()
             launch {
                 try {
-                    val type = dice.pick(mapOf("ITEM_SETUP" to 50, "ITEM_EXIT" to 25, "ITEM_PAY" to 25))
+                    val type = dice.pick(mapOf("ITEM_SETUP" to 35, "ITEM_EXIT" to 15, "ITEM_PAY" to 20, "ITEM_NOTIFY" to 15, "ITEM_APPROVE" to 15))
                     val key = "$type-$i"
                     val id = transactions.inTransaction {
                         TransactionManager.current().exec("INSERT INTO item (key, status) VALUES ('$key', 'PENDING')")
@@ -440,7 +475,7 @@ class SagaStressIT {
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            if (!e.isInjected()) violations += "request for $key failed: $e"
+                            if (!e.isInjected() && !e.isHook()) violations += "request for $key failed: $e"
                         }
                     }
                     request.join()
@@ -460,32 +495,34 @@ class SagaStressIT {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (!e.isInjected()) violations += "$what failed: $e"
+                if (!e.isInjected() && !e.isHook()) violations += "$what failed: $e"
             }
         }.join()
     }
 
     /**
-     * The Kafka listener of the payment events. The provider decides a payment once its charge is
-     * applied; its event then arrives after a random delay (often after the step's timeout, sometimes
-     * before the step waits), twice, or never.
+     * The Kafka listener of the events. A provider decides an item's event once what it follows was done; the event
+     * then arrives after a random delay (often after the step's timeout, sometimes before the step waits), twice, or
+     * never.
      */
     private suspend fun listener(engine: SagaEngine): Unit = coroutineScope {
         while (true) {
-            val running = pg.query("SELECT id, business_key, input FROM saga WHERE type = 'ITEM_PAY' AND state = 'RUNNING'") {
-                Triple(Uuid.parse(it.getString(1)), it.getString(2), Json.decodeFromString<ItemRequest>(it.getString(3)))
-            }
-            for ((id, key, input) in running) {
-                if (charge.lookup(key) == null) continue                    // nothing charged: no payment
-                val event = provider.decide(key, input.customer) ?: continue
-                if (dice.chance(0.1)) {
-                    deliveries.count("lost")
-                    continue
+            for ((type, waits) in waitsByType) {
+                val running = pg.query("SELECT id, business_key, input FROM saga WHERE type = '$type' AND state = 'RUNNING'") {
+                    Triple(Uuid.parse(it.getString(1)), it.getString(2), Json.decodeFromString<ItemRequest>(it.getString(3)))
                 }
-                repeat(if (dice.chance(0.2)) 2 else 1) {
-                    launch {
-                        delay(dice.millis(2000))
-                        deliver(engine, id, event)
+                for ((id, key, input) in running) for (wait in waits) {
+                    if (!wait.ready(key)) continue                          // nothing charged: no payment
+                    val event = wait.provider.decide(key, input.customer) ?: continue
+                    if (dice.chance(0.1)) {
+                        deliveries.count("lost")
+                        continue
+                    }
+                    repeat(if (dice.chance(0.2)) 2 else 1) {
+                        launch {
+                            delay(dice.millis(2000))
+                            deliver(engine, id, wait.signal, event)
+                        }
                     }
                 }
             }
@@ -494,10 +531,10 @@ class SagaStressIT {
     }
 
     /** Delivers one event: redelivered while the database fails, as Kafka does until the offset is committed. */
-    private suspend fun deliver(engine: SagaEngine, id: Uuid, event: PaymentEvent) {
+    private suspend fun deliver(engine: SagaEngine, id: Uuid, signal: String, event: PaymentEvent) {
         while (true) {
             val result = try {
-                engine.signal(id, "payment", event)
+                engine.signal(id, signal, event)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -527,7 +564,7 @@ class SagaStressIT {
                     if (!e.message.orEmpty().contains("is finished")) throw e
                     "too late"
                 } catch (e: IllegalStateException) {
-                    if (!e.message.orEmpty().startsWith("hook failed")) throw e
+                    if (!e.isHook()) throw e
                     "failed (hook)"                                      // rolled back: try again
                 } catch (e: Exception) {
                     if (!e.isInjected()) throw e
@@ -545,7 +582,8 @@ class SagaStressIT {
         while (true) {
             try {
                 val result = engine.resumeDue(limit = 20, budgetPerSaga = 5.seconds, concurrency = 8)
-                result.failures.filterValues { !it.isInjected() }
+                // A hook may throw as a claim ends the saga (nothing left to undo): postponed, then RESUME_FAILING.
+                result.failures.filterValues { !it.isInjected() && !it.isHook() }
                     .forEach { (id, e) -> violations += "resumeDue failed for saga $id: $e" }
             } catch (e: CancellationException) {
                 throw e
@@ -576,10 +614,10 @@ class SagaStressIT {
                 if (saga.stuckReason == null || saga.stuckAt == null) violations += "$key: stuck without a reason"
                 stuckReasons.count(saga.stuckReason.toString())
                 val step = definitions.getValue(saga.type).steps[saga.stepIndex]
-                // The truth: what the step's system holds, or for the payment wait what the provider decided.
+                // The truth: what the step's system holds, or for a wait what its provider decided.
                 val (truth, json) = when (step) {
                     is ChaosStep -> step.system.lookup(key).let { it to it?.let { e -> Json.encodeToString(e) } }
-                    else -> provider.lookup(key).let { it to it?.let { e -> Json.encodeToString(e) } }
+                    else -> (step as EventWait).provider.lookup(key).let { it to it?.let { e -> Json.encodeToString(e) } }
                 }
                 val action = when {
                     // An undo's key may be forgotten: effect gone → undone by hand; still there → a fresh key.
@@ -588,6 +626,8 @@ class SagaStressIT {
                     // A compensation stuck while its effect is already gone (removed, then the undo failed): done by hand.
                     state == SagaState.COMPENSATING -> if (truth == null && dice.chance(0.6)) "markCompensated" else "retry"
                     truth is PaymentEvent && !truth.succeeded -> "abort"   // declined: the saga gives up
+                    // onSignal or a hook threw on a signal: kept, and used by retry once "fixed".
+                    step is EventWait && saga.stuckReason == StuckReason.RECORD_FAILED && dice.chance(0.6) -> "retry"
                     // The key may be forgotten: not applied → a fresh key; applied → as any applied step, below.
                     saga.stuckReason == StuckReason.KEY_EXPIRED && truth == null -> "retry(newKey)"
                     truth != null -> if (dice.chance(0.7)) "markDone" else "abort(applied)"
@@ -608,7 +648,7 @@ class SagaStressIT {
                 } catch (e: Exception) {
                     // Expected: a hook threw inside the manual action (rolled back, still stuck: try again later),
                     // or an injected database failure. Anything else is an engine error.
-                    val hook = e is IllegalStateException && e.message.orEmpty().startsWith("hook failed")
+                    val hook = e.isHook()
                     val expected = hook || e.isInjected()
                     val label = when { hook -> "failed (hook)"; e.isInjected() -> "failed (database)"; else -> "failed ($e)" }
                     manualActions.computeIfAbsent(label) { AtomicInteger() }.incrementAndGet()
@@ -676,17 +716,17 @@ class SagaStressIT {
                         }
                         if (compensated) problems += "${r.key}: COMPLETED but ${step.name} is marked compensated"
                     }
-                    if (r.type == "ITEM_PAY") {
-                        val paid = stored[paymentWait.name]?.first?.let { Json.decodeFromString<PaymentEvent>(it) }
-                        val truth = provider.lookup(r.key)
-                        if (paid == null || paid != truth || !paid.succeeded) {
-                            problems += "${r.key}: COMPLETED with payment $paid, the provider has $truth"
+                    for (wait in waitsByType[r.type].orEmpty()) {
+                        val event = stored[wait.name]?.first?.let { Json.decodeFromString<PaymentEvent>(it) }
+                        val truth = wait.provider.lookup(r.key)
+                        if (event == null || event != truth || !event.succeeded) {
+                            problems += "${r.key}: COMPLETED with ${wait.signal} $event, the provider has $truth"
                         }
                     }
                 }
                 SagaState.FAILED.name -> {
                     if (r.itemStatus != "FAILED") problems += "${r.key}: FAILED but item is ${r.itemStatus}"
-                    for (step in steps) {
+                    for (step in steps.filter { it.system.undoable }) {
                         step.system.lookup(r.key)?.let { problems += "${r.key}: FAILED but ${step.name} is still applied ($it)" }
                     }
                     stored.filterValues { !it.second }.keys.forEach {
@@ -725,6 +765,18 @@ class SagaStressIT {
         }
         if (reported.any { "PII-" in it.entry.detail.orEmpty() }) problems += "a reported event contains a value (PII-)"
         if (reported.any { it.entry.event == SagaEvents.CREATED }) problems += "a creation was reported"
+
+        if (sagaCount >= 300) {
+            // The shapes above must have been reached, or they prove nothing.
+            mapOf(
+                "a check that finds a refusal" to "event = 'CHECK:Rejected' AND detail LIKE '%found refused%'",
+                "a step with nothing to undo" to "event = 'NOTHING_TO_UNDO' AND step_name = 'notify'",
+                "a bug in onSignal" to "detail LIKE '%onSignal failed%'",
+                "an error with a NUL" to "detail LIKE '%request lost, not applied%'",
+            ).forEach { (what, where) ->
+                if (pg.long("SELECT count(*) FROM saga_log WHERE $where") == 0L) problems += "never happened, a hole in the test: $what"
+            }
+        }
 
         val created = pg.long("SELECT count(*) FROM saga_log WHERE event = 'CREATED'")
         if (created != sagaCount.toLong()) problems += "expected $sagaCount CREATED events, found $created"
