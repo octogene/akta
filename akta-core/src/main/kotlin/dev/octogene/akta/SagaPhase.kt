@@ -66,34 +66,65 @@ internal sealed interface SagaPhase {
     val attempts: Int
     val lastError: String?
     val cancellation: Cancellation?
+    /** When the engine looks at the saga again: its step's, or for a finished saga the last one it had. */
+    val due: Instant
+
+    /** Running or compensating: a current step to act on. */
+    sealed interface Unfinished : SagaPhase {
+        val step: StepState
+        val checkFailures: Int
+        val resumeFailures: Int
+        val key: KeyState
+        override val due: Instant get() = step.due
+
+        /** The same saga, with these fields changed; those not named are kept. */
+        fun with(
+            step: StepState = this.step,
+            attempts: Int = this.attempts,
+            checkFailures: Int = this.checkFailures,
+            resumeFailures: Int = this.resumeFailures,
+            key: KeyState = this.key,
+            cancellation: Cancellation? = this.cancellation,
+            lastError: String? = this.lastError,
+        ): Unfinished = when (this) {
+            is Running -> copy(
+                step = step, attempts = attempts, checkFailures = checkFailures, resumeFailures = resumeFailures, key = key,
+                cancellation = cancellation, lastError = lastError,
+            )
+            is Compensating -> copy(
+                step = step, attempts = attempts, checkFailures = checkFailures, resumeFailures = resumeFailures, key = key,
+                cancellation = cancellation, lastError = lastError,
+            )
+        }
+    }
 
     /** Executing its steps forward. [refusal]: a step's refusal that could not be recorded, kept while it is stuck. */
     data class Running(
         override val identity: Identity,
         override val stepIndex: Int,
-        val step: StepState,
+        override val step: StepState,
         override val attempts: Int,
-        val checkFailures: Int,
-        val resumeFailures: Int,
-        val key: KeyState,
+        override val checkFailures: Int,
+        override val resumeFailures: Int,
+        override val key: KeyState,
         override val cancellation: Cancellation?,
         override val lastError: String?,
         val refusal: String?,
-    ) : SagaPhase
+    ) : Unfinished
 
     /** Undoing its completed steps, last to first, because of [failureReason]. */
     data class Compensating(
         override val identity: Identity,
         override val stepIndex: Int,
-        val step: StepState,
+        override val step: StepState,
         override val attempts: Int,
-        val checkFailures: Int,
-        val resumeFailures: Int,
-        val key: KeyState,
+        override val checkFailures: Int,
+        override val resumeFailures: Int,
+        override val key: KeyState,
         override val cancellation: Cancellation?,
         override val lastError: String?,
         val failureReason: String,
-    ) : SagaPhase
+    ) : Unfinished
 
     /**
      * Ended: every step done ([failureReason] null), or every completed step undone. What it was doing last is kept
@@ -109,6 +140,7 @@ internal sealed interface SagaPhase {
         val failureReason: String?,
     ) : SagaPhase {
         val state: SagaState get() = if (failureReason == null) SagaState.COMPLETED else SagaState.FAILED
+        override val due: Instant get() = lastDue
     }
 
     /** The row, as stored. */
@@ -187,6 +219,22 @@ internal sealed interface SagaPhase {
         }
     }
 }
+
+/** The same step, due at [due]. */
+internal fun StepState.dueAt(due: Instant): StepState = when (this) {
+    is StepState.Ready -> copy(due = due)
+    is StepState.Waiting -> copy(due = due)
+    is StepState.Unknown -> copy(due = due)
+    is StepState.InFlight -> copy(due = due)
+    is StepState.Stuck -> copy(due = due)
+}
+
+/** The typed form of this row: see [SagaPhase.of]. */
+internal fun SagaRecord.phase(): SagaPhase = SagaPhase.of(this)
+
+/** The typed form of this row, which must be an unfinished saga's. */
+internal fun SagaRecord.unfinished(): SagaPhase.Unfinished =
+    phase() as? SagaPhase.Unfinished ?: error("Saga $id is $state: it has no step to act on")
 
 private fun SagaRecord.withStep(step: StepState): SagaRecord = when (step) {
     is StepState.Ready, is StepState.Waiting, is StepState.Unknown -> copy(stepStatus = step.status, nextAttemptAt = step.due)

@@ -111,7 +111,7 @@ class SagaMachineTest {
         assertEquals(StuckReason.CHECK_FAILING, expired(saga().copy(checkFailures = 3, callAction = CallAction.CHECK)).stuckReason)
         assertEquals(StepStatus.UNKNOWN, expired(saga().copy(checkFailures = 3)).stepStatus)   // an execution: checked
         assertNull(expired(saga()).callAction)
-        val undo = expired(saga().copy(state = SagaState.COMPENSATING))
+        val undo = expired(saga().copy(state = SagaState.COMPENSATING, failureReason = "refused", callAction = CallAction.COMPENSATE))
         assertEquals(StepStatus.READY, undo.stepStatus)
         assertNull(undo.lockedUntil)
     }
@@ -161,8 +161,14 @@ class SagaMachineTest {
     }
 
     @Test
+    fun `a row the engine must never write is refused, not decided on`() {
+        assertFailsWith<IllegalStateException> { machine.stuck(saga(status = StepStatus.IN_PROGRESS), StuckReason.CANNOT_TELL, "x", now) }
+        assertFailsWith<IllegalStateException> { machine.next(saga().copy(failureReason = "refused"), 2, now) }
+    }
+
+    @Test
     fun `a second cancellation changes nothing`() {
-        val first = machine.cancel(saga(status = StepStatus.IN_PROGRESS).copy(lockedUntil = now), "first", now).record
+        val first = machine.cancel(saga(status = StepStatus.IN_PROGRESS).copy(lockedUntil = now, callAction = CallAction.EXECUTE), "first", now).record
         assertEquals("first", first.cancelReason)                       // a call in flight: compensates later
         assertEquals(SagaState.RUNNING, first.state)
         assertEquals("first", machine.cancel(first, "second", now).record.cancelReason)

@@ -93,11 +93,11 @@ internal sealed interface Claim {
 internal class SagaMachine(private val config: SagaConfig) {
     /** A new saga, due at once on its first step. */
     fun created(id: Uuid, type: String, key: String, input: String?, traceparent: String?, now: Instant): SagaRecord =
-        SagaRecord(
-            id = id, type = type, key = key, state = SagaState.RUNNING,
-            stepIndex = 0, stepStatus = StepStatus.READY, attempts = 0, nextAttemptAt = now,
-            lockedUntil = null, lastError = null, traceparent = traceparent, createdAt = now, input = input,
-        )
+        SagaPhase.Running(
+            Identity(id, type, key, input, traceparent, createdAt = now), stepIndex = 0, step = StepState.Ready(now),
+            attempts = 0, checkFailures = 0, resumeFailures = 0, key = KeyState(since = null, generation = 0),
+            cancellation = null, lastError = null, refusal = null,
+        ).record()
 
     /** Whether running the saga now could do anything: not finished, not stuck, and due. */
     fun canMoveOn(r: SagaRecord, now: Instant): Boolean =
@@ -116,8 +116,12 @@ internal class SagaMachine(private val config: SagaConfig) {
             current.stepIndex == claimed.stepIndex &&
             current.lockedUntil == claimed.lockedUntil
 
-    /** The saga after its call, before its outcome decides: the lock released. Any outcome but a failed check ends the series of failed checks. */
-    fun released(current: SagaRecord): SagaRecord = current.copy(lockedUntil = null, callAction = null, checkFailures = 0)
+    /**
+     * The saga after its call, before its outcome decides: the lock released. Any outcome but a failed check ends the
+     * series of failed checks. Its step is READY here only to be a valid row: every outcome sets what it becomes.
+     */
+    fun released(current: SagaRecord): SagaRecord =
+        current.unfinished().with(step = StepState.Ready(current.nextAttemptAt), checkFailures = 0).record()
 
     /**
      * What a call's [outcome] makes of the saga [r] (its lock released), whose current step is [step] of [stepCount]:
@@ -152,21 +156,17 @@ internal class SagaMachine(private val config: SagaConfig) {
             is Outcome.NotSent -> if (replay) {
                 replayLater(r, "${outcome.error} (an earlier attempt may be applied)", now)
             } else {
-                retryLater(r.copy(keySince = null), outcome.error, now)
+                retryLater(r.unfinished().with(key = KeyState(since = null, generation = r.keyGeneration)).record(), outcome.error, now)
             }
             is Outcome.Unknown -> when {
-                step.idempotency == null -> r.copy(
-                    stepStatus = StepStatus.UNKNOWN,
-                    nextAttemptAt = now + config.settleDelay,
-                    lastError = outcome.error,
-                )
+                step.idempotency == null -> r.moved(StepState.Unknown(now + config.settleDelay), lastError = outcome.error)
                 else -> replayLater(r, outcome.error, now)
             }
             // Not applied: safe to execute again, or to stop here if the step keeps failing.
             Outcome.NotDone -> if (r.attempts >= config.maxAttempts) {
                 stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: ${r.lastError}", now)
             } else {
-                r.copy(stepStatus = StepStatus.READY, nextAttemptAt = now)
+                r.moved(StepState.Ready(now))
             }
             Outcome.CannotTell -> stuck(r, StuckReason.CANNOT_TELL, "Cannot tell whether step '${step.name}' was applied", now)
             // Counted apart from attempts (a lookup outage must not use up the executions), with backoff.
@@ -176,14 +176,13 @@ internal class SagaMachine(private val config: SagaConfig) {
                 val failures = checkFailures                   // this check was counted when claimed
                 if (failures >= config.maxAttempts) {
                     stuck(
-                        r, StuckReason.CHECK_FAILING,
+                        r.unfinished().with(checkFailures = failures).record(), StuckReason.CHECK_FAILING,
                         "Check keeps failing, step '${step.name}' may have been applied: ${outcome.error}", now,
-                    ).copy(checkFailures = failures)
+                    )
                 } else {
-                    r.copy(
-                        stepStatus = StepStatus.UNKNOWN, checkFailures = failures,
-                        nextAttemptAt = now + maxOf(config.checkRetryDelay, config.backoff(failures)),
-                        lastError = outcome.error,
+                    r.moved(
+                        StepState.Unknown(now + maxOf(config.checkRetryDelay, config.backoff(failures))),
+                        lastError = outcome.error, checkFailures = failures,
                     )
                 }
             }
@@ -195,11 +194,13 @@ internal class SagaMachine(private val config: SagaConfig) {
             is Outcome.Found -> error("A value found is decided by its onSignal, in the engine")
             // What the claim changed goes back, due at once: no attempt used, the idempotency key not used.
             // The rest is kept: a cancellation requested meanwhile, for one.
-            is Outcome.NotCalled -> unclaimed.let { before ->
-                r.copy(
-                    stepStatus = before.stepStatus, attempts = before.attempts, checkFailures = before.checkFailures,
-                    keySince = before.keySince, nextAttemptAt = now,
-                )
+            is Outcome.NotCalled -> unclaimed.unfinished().let { before ->
+                val step = when (before.step) {
+                    is StepState.Ready -> StepState.Ready(now)
+                    is StepState.Unknown -> StepState.Unknown(now)
+                    else -> error("Saga ${r.id}: a call is claimed from READY or UNKNOWN, not ${before.step.status}")
+                }
+                r.unfinished().with(step = step, attempts = before.attempts, checkFailures = before.checkFailures, key = before.key).record()
             }
         }
         return Decision(record, effects)
@@ -231,15 +232,19 @@ internal class SagaMachine(private val config: SagaConfig) {
             resuming && step != null -> resumeAs(r, step, now, signalStored)
             else -> StepStatus.READY to now
         }
+        val resumed = r.unfinished().with(
+            step = when (status) {
+                StepStatus.READY -> StepState.Ready(due)
+                StepStatus.UNKNOWN -> StepState.Unknown(due)
+                StepStatus.WAITING -> StepState.Waiting(due)
+                else -> error("Saga ${r.id}: a retry does not resume a step as $status")
+            },
+            attempts = if (resuming) r.attempts else 0, checkFailures = if (resuming) r.checkFailures else 0,
+            resumeFailures = 0, key = KeyState(since = if (newKey) null else r.keySince, generation = generation), lastError = null,
+        )
         return Decision(
-            r.copy(
-                stepStatus = status, nextAttemptAt = due,
-                attempts = if (resuming) r.attempts else 0, checkFailures = if (resuming) r.checkFailures else 0,
-                lastError = null, stuckReason = null, stuckAt = null, stuckFrom = null, resumeFailures = 0,
-                // Forward, a refusal kept by RECORD_FAILED is dropped: the step is called again.
-                failureReason = if (r.state == SagaState.RUNNING) null else r.failureReason,
-                keySince = if (newKey) null else r.keySince, keyGeneration = generation,
-            ),
+            // Forward, a refusal kept by RECORD_FAILED is dropped: the step is called again.
+            (if (resumed is SagaPhase.Running) resumed.copy(refusal = null) else resumed).record(),
             emptyList(),
             detail = if (newKey) "newKey: generation $generation" else null,
         )
@@ -285,7 +290,7 @@ internal class SagaMachine(private val config: SagaConfig) {
         // Already compensating, for another reason: nothing changes, and the history says so.
         if (r.state != SagaState.RUNNING) return Decision(r, emptyList(), detail = "$reason (already compensating: nothing changed)")
         // The first cancellation counts: a second one is only logged.
-        val requested = if (r.cancelRequestedAt != null) r else r.copy(cancelRequestedAt = now, cancelReason = reason)
+        val requested = if (r.cancelRequestedAt != null) r else r.unfinished().with(cancellation = Cancellation(now, reason)).record()
         return Decision(cancelIfRequested(requested, now), emptyList(), detail = reason)
     }
 
@@ -314,7 +319,7 @@ internal class SagaMachine(private val config: SagaConfig) {
         if (saga.nextAttemptAt > now) return Move.Rest(saga)
         // Every move from here saves the saga: if this transaction commits, the saga could be run, which ends a
         // series of resume failures.
-        if (saga.resumeFailures != 0) saga = saga.copy(resumeFailures = 0)
+        if (saga.resumeFailures != 0) saga = saga.unfinished().with(resumeFailures = 0).record()
         definitionOf()
         // A cancellation that waited for a call to end: compensate now that none is in flight. Before the data is
         // decoded: the claim decodes it, in this same transaction.
@@ -335,7 +340,7 @@ internal class SagaMachine(private val config: SagaConfig) {
 
     /** A signal step whose timeout passed: its check decides. */
     fun timedOut(r: SagaRecord, step: SignalStep<*, *>): SagaRecord =
-        r.copy(stepStatus = StepStatus.UNKNOWN, lastError = "No signal '${step.signal}' before the timeout")
+        r.moved(StepState.Unknown(r.nextAttemptAt), lastError = "No signal '${step.signal}' before the timeout")
 
     /** The call of [step] that the saga [r] is due for, claimed: or the step stops, its key possibly forgotten. */
     fun claim(r: SagaRecord, step: SagaStep<*, *>, now: Instant): Claim {
@@ -369,21 +374,20 @@ internal class SagaMachine(private val config: SagaConfig) {
             keySince = since
         }
         val lockedUntil = now + config.callLock
-        val claimed = r.copy(
-            stepStatus = StepStatus.IN_PROGRESS,
+        val call = when (action) {
+            Action.EXECUTE -> if (replay) CallAction.REPLAY else CallAction.EXECUTE
+            Action.CHECK -> CallAction.CHECK
+            Action.COMPENSATE -> CallAction.COMPENSATE
+        }
+        val claimed = r.unfinished().with(
+            // Due when the lock expires: the recovery job looks again then.
+            step = StepState.InFlight(call, lockedUntil, due = lockedUntil),
             attempts = if (action == Action.CHECK) r.attempts else r.attempts + 1,
             // Counted now, as an attempt is, and reset by any outcome but a failure: a check that ends without
             // recording one (its pod died, the record failed) is limited too.
             checkFailures = if (action == Action.CHECK) r.checkFailures + 1 else r.checkFailures,
-            lockedUntil = lockedUntil,
-            callAction = when (action) {
-                Action.EXECUTE -> if (replay) CallAction.REPLAY else CallAction.EXECUTE
-                Action.CHECK -> CallAction.CHECK
-                Action.COMPENSATE -> CallAction.COMPENSATE
-            },
-            nextAttemptAt = lockedUntil,      // the recovery job looks again when the lock expires
-            keySince = keySince,
-        )
+            key = KeyState(keySince, r.keyGeneration),
+        ).record()
         return Claim.Call(claimed, action, replay)
     }
 
@@ -400,15 +404,16 @@ internal class SagaMachine(private val config: SagaConfig) {
         return if (failures >= config.maxAttempts) {
             // The step is left as it was (attempts, key): retry resumes it, see there. No definition is
             // read here: an unknown type or a step that no longer exists may be the very cause.
-            stuck(
-                r, StuckReason.RESUME_FAILING,
-                "Could not run the saga, $failures times in a row: $error. Fix the cause, then retry: " +
+            r.unfinished().with(
+                step = StepState.Stuck(StuckReason.RESUME_FAILING, at = now, from = r.stepStatus, due = r.nextAttemptAt),
+                resumeFailures = failures,
+                lastError = "Could not run the saga, $failures times in a row: $error. Fix the cause, then retry: " +
                     "the step resumes as it was, checked first if it may have been called",
-                now,
-            ).copy(lockedUntil = null, callAction = null, resumeFailures = failures, stuckFrom = r.stepStatus)
+            ).record()
         } else {
             // lastError keeps the step's own error: the resume failure goes to the log only.
-            r.copy(nextAttemptAt = maxOf(r.nextAttemptAt, now + config.resumeFailureDelay), resumeFailures = failures)
+            val p = r.unfinished()
+            p.with(step = p.step.dueAt(maxOf(r.nextAttemptAt, now + config.resumeFailureDelay)), resumeFailures = failures).record()
         }
     }
 
@@ -461,8 +466,8 @@ internal class SagaMachine(private val config: SagaConfig) {
             }
         }
         val refusal = (outcome as? Outcome.Rejected)?.error?.takeUnless { signalKept }
-        val blocked = stuck(current, StuckReason.RECORD_FAILED, "Could not record $described: $error. $then", now)
-            .copy(lockedUntil = null, callAction = null, failureReason = refusal ?: current.failureReason)
+        val stopped = stuck(current, StuckReason.RECORD_FAILED, "Could not record $described: $error. $then", now).unfinished()
+        val blocked = (if (refusal != null && stopped is SagaPhase.Running) stopped.copy(refusal = refusal) else stopped).record()
         return Decision(blocked, effects)
     }
 
@@ -493,16 +498,15 @@ internal class SagaMachine(private val config: SagaConfig) {
 
     /** The signal step [step] starts waiting, until its timeout. */
     fun waiting(r: SagaRecord, step: SignalStep<*, *>, now: Instant): SagaRecord =
-        r.copy(stepStatus = StepStatus.WAITING, nextAttemptAt = now + step.timeout, attempts = 0, lastError = null)
+        r.moved(StepState.Waiting(now + step.timeout), lastError = null, attempts = 0)
 
     /** The step was refused ([error]): the steps before are undone. */
     fun refused(r: SagaRecord, error: String, now: Instant): SagaRecord =
-        startCompensation(r.copy(lastError = error), r.stepIndex - 1, error, now)
+        startCompensation(r.unfinished().with(lastError = error).record(), r.stepIndex - 1, error, now)
 
     /** The saga, stopped because applying its signal failed ([message]), the signal kept: once fixed, retry uses it. */
     fun blockedBy(r: SagaRecord, message: String?, now: Instant): SagaRecord =
         stuck(r, StuckReason.RECORD_FAILED, "$message. The signal is kept: fix the cause, then retry, which uses it", now)
-            .copy(lockedUntil = null, callAction = null)
 
     /** Whether a claim that failed on a signal stored earlier stops the saga, whose current step is a signal step. */
     fun blocksOnStoredSignal(r: SagaRecord, now: Instant): Boolean {
@@ -560,19 +564,17 @@ internal class SagaMachine(private val config: SagaConfig) {
      * compensates instead, this step included, even when it was the last one.
      */
     fun next(r: SagaRecord, stepCount: Int, now: Instant): SagaRecord {
-        if (r.cancelRequestedAt != null && r.state == SagaState.RUNNING) return startCompensation(r, r.stepIndex, cancelled(r), now)
-        val index = r.stepIndex + 1
+        val p = r.unfinished() as? SagaPhase.Running ?: error("Saga ${r.id} is ${r.state}: only a running saga moves on")
+        if (p.cancellation != null) return startCompensation(r, r.stepIndex, cancelled(r), now)
+        val index = p.stepIndex + 1
         return if (index == stepCount) {
-            r.copy(
-                state = SagaState.COMPLETED, stepStatus = StepStatus.READY, lastError = null, stuckReason = null, stuckAt = null, stuckFrom = null,
-                keySince = null, keyGeneration = 0, checkFailures = 0, resumeFailures = 0,
-            )
+            SagaPhase.Finished(p.identity, p.stepIndex, p.attempts, lastDue = p.due, cancellation = null, lastError = null, failureReason = null)
         } else {
-            r.copy(
-                stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0, nextAttemptAt = now,
-                lastError = null, stuckReason = null, stuckAt = null, stuckFrom = null, keySince = null, keyGeneration = 0, resumeFailures = 0,
+            SagaPhase.Running(
+                p.identity, index, StepState.Ready(now), attempts = 0, checkFailures = 0, resumeFailures = 0,
+                key = KeyState(since = null, generation = 0), cancellation = null, lastError = null, refusal = null,
             )
-        }
+        }.record()
     }
 
     /**
@@ -583,24 +585,27 @@ internal class SagaMachine(private val config: SagaConfig) {
     fun startCompensation(r: SagaRecord, index: Int, reason: String, now: Instant): SagaRecord {
         check(r.state == SagaState.RUNNING) { "Saga ${r.id} is already ${r.state}" }
         // A refusal kept by RECORD_FAILED stays the reason, when an operator then aborts.
-        return compensateFrom(r.copy(failureReason = r.failureReason ?: reason), index, now)
+        return compensateFrom(r, index, now, failureReason = r.failureReason ?: reason)
     }
 
     fun cancelled(r: SagaRecord) = "Cancelled: ${r.cancelReason}"
 
-    /** Undoes the completed steps, from [index] down to the first one. */
-    fun compensateFrom(r: SagaRecord, index: Int, now: Instant): SagaRecord =
-        if (index < 0) {
-            r.copy(
-                state = SagaState.FAILED, stepStatus = StepStatus.READY, checkFailures = 0, stuckReason = null, stuckAt = null, stuckFrom = null,
-                keySince = null, keyGeneration = 0, resumeFailures = 0,
-            )
+    /**
+     * Undoes the completed steps, from [index] down to the first one, because of [failureReason] (already the saga's
+     * once it compensates). Nothing to undo: FAILED, keeping what it was doing last and its last error.
+     */
+    fun compensateFrom(r: SagaRecord, index: Int, now: Instant, failureReason: String? = r.failureReason): SagaRecord {
+        val p = r.unfinished()
+        val reason = checkNotNull(failureReason) { "Saga ${r.id} compensates without a reason" }
+        return if (index < 0) {
+            SagaPhase.Finished(p.identity, p.stepIndex, p.attempts, lastDue = p.due, p.cancellation, p.lastError, reason)
         } else {
-            r.copy(
-                state = SagaState.COMPENSATING, stepIndex = index, stepStatus = StepStatus.READY, attempts = 0, checkFailures = 0,
-                nextAttemptAt = now, stuckReason = null, stuckAt = null, stuckFrom = null, keySince = null, keyGeneration = 0, resumeFailures = 0,
+            SagaPhase.Compensating(
+                p.identity, index, StepState.Ready(now), attempts = 0, checkFailures = 0, resumeFailures = 0,
+                key = KeyState(since = null, generation = 0), p.cancellation, p.lastError, reason,
             )
-        }
+        }.record()
+    }
 
     /**
      * An idempotent step that may have been applied: it stays UNKNOWN (abort is refused, cancel waits) and is
@@ -611,14 +616,14 @@ internal class SagaMachine(private val config: SagaConfig) {
         if (r.attempts >= config.maxAttempts) {
             stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
         } else {
-            r.copy(stepStatus = StepStatus.UNKNOWN, nextAttemptAt = now + config.backoff(r.attempts), lastError = "$error; retrying with the same key")
+            r.moved(StepState.Unknown(now + config.backoff(r.attempts)), lastError = "$error; retrying with the same key")
         }
 
     fun retryLater(r: SagaRecord, error: String, now: Instant): SagaRecord =
         if (r.attempts >= config.maxAttempts) {
             stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
         } else {
-            r.copy(stepStatus = StepStatus.READY, nextAttemptAt = now + config.backoff(r.attempts), lastError = error)
+            r.moved(StepState.Ready(now + config.backoff(r.attempts)), lastError = error)
         }
 
     /**
@@ -630,32 +635,25 @@ internal class SagaMachine(private val config: SagaConfig) {
         if (r.state == SagaState.RUNNING && idempotent()) {
             // Idempotent: replayed with the same key from the lock's expiry, as after an unknown outcome.
             if (r.attempts >= config.maxAttempts) {
-                stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the call", now).copy(lockedUntil = null, callAction = null)
+                stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the call", now)
             } else {
-                r.copy(
-                    stepStatus = StepStatus.UNKNOWN, lockedUntil = null, callAction = null, nextAttemptAt = since,
-                    lastError = "Lock expired during the call; retrying with the same key",
-                )
+                r.moved(StepState.Unknown(since), lastError = "Lock expired during the call; retrying with the same key")
             }
         } else if (r.callAction == CallAction.CHECK && r.checkFailures >= config.maxAttempts) {
             // A check that never recorded an outcome, again and again.
             stuck(
                 r, StuckReason.CHECK_FAILING,
                 "Check keeps failing, the step may have been applied: lock expired during the check", now,
-            ).copy(lockedUntil = null, callAction = null)
+            )
         } else if (r.state == SagaState.RUNNING) {
-            r.copy(
-                stepStatus = StepStatus.UNKNOWN, lockedUntil = null, callAction = null, nextAttemptAt = since + config.settleDelay,
+            r.moved(
+                StepState.Unknown(since + config.settleDelay),
                 lastError = "Lock expired during the ${if (r.callAction == CallAction.CHECK) "check" else "call"}",
             )
         } else if (r.attempts >= config.maxAttempts) {
             stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the compensation", now)
-                .copy(lockedUntil = null, callAction = null)
         } else {
-            r.copy(
-                stepStatus = StepStatus.READY, lockedUntil = null, callAction = null, nextAttemptAt = since,
-                lastError = "Lock expired during the compensation",
-            )
+            r.moved(StepState.Ready(since), lastError = "Lock expired during the compensation")
         }
 
     /**
@@ -667,7 +665,15 @@ internal class SagaMachine(private val config: SagaConfig) {
         return if (r.keyGeneration > 0) "$base/${r.keyGeneration}" else base
     }
 
-    /** The saga stops for a human, for [reason]. Leaving STUCK clears both (see [next], [compensateFrom], [retry]). */
+    /** The saga stops for a human, for [reason], its lock released if it had one. Leaving STUCK clears it all (see [next], [compensateFrom], [retry]). */
     fun stuck(r: SagaRecord, reason: StuckReason, error: String?, now: Instant): SagaRecord =
-        r.copy(stepStatus = StepStatus.STUCK, stuckReason = reason, stuckAt = now, lastError = error)
+        r.unfinished().with(step = StepState.Stuck(reason, at = now, from = null, due = r.nextAttemptAt), lastError = error).record()
+
+    /** The unfinished saga [this], its step now [step]; the fields named changed, the others kept. */
+    private fun SagaRecord.moved(
+        step: StepState,
+        lastError: String? = this.lastError,
+        attempts: Int = this.attempts,
+        checkFailures: Int = this.checkFailures,
+    ): SagaRecord = unfinished().with(step = step, lastError = lastError, attempts = attempts, checkFailures = checkFailures).record()
 }
