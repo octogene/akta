@@ -97,11 +97,7 @@ public class SagaEngine(
             }
         }
         val now = currentTime()
-        val record = SagaRecord(
-            id = Uuid.generateV7(), type = definition.type, key = key, state = SagaState.RUNNING,
-            stepIndex = 0, stepStatus = StepStatus.READY, attempts = 0, nextAttemptAt = now,
-            lockedUntil = null, lastError = null, traceparent = traceparent, createdAt = now, input = encoded,
-        )
+        val record = machine.created(Uuid.generateV7(), definition.type, key, encoded, traceparent, now)
         repository.insert(record, now)
         log(record.id, record.stepIndex, null, SagaEvents.CREATED, null, now, trace = traceId())
         return record.id
@@ -224,22 +220,7 @@ public class SagaEngine(
             tx {
                 val r = lock(id, skipLocked = true) ?: return@tx
                 val now = currentTime()
-                val inFlight = r.stepStatus == StepStatus.IN_PROGRESS && r.lockedUntil?.let { it > now } == true
-                if (r.state.isFinished || r.stepStatus == StepStatus.STUCK || inFlight) return@tx
-                val failures = r.resumeFailures + 1
-                val postponed = if (failures >= config.maxAttempts) {
-                    // The step is left as it was (attempts, key): retry resumes it, see there. No definition is
-                    // read here: an unknown type or a step that no longer exists may be the very cause.
-                    machine.stuck(
-                        r, StuckReason.RESUME_FAILING,
-                        "Could not run the saga, $failures times in a row: $error. Fix the cause, then retry: " +
-                            "the step resumes as it was, checked first if it may have been called",
-                        now,
-                    ).copy(lockedUntil = null, resumeFailures = failures, stuckFrom = r.stepStatus)
-                } else {
-                    // lastError keeps the step's own error: the resume failure goes to the log only.
-                    r.copy(nextAttemptAt = maxOf(r.nextAttemptAt, now + config.resumeFailureDelay), resumeFailures = failures)
-                }
+                val postponed = machine.postpone(r, error.toString(), now) ?: return@tx
                 save(postponed, now)
                 log(r.id, r.stepIndex, null, SagaEvents.RESUME_FAILED, error.toString(), now, trace)
             }
@@ -450,36 +431,30 @@ public class SagaEngine(
             val detail = listOfNotNull(what, describe(step, value)?.let { "ref=$it" }).joinToString(" ")
             log(r.id, index, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
         }
-        // Past the step (moved on, compensating or finished): the saga never goes back, so nothing would
-        // read the signal. Not stored: its value may hold personal data, kept for nothing until the purge.
-        if (r.state != SagaState.RUNNING || r.stepIndex > index) {
-            received("ignored: too late")
-            return SignalResult.Ignored(r.id)
-        }
-        // Cancelled while a call is in flight: whatever its outcome, the saga compensates and never waits again.
-        if (r.cancelRequestedAt != null) {
-            received("ignored: cancelled")
-            return SignalResult.Ignored(r.id)
+        when (machine.arrival(r, index)) {
+            Arrival.TOO_LATE -> { received("ignored: too late"); return SignalResult.Ignored(r.id) }
+            Arrival.CANCELLED -> { received("ignored: cancelled"); return SignalResult.Ignored(r.id) }
+            Arrival.STORE -> Unit
         }
         if (!repository.saveSignal(r.id, name, encoded, now)) {
             received("ignored: already received")
             return SignalResult.Ignored(r.id)
         }
-        // WAITING, or UNKNOWN: its timeout passed and a check failed, to be tried again. No call is in flight
-        // either way (a check in flight is IN_PROGRESS), so the signal answers now what the check looks up.
-        val listening = r.stepStatus == StepStatus.WAITING || r.stepStatus == StepStatus.UNKNOWN
-        return if (r.stepIndex == index && listening && failed != null) {
-            save(blockedBy(failed, r, now), now)
-            received("stored: ${failed.what} failed")
-            SignalResult.Stored(r.id)
-        } else if (r.stepIndex == index && listening) {
-            applySignal(r, def, step, context(r, def), value, encoded, now)
-            received("delivered")
-            SignalResult.Delivered(r.id)
-        } else {
-            // Not waiting yet (an earlier step runs, or this one is ready, checking or stuck): kept for it.
-            received("stored")
-            SignalResult.Stored(r.id)
+        return when (machine.useOfStored(r, index, failed != null)) {
+            Use.BLOCK -> {
+                save(machine.blockedBy(r, checkNotNull(failed).message, now), now)
+                received("stored: ${failed.what} failed")
+                SignalResult.Stored(r.id)
+            }
+            Use.APPLY -> {
+                applySignal(r, def, step, context(r, def), value, encoded, now)
+                received("delivered")
+                SignalResult.Delivered(r.id)
+            }
+            Use.KEEP -> {
+                received("stored")
+                SignalResult.Stored(r.id)
+            }
         }
     }
 
@@ -493,10 +468,9 @@ public class SagaEngine(
         trace: String?,
     ): Cycle {
         consumeStored(r, def, step, ctx, now, trace)?.let { return it }
-        val deadline = now + step.timeout
-        val waiting = r.copy(stepStatus = StepStatus.WAITING, nextAttemptAt = deadline, attempts = 0, lastError = null)
+        val waiting = machine.waiting(r, step, now)
         save(waiting, now)
-        log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_STARTED, "signal '${step.signal}' until $deadline", now, trace)
+        log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_STARTED, "signal '${step.signal}' until ${waiting.nextAttemptAt}", now, trace)
         return Cycle(waiting, next = null)
     }
 
@@ -559,7 +533,7 @@ public class SagaEngine(
             repository.saveResult(r.id, r.stepIndex, step.name, encoded, now)
             machine.next(r, def.steps.size, now)
         } catch (e: StepRejected) {
-            machine.startCompensation(r.copy(lastError = e.toString()), r.stepIndex - 1, e.toString(), now)
+            machine.refused(r, e.toString(), now)
         }
 
     /**
@@ -586,14 +560,6 @@ public class SagaEngine(
     private class SignalFailed(val signal: String, val what: String, cause: Throwable) :
         RuntimeException("$what threw on signal '$signal': $cause", cause)
 
-    /** The saga, stopped after [failure], its signal kept: once the cause is fixed, retry uses it. */
-    private fun blockedBy(failure: SignalFailed, r: SagaRecord, now: Instant): SagaRecord =
-        machine.stuck(
-            r, StuckReason.RECORD_FAILED,
-            "${failure.message}. The signal is kept: fix the cause, then retry, which uses it",
-            now,
-        ).copy(lockedUntil = null)
-
     /**
      * The claim threw [failure]: onSignal, or the hook of a saga the signal ended, failed on a signal stored
      * earlier, as the step started waiting or before a timeout check. The claim rolled back whole: the saga
@@ -603,12 +569,8 @@ public class SagaEngine(
         val r = lock(id) ?: return Cycle(saga = null, next = null)
         val step = definition(r.type).steps[r.stepIndex] as? SignalStep<*, *>
         val now = currentTime()
-        // The claim that threw may first have expired the lock of a timeout check whose process died: that
-        // rolled back too, so the row is still IN_PROGRESS. Left as it is, every resume would do the same again.
-        val checkDied = r.stepStatus == StepStatus.IN_PROGRESS && r.lockedUntil?.let { it <= now } == true
-        val waiting = r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.UNKNOWN || checkDied
-        if (r.state != SagaState.RUNNING || step == null || !waiting) return Cycle(r, next = null)
-        val blocked = blockedBy(failure, r, now)
+        if (step == null || !machine.blocksOnStoredSignal(r, now)) return Cycle(r, next = null)
+        val blocked = machine.blockedBy(r, failure.message, now)
         save(blocked, now)
         log(r.id, r.stepIndex, step.name, SagaEvents.RECORD_FAILED, blocked.lastError, now, trace)
         return Cycle(blocked, next = null)
@@ -648,8 +610,7 @@ public class SagaEngine(
             updated
         }
         val now = currentTime()
-        val canMoveOn = !committed.state.isFinished && committed.stepStatus != StepStatus.STUCK && committed.nextAttemptAt <= now
-        if (!runFor.isPositive() || !canMoveOn) return committed
+        if (!runFor.isPositive() || !machine.canMoveOn(committed, now)) return committed
         // The action is committed: a failure from here on is the saga's, not the action's.
         return try {
             run(id, deadline = now + runFor)
@@ -893,7 +854,7 @@ public class SagaEngine(
     private fun record(work: Work, reported: Outcome, claimUntil: Instant?): Cycle {
         val current = lock(work.saga.id) ?: return Cycle(saga = null, next = null)
         val now = currentTime()
-        if (!stillClaimedBy(current, work)) {
+        if (!machine.stillClaimed(current, work.saga)) {
             log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, reported), now)
             return Cycle(current, next = null)
         }
@@ -910,8 +871,7 @@ public class SagaEngine(
             reported
         }
         val def = definition(current.type)
-        // Any outcome but a failed check ends the series of failed checks.
-        val r = current.copy(lockedUntil = null, checkFailures = 0)
+        val r = machine.released(current)
 
         val received = signalDuringCheck(work, outcome, r)
         val decided = received?.let { signalDecision(r, def, it.step, work.ctx, it.value, it.encoded, now) }
@@ -975,54 +935,19 @@ public class SagaEngine(
     private fun recordFailed(work: Work, outcome: Outcome, error: Throwable): SagaRecord? {
         val current = lock(work.saga.id) ?: return null
         val now = currentTime()
-        if (!stillClaimedBy(current, work)) {
+        if (!machine.stillClaimed(current, work.saga)) {
             log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, outcome), now)
             return current
         }
-        // A signal step's timeout check, whose value or signal is what failed to be recorded (onSignal or a hook
-        // threw on it): the value found is stored as the step's signal (a real one stored first wins), so that
-        // retry uses it at once instead of waiting a whole timeout again; a signal received during the check is
-        // stored already. No refusal is kept then: the step got its value. An explicit StepRejected from the
-        // check still refuses, as in record().
-        @Suppress("UNCHECKED_CAST")
-        val signalStep = (work.step as? AnySignalStep)?.takeIf { work.action == Action.CHECK }
-        val valueOrSignal = outcome is Outcome.Found || outcome == Outcome.CannotTell ||
-            (outcome is Outcome.Rejected && outcome.noSignalFound)
-        if (signalStep != null && outcome is Outcome.Found) {
-            repository.saveSignal(current.id, signalStep.signal, checkNotNull(outcome.done.output), now)
-        }
-        val signalKept = signalStep != null && valueOrSignal && repository.signal(current.id, signalStep.signal) != null
-        val then = when {
-            signalKept -> "The signal is kept" + (if (outcome is Outcome.Found) " (the value the check found)" else "") +
-                ": fix the cause, then retry, which uses it"
-            error is SignalFailed -> "onSignal failed: fix the cause, then retry (a signal received is used; " +
-                "otherwise the step waits again, then checks), or markDone with the value found"
-            else -> when (outcome) {
-            is Outcome.Done -> {
-                repository.saveResult(current.id, current.stepIndex, work.step.name, outcome.output, now)
-                "The output is saved: markDone(id, null) continues with it"
-            }
-            Outcome.Compensated -> {
-                repository.markCompensated(current.id, current.stepIndex, now)
-                "The undo was done: markCompensated(id) goes on with the previous steps"
-            }
-            is Outcome.Rejected -> "The step was refused, nothing applied: abort(id, currentStepApplied = false) gives up, as the refusal asked"
-            else -> "Look in the external system for what the call did, then markDone, retry or abort"
-            }
-        }
-        val refusal = (outcome as? Outcome.Rejected)?.error?.takeUnless { signalKept }
-        val blocked = machine.stuck(current, StuckReason.RECORD_FAILED, "Could not record ${describe(work, outcome)}: $error. $then", now)
-            .copy(lockedUntil = null, failureReason = refusal ?: current.failureReason)
+        val decision = machine.recordFailed(
+            current, work.step, work.action, outcome, describe(work, outcome), error, onSignalFailed = error is SignalFailed, now,
+        ) { signal -> repository.signal(current.id, signal) != null }
+        write(decision.effects, current, now) { work.step.name }
+        val blocked = decision.record
         save(blocked, now)
         log(work, SagaEvents.RECORD_FAILED, blocked.lastError, now)
         return blocked
     }
-
-    /** False when the lock expired during the call and another instance took over. */
-    private fun stillClaimedBy(current: SagaRecord, work: Work): Boolean =
-        current.stepStatus == StepStatus.IN_PROGRESS &&
-            current.stepIndex == work.saga.stepIndex &&
-            current.lockedUntil == work.saga.lockedUntil
 
     // ---- Transitions ------------------------------------------------------------------------
 
@@ -1030,6 +955,7 @@ public class SagaEngine(
     private fun write(effects: List<Effect>, r: SagaRecord, now: Instant, stepName: () -> String) {
         for (effect in effects) when (effect) {
             is Effect.SaveResult -> repository.saveResult(r.id, r.stepIndex, stepName(), effect.output, now)
+            is Effect.SaveSignal -> repository.saveSignal(r.id, effect.signal, effect.value, now)
             Effect.MarkCompensated -> repository.markCompensated(r.id, r.stepIndex, now)
         }
     }

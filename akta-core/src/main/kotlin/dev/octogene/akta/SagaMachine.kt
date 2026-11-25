@@ -1,6 +1,7 @@
 package dev.octogene.akta
 
 import kotlin.time.Instant
+import kotlin.uuid.Uuid
 
 /*
  * The decisions of the engine, apart from what runs them: no store, clock, serializer or step code here. Each takes
@@ -45,6 +46,21 @@ internal sealed interface Effect {
     data class SaveResult(val output: String?) : Effect
     /** The step is undone. */
     data object MarkCompensated : Effect
+    /** The signal [signal] is stored with [value], encoded, unless one of that name was received first. */
+    data class SaveSignal(val signal: String, val value: String) : Effect
+}
+
+/** What a signal does on arrival: see [SagaMachine.arrival]. */
+internal enum class Arrival { TOO_LATE, CANCELLED, STORE }
+
+/** What becomes of a signal once stored: see [SagaMachine.useOfStored]. */
+internal enum class Use {
+    /** Its application failed before: the saga stops, the signal kept. */
+    BLOCK,
+    /** Its step is listening: onSignal decides now. */
+    APPLY,
+    /** Its step does not listen yet: kept for it. */
+    KEEP,
 }
 
 /** A decision: the saga's row as it must be, what to write besides it, and what to log about it ([detail]). */
@@ -75,6 +91,27 @@ internal sealed interface Claim {
 }
 
 internal class SagaMachine(private val config: SagaConfig) {
+    /** A new saga, due at once on its first step. */
+    fun created(id: Uuid, type: String, key: String, input: String?, traceparent: String?, now: Instant): SagaRecord =
+        SagaRecord(
+            id = id, type = type, key = key, state = SagaState.RUNNING,
+            stepIndex = 0, stepStatus = StepStatus.READY, attempts = 0, nextAttemptAt = now,
+            lockedUntil = null, lastError = null, traceparent = traceparent, createdAt = now, input = input,
+        )
+
+    /** Whether running the saga now could do anything: not finished, not stuck, and due. */
+    fun canMoveOn(r: SagaRecord, now: Instant): Boolean =
+        !r.state.isFinished && r.stepStatus != StepStatus.STUCK && r.nextAttemptAt <= now
+
+    /** False when the lock of the call claimed as [claimed] expired during it, and another instance took over. */
+    fun stillClaimed(current: SagaRecord, claimed: SagaRecord): Boolean =
+        current.stepStatus == StepStatus.IN_PROGRESS &&
+            current.stepIndex == claimed.stepIndex &&
+            current.lockedUntil == claimed.lockedUntil
+
+    /** The saga after its call, before its outcome decides: the lock released. Any outcome but a failed check ends the series of failed checks. */
+    fun released(current: SagaRecord): SagaRecord = current.copy(lockedUntil = null, checkFailures = 0)
+
     /**
      * What a call's [outcome] makes of the saga [r] (its lock released), whose current step is [step] of [stepCount]:
      * the row, and what to write besides it, in the same transaction. [checkFailures] is the count before this record
@@ -102,7 +139,7 @@ internal class SagaMachine(private val config: SagaConfig) {
                     "record it with markDone, or undo the step with abort",
                 now,
             )
-            is Outcome.Rejected -> startCompensation(r.copy(lastError = outcome.error), r.stepIndex - 1, outcome.error, now)
+            is Outcome.Rejected -> refused(r, outcome.error, now)
             // A replay that never left says nothing of the earlier attempt, which may be applied: still UNKNOWN.
             // A first attempt that never left did not use the key: its window has not started (keySince cleared).
             is Outcome.NotSent -> if (replay) {
@@ -336,6 +373,132 @@ internal class SagaMachine(private val config: SagaConfig) {
             keySince = keySince,
         )
         return Claim.Call(claimed, action, replay)
+    }
+
+    // ---- Failures around a run ------------------------------------------------------------------------------
+
+    /**
+     * After a run threw (resumeDue, or the run after a manual action): the saga postponed, or stopped after too
+     * many failures in a row; null to leave it as it is (finished, stuck, or a call in flight).
+     */
+    fun postpone(r: SagaRecord, error: String, now: Instant): SagaRecord? {
+        val inFlight = r.stepStatus == StepStatus.IN_PROGRESS && r.lockedUntil?.let { it > now } == true
+        if (r.state.isFinished || r.stepStatus == StepStatus.STUCK || inFlight) return null
+        val failures = r.resumeFailures + 1
+        return if (failures >= config.maxAttempts) {
+            // The step is left as it was (attempts, key): retry resumes it, see there. No definition is
+            // read here: an unknown type or a step that no longer exists may be the very cause.
+            stuck(
+                r, StuckReason.RESUME_FAILING,
+                "Could not run the saga, $failures times in a row: $error. Fix the cause, then retry: " +
+                    "the step resumes as it was, checked first if it may have been called",
+                now,
+            ).copy(lockedUntil = null, resumeFailures = failures, stuckFrom = r.stepStatus)
+        } else {
+            // lastError keeps the step's own error: the resume failure goes to the log only.
+            r.copy(nextAttemptAt = maxOf(r.nextAttemptAt, now + config.resumeFailureDelay), resumeFailures = failures)
+        }
+    }
+
+    /**
+     * The record of [outcome] (described as [described]) failed, then the outcome alone too, with [error]: the saga
+     * [current] stops (RECORD_FAILED) on the [step] that ran, keeping what the outcome established. [onSignalFailed]:
+     * the error is onSignal's, or a hook's after a signal. [signalStored]: whether a signal of a name was received.
+     */
+    fun recordFailed(
+        current: SagaRecord,
+        step: SagaStep<*, *>,
+        action: Action,
+        outcome: Outcome,
+        described: String,
+        error: Throwable,
+        onSignalFailed: Boolean,
+        now: Instant,
+        signalStored: (signal: String) -> Boolean,
+    ): Decision {
+        // A signal step's timeout check, whose value or signal is what failed to be recorded (onSignal or a hook
+        // threw on it): the value found is stored as the step's signal (a real one stored first wins), so that
+        // retry uses it at once instead of waiting a whole timeout again; a signal received during the check is
+        // stored already. No refusal is kept then: the step got its value. An explicit StepRejected from the
+        // check still refuses, as in record().
+        val signalStep = (step as? SignalStep<*, *>)?.takeIf { action == Action.CHECK }
+        val valueOrSignal = outcome is Outcome.Found || outcome == Outcome.CannotTell ||
+            (outcome is Outcome.Rejected && outcome.noSignalFound)
+        val effects = mutableListOf<Effect>()
+        if (signalStep != null && outcome is Outcome.Found) {
+            effects += Effect.SaveSignal(signalStep.signal, checkNotNull(outcome.done.output))
+        }
+        // The value found is stored above, unless a signal was stored first: either way, one is there.
+        val signalKept = signalStep != null && valueOrSignal && (outcome is Outcome.Found || signalStored(signalStep.signal))
+        val then = when {
+            signalKept -> "The signal is kept" + (if (outcome is Outcome.Found) " (the value the check found)" else "") +
+                ": fix the cause, then retry, which uses it"
+            onSignalFailed -> "onSignal failed: fix the cause, then retry (a signal received is used; " +
+                "otherwise the step waits again, then checks), or markDone with the value found"
+            else -> when (outcome) {
+            is Outcome.Done -> {
+                effects += Effect.SaveResult(outcome.output)
+                "The output is saved: markDone(id, null) continues with it"
+            }
+            Outcome.Compensated -> {
+                effects += Effect.MarkCompensated
+                "The undo was done: markCompensated(id) goes on with the previous steps"
+            }
+            is Outcome.Rejected -> "The step was refused, nothing applied: abort(id, currentStepApplied = false) gives up, as the refusal asked"
+            else -> "Look in the external system for what the call did, then markDone, retry or abort"
+            }
+        }
+        val refusal = (outcome as? Outcome.Rejected)?.error?.takeUnless { signalKept }
+        val blocked = stuck(current, StuckReason.RECORD_FAILED, "Could not record $described: $error. $then", now)
+            .copy(lockedUntil = null, failureReason = refusal ?: current.failureReason)
+        return Decision(blocked, effects)
+    }
+
+    // ---- Signals ----------------------------------------------------------------------------------------------
+
+    /** What a signal for the step at [index] does on arrival, before it is stored. */
+    fun arrival(r: SagaRecord, index: Int): Arrival = when {
+        // Past the step (moved on, compensating or finished): the saga never goes back, so nothing would
+        // read the signal. Not stored: its value may hold personal data, kept for nothing until the purge.
+        r.state != SagaState.RUNNING || r.stepIndex > index -> Arrival.TOO_LATE
+        // Cancelled while a call is in flight: whatever its outcome, the saga compensates and never waits again.
+        r.cancelRequestedAt != null -> Arrival.CANCELLED
+        else -> Arrival.STORE
+    }
+
+    /** What becomes of a signal for the step at [index], once stored; [failed]: its application failed before. */
+    fun useOfStored(r: SagaRecord, index: Int, failed: Boolean): Use {
+        // WAITING, or UNKNOWN: its timeout passed and a check failed, to be tried again. No call is in flight
+        // either way (a check in flight is IN_PROGRESS), so the signal answers now what the check looks up.
+        val listening = r.stepStatus == StepStatus.WAITING || r.stepStatus == StepStatus.UNKNOWN
+        return when {
+            r.stepIndex == index && listening && failed -> Use.BLOCK
+            r.stepIndex == index && listening -> Use.APPLY
+            // Not waiting yet (an earlier step runs, or this one is ready, checking or stuck): kept for it.
+            else -> Use.KEEP
+        }
+    }
+
+    /** The signal step [step] starts waiting, until its timeout. */
+    fun waiting(r: SagaRecord, step: SignalStep<*, *>, now: Instant): SagaRecord =
+        r.copy(stepStatus = StepStatus.WAITING, nextAttemptAt = now + step.timeout, attempts = 0, lastError = null)
+
+    /** The step was refused ([error]): the steps before are undone. */
+    fun refused(r: SagaRecord, error: String, now: Instant): SagaRecord =
+        startCompensation(r.copy(lastError = error), r.stepIndex - 1, error, now)
+
+    /** The saga, stopped because applying its signal failed ([message]), the signal kept: once fixed, retry uses it. */
+    fun blockedBy(r: SagaRecord, message: String?, now: Instant): SagaRecord =
+        stuck(r, StuckReason.RECORD_FAILED, "$message. The signal is kept: fix the cause, then retry, which uses it", now)
+            .copy(lockedUntil = null)
+
+    /** Whether a claim that failed on a signal stored earlier stops the saga, whose current step is a signal step. */
+    fun blocksOnStoredSignal(r: SagaRecord, now: Instant): Boolean {
+        // The claim that threw may first have expired the lock of a timeout check whose process died: that
+        // rolled back too, so the row is still IN_PROGRESS. Left as it is, every resume would do the same again.
+        val checkDied = r.stepStatus == StepStatus.IN_PROGRESS && r.lockedUntil?.let { it <= now } == true
+        val waiting = r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.UNKNOWN || checkDied
+        return r.state == SagaState.RUNNING && waiting
     }
 
     // ---- Transitions ----------------------------------------------------------------------------------------
