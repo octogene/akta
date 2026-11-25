@@ -1,5 +1,6 @@
 package dev.octogene.akta.exposed
 
+import dev.octogene.akta.CallAction
 import dev.octogene.akta.DuplicateSagaException
 import dev.octogene.akta.SagaLogEntry
 import dev.octogene.akta.SagaRecord
@@ -70,6 +71,7 @@ internal object SagaTable : Table("saga") {
     val keyGeneration = integer("key_generation")
     val resumeFailures = integer("resume_failures")
     val stuckFrom = text("stuck_from").nullable()
+    val callAction = text("call_action").nullable()
     val createdAt = timestampWithTimeZone("created_at")
     val updatedAt = timestampWithTimeZone("updated_at")
     override val primaryKey = PrimaryKey(id)
@@ -220,6 +222,7 @@ public class ExposedSagaRepository : SagaRepository {
         s[SagaTable.keyGeneration] = r.keyGeneration
         s[SagaTable.resumeFailures] = r.resumeFailures
         s[SagaTable.stuckFrom] = r.stuckFrom?.name
+        s[SagaTable.callAction] = r.callAction?.name
         s[SagaTable.nextAttemptAt] = r.nextAttemptAt.utc()
         s[SagaTable.lockedUntil] = r.lockedUntil?.utc()
         s[SagaTable.lastError] = r.lastError?.take(SagaRepository.MAX_TEXT)
@@ -251,6 +254,7 @@ public class ExposedSagaRepository : SagaRepository {
         keyGeneration = this[SagaTable.keyGeneration],
         resumeFailures = this[SagaTable.resumeFailures],
         stuckFrom = this[SagaTable.stuckFrom]?.let(StepStatus::valueOf),
+        callAction = this[SagaTable.callAction]?.let(CallAction::valueOf),
     )
 
     private fun ResultRow.toEntry() = SagaLogEntry(

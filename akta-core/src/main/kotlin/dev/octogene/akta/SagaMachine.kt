@@ -110,7 +110,7 @@ internal class SagaMachine(private val config: SagaConfig) {
             current.lockedUntil == claimed.lockedUntil
 
     /** The saga after its call, before its outcome decides: the lock released. Any outcome but a failed check ends the series of failed checks. */
-    fun released(current: SagaRecord): SagaRecord = current.copy(lockedUntil = null, checkFailures = 0)
+    fun released(current: SagaRecord): SagaRecord = current.copy(lockedUntil = null, callAction = null, checkFailures = 0)
 
     /**
      * What a call's [outcome] makes of the saga [r] (its lock released), whose current step is [step] of [stepCount]:
@@ -369,6 +369,11 @@ internal class SagaMachine(private val config: SagaConfig) {
             // recording one (its pod died, the record failed) is limited too.
             checkFailures = if (action == Action.CHECK) r.checkFailures + 1 else r.checkFailures,
             lockedUntil = lockedUntil,
+            callAction = when (action) {
+                Action.EXECUTE -> if (replay) CallAction.REPLAY else CallAction.EXECUTE
+                Action.CHECK -> CallAction.CHECK
+                Action.COMPENSATE -> CallAction.COMPENSATE
+            },
             nextAttemptAt = lockedUntil,      // the recovery job looks again when the lock expires
             keySince = keySince,
         )
@@ -393,7 +398,7 @@ internal class SagaMachine(private val config: SagaConfig) {
                 "Could not run the saga, $failures times in a row: $error. Fix the cause, then retry: " +
                     "the step resumes as it was, checked first if it may have been called",
                 now,
-            ).copy(lockedUntil = null, resumeFailures = failures, stuckFrom = r.stepStatus)
+            ).copy(lockedUntil = null, callAction = null, resumeFailures = failures, stuckFrom = r.stepStatus)
         } else {
             // lastError keeps the step's own error: the resume failure goes to the log only.
             r.copy(nextAttemptAt = maxOf(r.nextAttemptAt, now + config.resumeFailureDelay), resumeFailures = failures)
@@ -450,7 +455,7 @@ internal class SagaMachine(private val config: SagaConfig) {
         }
         val refusal = (outcome as? Outcome.Rejected)?.error?.takeUnless { signalKept }
         val blocked = stuck(current, StuckReason.RECORD_FAILED, "Could not record $described: $error. $then", now)
-            .copy(lockedUntil = null, failureReason = refusal ?: current.failureReason)
+            .copy(lockedUntil = null, callAction = null, failureReason = refusal ?: current.failureReason)
         return Decision(blocked, effects)
     }
 
@@ -490,7 +495,7 @@ internal class SagaMachine(private val config: SagaConfig) {
     /** The saga, stopped because applying its signal failed ([message]), the signal kept: once fixed, retry uses it. */
     fun blockedBy(r: SagaRecord, message: String?, now: Instant): SagaRecord =
         stuck(r, StuckReason.RECORD_FAILED, "$message. The signal is kept: fix the cause, then retry, which uses it", now)
-            .copy(lockedUntil = null)
+            .copy(lockedUntil = null, callAction = null)
 
     /** Whether a claim that failed on a signal stored earlier stops the saga, whose current step is a signal step. */
     fun blocksOnStoredSignal(r: SagaRecord, now: Instant): Boolean {
@@ -618,30 +623,30 @@ internal class SagaMachine(private val config: SagaConfig) {
         if (r.state == SagaState.RUNNING && idempotent()) {
             // Idempotent: replayed with the same key from the lock's expiry, as after an unknown outcome.
             if (r.attempts >= config.maxAttempts) {
-                stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the call", now).copy(lockedUntil = null)
+                stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the call", now).copy(lockedUntil = null, callAction = null)
             } else {
                 r.copy(
-                    stepStatus = StepStatus.UNKNOWN, lockedUntil = null, nextAttemptAt = since,
+                    stepStatus = StepStatus.UNKNOWN, lockedUntil = null, callAction = null, nextAttemptAt = since,
                     lastError = "Lock expired during the call; retrying with the same key",
                 )
             }
-        } else if (r.state == SagaState.RUNNING && r.checkFailures >= config.maxAttempts) {
-            // A check: an execution is claimed with no failed check. It never recorded an outcome, again and again.
+        } else if (r.callAction == CallAction.CHECK && r.checkFailures >= config.maxAttempts) {
+            // A check that never recorded an outcome, again and again.
             stuck(
                 r, StuckReason.CHECK_FAILING,
                 "Check keeps failing, the step may have been applied: lock expired during the check", now,
-            ).copy(lockedUntil = null)
+            ).copy(lockedUntil = null, callAction = null)
         } else if (r.state == SagaState.RUNNING) {
             r.copy(
-                stepStatus = StepStatus.UNKNOWN, lockedUntil = null, nextAttemptAt = since + config.settleDelay,
-                lastError = "Lock expired during the ${if (r.checkFailures > 0) "check" else "call"}",
+                stepStatus = StepStatus.UNKNOWN, lockedUntil = null, callAction = null, nextAttemptAt = since + config.settleDelay,
+                lastError = "Lock expired during the ${if (r.callAction == CallAction.CHECK) "check" else "call"}",
             )
         } else if (r.attempts >= config.maxAttempts) {
             stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the compensation", now)
-                .copy(lockedUntil = null)
+                .copy(lockedUntil = null, callAction = null)
         } else {
             r.copy(
-                stepStatus = StepStatus.READY, lockedUntil = null, nextAttemptAt = since,
+                stepStatus = StepStatus.READY, lockedUntil = null, callAction = null, nextAttemptAt = since,
                 lastError = "Lock expired during the compensation",
             )
         }

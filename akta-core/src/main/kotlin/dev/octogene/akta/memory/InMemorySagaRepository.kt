@@ -2,6 +2,7 @@ package dev.octogene.akta.memory
 
 import dev.octogene.akta.DuplicateSagaException
 import dev.octogene.akta.SagaLogEntry
+import dev.octogene.akta.SagaPhase
 import dev.octogene.akta.SagaRecord
 import dev.octogene.akta.SagaRepository
 import dev.octogene.akta.SagaStats
@@ -67,10 +68,15 @@ public class InMemorySagaRepository : SagaRepository {
             "Saga $id: negative step_index, attempts, check_failures, key_generation or resume_failures"
         }
         check((stepStatus == StepStatus.IN_PROGRESS) == (lockedUntil != null)) { "Saga $id violates saga_lock: $stepStatus, lockedUntil $lockedUntil" }
+        check((stepStatus == StepStatus.IN_PROGRESS) == (callAction != null)) { "Saga $id violates saga_call: $stepStatus, callAction $callAction" }
         check((cancelRequestedAt == null) == (cancelReason == null)) { "Saga $id violates saga_cancel" }
         check((stepStatus == StepStatus.STUCK) == (stuckReason != null && stuckAt != null)) { "Saga $id violates saga_stuck_reason" }
         check((stuckReason == null) == (stuckAt == null)) { "Saga $id violates saga_stuck_at" }
         checkText(type, key, lastError, traceparent, input, cancelReason, failureReason)
+        // Every rule of the engine's rows, beyond the schema's: a row the engine must never write fails the test that
+        // wrote it. Read back, it must be the same row.
+        val phase = SagaPhase.of(this)
+        check(phase.record() == this) { "Saga $id: its typed form changes it: $this, read back as ${phase.record()}" }
     }
 
     /** PostgreSQL's text type refuses U+0000. */

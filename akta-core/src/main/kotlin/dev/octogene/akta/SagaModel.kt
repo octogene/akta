@@ -141,7 +141,21 @@ public data class SagaRecord(
     val resumeFailures: Int = 0,
     /** What the step was when [StuckReason.RESUME_FAILING] stopped the saga, for `retry` to resume it; null otherwise. */
     val stuckFrom: StepStatus? = null,
+    /** The call in flight, while the step is IN_PROGRESS (until [lockedUntil]); null otherwise. */
+    val callAction: CallAction? = null,
 )
+
+/** What a call in flight does. Stored: never rename one. */
+public enum class CallAction {
+    /** The step's first execution, or another one after a request not sent or a check that found nothing. */
+    EXECUTE,
+    /** An idempotent step executed again with the same key: an earlier attempt may have been applied. */
+    REPLAY,
+    /** The step's check: was an earlier execution applied? Also a signal step's check at its timeout. */
+    CHECK,
+    /** The step's compensation. */
+    COMPENSATE,
+}
 
 /** Where [SagaEngine.findStuck] continues: after this saga. */
 public data class StuckCursor(val stuckAt: Instant, val id: Uuid) {

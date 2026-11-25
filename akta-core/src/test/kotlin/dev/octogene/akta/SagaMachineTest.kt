@@ -103,12 +103,14 @@ class SagaMachineTest {
     fun `an expired lock is checked, replayed, run again, or stopped after too many checks`() {
         val since = now - 1.minutes
         fun expired(r: SagaRecord, idempotent: Boolean = false) =
-            machine.lockExpired(r.copy(stepStatus = StepStatus.IN_PROGRESS, lockedUntil = since), since, now) { idempotent }
+            machine.lockExpired(r.copy(stepStatus = StepStatus.IN_PROGRESS, lockedUntil = since, callAction = r.callAction ?: CallAction.EXECUTE), since, now) { idempotent }
 
         assertEquals(since + config.settleDelay, expired(saga()).nextAttemptAt)
-        assertEquals("Lock expired during the check", expired(saga().copy(checkFailures = 1)).lastError)
+        assertEquals("Lock expired during the check", expired(saga().copy(checkFailures = 1, callAction = CallAction.CHECK)).lastError)
         assertEquals(since, expired(saga(), idempotent = true).nextAttemptAt)
-        assertEquals(StuckReason.CHECK_FAILING, expired(saga().copy(checkFailures = 3)).stuckReason)
+        assertEquals(StuckReason.CHECK_FAILING, expired(saga().copy(checkFailures = 3, callAction = CallAction.CHECK)).stuckReason)
+        assertEquals(StepStatus.UNKNOWN, expired(saga().copy(checkFailures = 3)).stepStatus)   // an execution: checked
+        assertNull(expired(saga()).callAction)
         val undo = expired(saga().copy(state = SagaState.COMPENSATING))
         assertEquals(StepStatus.READY, undo.stepStatus)
         assertNull(undo.lockedUntil)

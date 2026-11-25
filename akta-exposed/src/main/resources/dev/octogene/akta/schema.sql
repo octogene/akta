@@ -12,6 +12,7 @@ CREATE TABLE saga (
     check_failures  int         NOT NULL DEFAULT 0 CHECK (check_failures >= 0),
     next_attempt_at timestamptz NOT NULL,
     locked_until    timestamptz,
+    call_action     text        CHECK (call_action IN ('EXECUTE', 'REPLAY', 'CHECK', 'COMPENSATE')), -- the call in flight
     last_error      text,
     traceparent     text,                                 -- W3C traceparent of the originating request
     input           text,                                 -- the saga's input, encoded; written once
@@ -29,6 +30,7 @@ CREATE TABLE saga (
     created_at      timestamptz NOT NULL,
     updated_at      timestamptz NOT NULL,
     CONSTRAINT saga_lock CHECK ((step_status = 'IN_PROGRESS') = (locked_until IS NOT NULL)),
+    CONSTRAINT saga_call CHECK ((step_status = 'IN_PROGRESS') = (call_action IS NOT NULL)),
     CONSTRAINT saga_cancel CHECK ((cancel_requested_at IS NULL) = (cancel_reason IS NULL)),
     CONSTRAINT saga_stuck_reason CHECK ((step_status = 'STUCK') = (stuck_reason IS NOT NULL AND stuck_at IS NOT NULL)),
     CONSTRAINT saga_stuck_at CHECK ((stuck_reason IS NULL) = (stuck_at IS NULL))

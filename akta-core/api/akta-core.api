@@ -1,3 +1,13 @@
+public final class dev/octogene/akta/CallAction : java/lang/Enum {
+	public static final field CHECK Ldev/octogene/akta/CallAction;
+	public static final field COMPENSATE Ldev/octogene/akta/CallAction;
+	public static final field EXECUTE Ldev/octogene/akta/CallAction;
+	public static final field REPLAY Ldev/octogene/akta/CallAction;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Ldev/octogene/akta/CallAction;
+	public static fun values ()[Ldev/octogene/akta/CallAction;
+}
+
 public abstract interface class dev/octogene/akta/CheckResult {
 }
 
@@ -251,8 +261,8 @@ public final class dev/octogene/akta/SagaLogEntry {
 }
 
 public final class dev/octogene/akta/SagaRecord {
-	public fun <init> (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/SagaState;ILdev/octogene/akta/StepStatus;ILkotlin/time/Instant;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;ILjava/lang/String;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/StuckReason;Lkotlin/time/Instant;Lkotlin/time/Instant;IILdev/octogene/akta/StepStatus;)V
-	public synthetic fun <init> (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/SagaState;ILdev/octogene/akta/StepStatus;ILkotlin/time/Instant;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;ILjava/lang/String;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/StuckReason;Lkotlin/time/Instant;Lkotlin/time/Instant;IILdev/octogene/akta/StepStatus;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/SagaState;ILdev/octogene/akta/StepStatus;ILkotlin/time/Instant;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;ILjava/lang/String;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/StuckReason;Lkotlin/time/Instant;Lkotlin/time/Instant;IILdev/octogene/akta/StepStatus;Ldev/octogene/akta/CallAction;)V
+	public synthetic fun <init> (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/SagaState;ILdev/octogene/akta/StepStatus;ILkotlin/time/Instant;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;ILjava/lang/String;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/StuckReason;Lkotlin/time/Instant;Lkotlin/time/Instant;IILdev/octogene/akta/StepStatus;Ldev/octogene/akta/CallAction;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Lkotlin/uuid/Uuid;
 	public final fun component10 ()Ljava/lang/String;
 	public final fun component11 ()Ljava/lang/String;
@@ -269,6 +279,7 @@ public final class dev/octogene/akta/SagaRecord {
 	public final fun component21 ()I
 	public final fun component22 ()I
 	public final fun component23 ()Ldev/octogene/akta/StepStatus;
+	public final fun component24 ()Ldev/octogene/akta/CallAction;
 	public final fun component3 ()Ljava/lang/String;
 	public final fun component4 ()Ldev/octogene/akta/SagaState;
 	public final fun component5 ()I
@@ -276,10 +287,11 @@ public final class dev/octogene/akta/SagaRecord {
 	public final fun component7 ()I
 	public final fun component8 ()Lkotlin/time/Instant;
 	public final fun component9 ()Lkotlin/time/Instant;
-	public final fun copy (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/SagaState;ILdev/octogene/akta/StepStatus;ILkotlin/time/Instant;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;ILjava/lang/String;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/StuckReason;Lkotlin/time/Instant;Lkotlin/time/Instant;IILdev/octogene/akta/StepStatus;)Ldev/octogene/akta/SagaRecord;
-	public static synthetic fun copy$default (Ldev/octogene/akta/SagaRecord;Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/SagaState;ILdev/octogene/akta/StepStatus;ILkotlin/time/Instant;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;ILjava/lang/String;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/StuckReason;Lkotlin/time/Instant;Lkotlin/time/Instant;IILdev/octogene/akta/StepStatus;ILjava/lang/Object;)Ldev/octogene/akta/SagaRecord;
+	public final fun copy (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/SagaState;ILdev/octogene/akta/StepStatus;ILkotlin/time/Instant;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;ILjava/lang/String;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/StuckReason;Lkotlin/time/Instant;Lkotlin/time/Instant;IILdev/octogene/akta/StepStatus;Ldev/octogene/akta/CallAction;)Ldev/octogene/akta/SagaRecord;
+	public static synthetic fun copy$default (Ldev/octogene/akta/SagaRecord;Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/SagaState;ILdev/octogene/akta/StepStatus;ILkotlin/time/Instant;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;ILjava/lang/String;Lkotlin/time/Instant;Ljava/lang/String;Ljava/lang/String;Ldev/octogene/akta/StuckReason;Lkotlin/time/Instant;Lkotlin/time/Instant;IILdev/octogene/akta/StepStatus;Ldev/octogene/akta/CallAction;ILjava/lang/Object;)Ldev/octogene/akta/SagaRecord;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getAttempts ()I
+	public final fun getCallAction ()Ldev/octogene/akta/CallAction;
 	public final fun getCancelReason ()Ljava/lang/String;
 	public final fun getCancelRequestedAt ()Lkotlin/time/Instant;
 	public final fun getCheckFailures ()I

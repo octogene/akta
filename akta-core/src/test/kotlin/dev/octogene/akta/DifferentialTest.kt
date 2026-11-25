@@ -56,8 +56,8 @@ class DifferentialTest {
 
     private fun play(seed: Long) {
         val plan = Plan(Random(seed))
-        val reference = World(plan, seed, ::referenceEngine)
-        val engine = World(plan, seed, ::currentEngine)
+        val reference = World(plan, seed, ::referenceEngine, reference = true)
+        val engine = World(plan, seed, ::currentEngine, reference = false)
         val played = mutableListOf<String>()
         compare(seed, played, reference, engine)
         val random = Random(seed xor 0x5DEECE66DL)
@@ -234,6 +234,7 @@ class DifferentialTest {
         val plan: Plan,
         seed: Long,
         newEngine: (World, SagaTransactions, SagaRepository, SagaDefinition<Unit>) -> Engine,
+        reference: Boolean,
     ) {
         val clock = MutableClock()
         val repository = InMemorySagaRepository()
@@ -253,6 +254,14 @@ class DifferentialTest {
             val store = object : SagaRepository by repository {
                 override fun results(sagaId: Uuid): Map<String, String?> =
                     if (Fault.UNREADABLE in faults) throw IllegalStateException("corrupted row") else repository.results(sagaId)
+
+                // The reference does not record the call in flight, which the schema now requires: one that fits the
+                // state will do, the comparison leaves it out.
+                override fun save(record: SagaRecord, now: Instant) = repository.save(record.withCall(), now)
+                override fun insert(record: SagaRecord, now: Instant) = repository.insert(record.withCall(), now)
+                private fun SagaRecord.withCall() = if (!reference) this else
+                    copy(callAction = if (stepStatus != StepStatus.IN_PROGRESS) null
+                        else if (state == SagaState.COMPENSATING) CallAction.COMPENSATE else CallAction.EXECUTE)
             }
             engine = newEngine(this, Transactions(InMemorySagaTransactions(repository)), store, definition())
             id = engine.create("key")
@@ -260,8 +269,12 @@ class DifferentialTest {
 
         fun record(): SagaRecord = repository.find(id)!!
         fun heard(event: SagaEvent) { heard += text("$event") }
-        /** Without the saga's random id, and the name of an engine's private exception (it is in error messages). */
+        /**
+         * Without the saga's random id, and the name of an engine's private exception (it is in error messages).
+         * Intended differences: callAction, which the reference does not record (the engine records the call in flight).
+         */
         private fun text(s: String) = s.replace(id.toString(), "<id>").replace(PRIVATE_EXCEPTION, "SignalFailed")
+            .replace(CALL_ACTION, ", callAction=null")
 
         /** Everything observable, without the saga's random id. */
         fun state(): Map<String, List<String>> = mapOf(
@@ -433,6 +446,7 @@ class DifferentialTest {
     }
 
     private companion object {
+        val CALL_ACTION = Regex(""", callAction=\w+""")
         val PRIVATE_EXCEPTION = Regex("""dev\.octogene\.akta\.[\w.$]*SignalFailed""")
         val EXPECTED_EVENTS = setOf(
             "EXECUTE:Done", "EXECUTE:Rejected", "EXECUTE:NotSent", "EXECUTE:Unknown", "EXECUTE:OutputUnstorable",
