@@ -394,7 +394,7 @@ public class ExposedSagaRepository : SagaRepository {
     private fun ofTypes(types: Collection<String>?): Op<Boolean> = if (types == null) Op.TRUE else SagaTable.type inList types
 
     private companion object {
-        val UNFINISHED = listOf(SagaState.RUNNING.name, SagaState.COMPENSATING.name)
+        val UNFINISHED = listOf(SagaState.RUNNING.name, SagaState.COMPENSATING.name, SagaState.FINISHING.name)
         val FINISHED = listOf(SagaState.COMPLETED.name, SagaState.FAILED.name)
     }
 }

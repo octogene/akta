@@ -13,6 +13,11 @@ public enum class SagaState {
     RUNNING,
     /** A step was rejected: undoing the completed steps, last to first. */
     COMPENSATING,
+    /**
+     * Every step is done, or every completed step undone, and the saga's `onCompleted` or `onFailed` hook is still to
+     * run, in a transaction of its own: COMPLETED or FAILED once it has. A saga without that hook skips it.
+     */
+    FINISHING,
     /** Every step is done. */
     COMPLETED,
     /** Every completed step was undone. */
@@ -46,7 +51,7 @@ public enum class StuckReason {
     /** The call was made, but its output could not be encoded or is too large. `markDone` with the output, or `abort`. */
     OUTPUT_UNSTORABLE,
     /**
-     * The outcome could not be recorded (a hook threw, a constraint failed). What it established is kept, and
+     * The outcome could not be recorded (onSignal threw, a constraint or the database failed). What it established is kept, and
      * lastError says what follows: after a success, `markDone(id, null)` (the output is saved); after an undo,
      * `markCompensated`; after a refusal, `abort(currentStepApplied = false)` (markDone is refused).
      */
@@ -60,8 +65,14 @@ public enum class StuckReason {
      */
     KEY_EXPIRED,
     /**
+     * FINISHING: the `onCompleted` or `onFailed` hook threw [SagaConfig.maxAttempts] times in a row. Every step is
+     * already done (or undone): only the hook is left. Fix it, then `retry`, which runs it again; after `onCompleted`,
+     * `abort` undoes every step instead.
+     */
+    HOOK_FAILED,
+    /**
      * The saga itself could not be run, [SagaConfig.maxAttempts] times in a row (data that cannot be read, a
-     * step removed from its definition, a hook that throws on a stored signal…): each try is a `RESUME_FAILED`
+     * step removed from its definition, a type this engine does not know…): each try is a `RESUME_FAILED`
      * in its log. The step is not at fault and is left as it was. Fix the cause, then `retry`: a step that may
      * have been called is checked first. Or `markDone`, or `abort`.
      */
@@ -200,7 +211,10 @@ public object SagaEvents {
     public const val LOCK_EXPIRED: String = "LOCK_EXPIRED"
     /** A call ended after its lock expired and another instance took over. */
     public const val LATE_RESULT_IGNORED: String = "LATE_RESULT_IGNORED"
-    /** The outcome of a call could not be saved: the saga is STUCK; a successful call's output is kept with its result. */
+    /**
+     * The outcome of a call (or a signal onSignal threw on) could not be saved: the saga is STUCK; what it established is
+     * kept (a successful call's output with its result). Never a hook's failure: see [HOOK_FAILED].
+     */
     public const val RECORD_FAILED: String = "RECORD_FAILED"
     /**
      * resumeDue, or the run after a manual action, could not run the saga (database error, bug…): postponed by
@@ -228,6 +242,10 @@ public object SagaEvents {
     public const val NOT_CALLED: String = "NOT_CALLED"
     /** Compensation passed over a step with nothing to undo ([SagaStep.compensates] false): no call made. */
     public const val NOTHING_TO_UNDO: String = "NOTHING_TO_UNDO"
+    /** The saga's hook ran and it ended, COMPLETED or FAILED (the detail): only for a saga that has the hook. */
+    public const val FINISHED: String = "FINISHED"
+    /** The saga's `onCompleted` or `onFailed` hook threw: tried again later, or stuck ([StuckReason.HOOK_FAILED]). */
+    public const val HOOK_FAILED: String = "HOOK_FAILED"
     /** [SagaEngine.cancel] was called; the detail gives the reason. */
     public const val CANCEL_REQUESTED: String = "CANCEL_REQUESTED"
     /**

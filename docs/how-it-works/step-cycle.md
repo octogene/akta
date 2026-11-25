@@ -49,11 +49,11 @@ The record locks the row again and checks that the claim is still ours: the step
 
 It then saves the outcome, the output if there is one, and a `saga_log` entry, and decides what comes next. While the row is locked, it also **claims the next step** if it is due and the caller's deadline has not passed: one transaction instead of two. A two-step saga takes about 4 commits in all, including its creation.
 
-When the saga ends, `onCompleted` or `onFailed` runs in this same transaction, so the business state and the saga's state change together.
+When the saga ends, its `onCompleted` or `onFailed` does not run in this transaction: the saga is `FINISHING`, and the hook runs next, in a transaction of its own that also ends it, so the business state and the saga's state still change together (see [the hooks](lifecycle.md#the-hooks)). A saga without the hook ends here.
 
 ### When recording fails
 
-If the record transaction rolls back (a hook that throws, a constraint, the database), the call's outcome must not be lost:
+If the record transaction rolls back (`onSignal` throwing on a value a check found, a constraint, the database), the call's outcome must not be lost. Hooks never run here: they run once the outcome is committed, on their own (see [the hooks](lifecycle.md#the-hooks)).
 
 1. The engine records the outcome again, alone, without claiming the next step.
 2. If that fails too, the saga becomes `STUCK` (`RECORD_FAILED`) on the step that ran. What the outcome established is kept, and `last_error` says what follows, once the cause is fixed:

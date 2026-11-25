@@ -209,6 +209,8 @@ public final class dev/octogene/akta/SagaEvents {
 	public static final field CANCELLED Ljava/lang/String;
 	public static final field CANCEL_REQUESTED Ljava/lang/String;
 	public static final field CREATED Ljava/lang/String;
+	public static final field FINISHED Ljava/lang/String;
+	public static final field HOOK_FAILED Ljava/lang/String;
 	public static final field INSTANCE Ldev/octogene/akta/SagaEvents;
 	public static final field KEY_EXPIRED Ljava/lang/String;
 	public static final field LATE_RESULT_IGNORED Ljava/lang/String;
@@ -359,6 +361,7 @@ public final class dev/octogene/akta/SagaState : java/lang/Enum {
 	public static final field COMPENSATING Ldev/octogene/akta/SagaState;
 	public static final field COMPLETED Ldev/octogene/akta/SagaState;
 	public static final field FAILED Ldev/octogene/akta/SagaState;
+	public static final field FINISHING Ldev/octogene/akta/SagaState;
 	public static final field RUNNING Ldev/octogene/akta/SagaState;
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
 	public final fun isFinished ()Z
@@ -539,6 +542,7 @@ public final class dev/octogene/akta/StuckCursor$Companion {
 public final class dev/octogene/akta/StuckReason : java/lang/Enum {
 	public static final field CANNOT_TELL Ldev/octogene/akta/StuckReason;
 	public static final field CHECK_FAILING Ldev/octogene/akta/StuckReason;
+	public static final field HOOK_FAILED Ldev/octogene/akta/StuckReason;
 	public static final field KEY_EXPIRED Ldev/octogene/akta/StuckReason;
 	public static final field NO_SIGNAL Ldev/octogene/akta/StuckReason;
 	public static final field OUTPUT_UNSTORABLE Ldev/octogene/akta/StuckReason;

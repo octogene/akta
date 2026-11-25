@@ -28,7 +28,9 @@ Logged as `<action>:<outcome>`, on the step that ran.
 | `CREATED` | The saga was created |
 | `LOCK_EXPIRED` | A call's lock expired: the pod died, or the call never recorded its outcome |
 | `LATE_RESULT_IGNORED` | A call ended after its lock expired and another pod took over: its outcome is dropped |
-| `RECORD_FAILED` | The outcome could not be recorded: stuck, with a successful output saved |
+| `RECORD_FAILED` | The outcome could not be recorded (`onSignal` threw, a constraint or the database failed): stuck, with what it established kept |
+| `FINISHED` | The saga's `onCompleted` or `onFailed` ran, and it ended: the detail is `COMPLETED` or `FAILED`. Only for a saga that declares the hook; one without ends with its last outcome |
+| `HOOK_FAILED` | The saga's hook threw: run again after backoff, or stuck (`HOOK_FAILED`) after `maxAttempts` in a row |
 | `RESUME_FAILED` | `resumeDue`, or the run after a manual action, could not run the saga (a database error, unreadable data, an unknown type): postponed, or stuck (`RESUME_FAILING`) after `maxAttempts` in a row |
 | `KEY_EXPIRED` | An idempotent step's key may be forgotten: stuck, no call made |
 | `NOTHING_TO_UNDO` | Compensation passed over a step with nothing to undo (no `compensate`, or a signal step): no call made |
@@ -39,7 +41,7 @@ Logged as `<action>:<outcome>`, on the step that ran.
 | Event | Meaning |
 |---|---|
 | `WAIT_STARTED` | A signal step started waiting. The detail gives the signal and the deadline |
-| `SIGNAL_RECEIVED` | A signal arrived. The detail says `delivered`, `stored`, `stored: onSignal failed` (the saga is stuck; `onCompleted failed` or `onFailed failed` when the hook of a saga the signal ended threw), `consumed (stored earlier)`, or `ignored` with why |
+| `SIGNAL_RECEIVED` | A signal arrived. The detail says `delivered`, `stored`, `stored: onSignal failed` (the saga is stuck), `consumed (stored earlier)`, or `ignored` with why |
 | `WAIT_TIMED_OUT` | The timeout passed without the signal: checked, or stuck |
 | `CANCEL_REQUESTED` | `cancel` was called. The detail gives the reason, followed by `(already compensating: nothing changed)` when the saga was already undoing its steps for another reason; the actor, who |
 | `CANCELLED` | A cancellation that waited took effect at the next claim (after a manual retry, for example) |
@@ -60,7 +62,7 @@ engine.history(sagaId).forEach { println("${it.at} ${it.stepName} ${it.event} ${
 SELECT l.at, s.type, l.step_name, l.event, l.detail, l.actor, l.trace_id
 FROM saga_log l JOIN saga s ON s.id = l.saga_id
 WHERE s.business_key = :key
-  AND (s.state IN ('RUNNING', 'COMPENSATING') OR s.state IN ('COMPLETED', 'FAILED'))
+  AND (s.state IN ('RUNNING', 'COMPENSATING', 'FINISHING') OR s.state IN ('COMPLETED', 'FAILED'))
 ORDER BY l.at, l.id;
 ```
 

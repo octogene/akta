@@ -16,7 +16,7 @@ import kotlin.uuid.Uuid
  */
 class SagaMachineTest {
     private val config = SagaConfig(maxAttempts = 3)
-    private val machine = SagaMachine(config)
+    private val machine = SagaMachine(config) { Hooks(completed = false, failed = false) }
     private val now = Instant.parse("2026-11-25T10:00:00Z")
     private val call = object : SagaStep<Unit, String> {
         override val name = "call"

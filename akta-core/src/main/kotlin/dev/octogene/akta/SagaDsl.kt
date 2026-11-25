@@ -48,8 +48,8 @@ public class SagaBuilder<I> @PublishedApi internal constructor(
     private val inputType: KType?,
 ) {
     private val steps = mutableListOf<SagaStep<I, *>>()
-    private var onCompleted: SagaContext<I>.() -> Unit = {}
-    private var onFailed: SagaContext<I>.() -> Unit = {}
+    private var onCompleted: SagaContext<I>.() -> Unit = noHook()
+    private var onFailed: SagaContext<I>.() -> Unit = noHook()
 
     /** Declares the next step, without output. Steps run in declaration order. */
     @JvmName("stepWithoutOutput")  // same JVM signature as the typed step<O> below, once erased
@@ -93,16 +93,17 @@ public class SagaBuilder<I> @PublishedApi internal constructor(
     }
 
     /**
-     * Runs INSIDE the transaction that completes the saga. No external calls. The saga's row already reads
-     * COMPLETED: the hook may start the next saga for the same key.
+     * Runs INSIDE the transaction that completes the saga, its own, after the last step's outcome is committed. No
+     * external calls. The saga's row already reads COMPLETED: the hook may start the next saga for the same key. If
+     * it throws, it runs again later, then the saga stops (HOOK_FAILED): nothing done by the steps is lost.
      */
     public fun onCompleted(block: SagaContext<I>.() -> Unit) {
         onCompleted = block
     }
 
     /**
-     * Runs INSIDE the transaction that ends the saga after compensation. No external calls. The saga's row
-     * already reads FAILED: the hook may start the next saga for the same key.
+     * Runs INSIDE the transaction that ends the saga after compensation, its own, as [onCompleted]. No external calls.
+     * The saga's row already reads FAILED: the hook may start the next saga for the same key.
      */
     public fun onFailed(block: SagaContext<I>.() -> Unit) {
         onFailed = block

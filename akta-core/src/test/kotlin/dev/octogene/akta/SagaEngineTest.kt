@@ -88,8 +88,8 @@ class SagaEngineTest {
     private fun definition(
         type: String,
         steps: List<SagaStep<Unit, *>>,
-        onCompleted: SagaContext<Unit>.() -> Unit = {},
-        onFailed: SagaContext<Unit>.() -> Unit = {},
+        onCompleted: SagaContext<Unit>.() -> Unit = noHook(),
+        onFailed: SagaContext<Unit>.() -> Unit = noHook(),
     ) = SagaDefinition(type, inputType = null, steps, onCompleted, onFailed)
 
     private fun newEngine(
@@ -799,68 +799,98 @@ class SagaEngineTest {
                 }
             }
         }
-        var hookCalls = 0
-        val engine = newEngine(flaky, repository, listOf(definition("TEST", listOf(stock), onCompleted = {
-            if (++hookCalls == 2) error("items table locked")                // fails when recorded again
-        })))
+        val store = RefusingLog(repository, "EXECUTE:Done", from = 2)       // refused when recorded again
+        val engine = newEngine(flaky, store, listOf(definition("TEST", listOf(stock))))
         val id = engine.create("TEST", "item-1")
 
-        // 1: claim; 2: record, onCompleted passes, then the database rolls it back;
-        // 3: the outcome again, alone: onCompleted throws; 4: STUCK, with that cause, not the database's.
+        // 1: claim; 2: record, then the database rolls it back; 3: the outcome again, alone: its entry is refused;
+        // 4: STUCK, with that cause, not the database's.
         val saga = runBlocking { engine.run(id, clock.now + 10.seconds) }
 
         assertEquals(StuckReason.RECORD_FAILED, saga.stuckReason)
-        assertTrue(saga.lastError!!.contains("items table locked"), saga.lastError)
+        assertTrue(saga.lastError!!.contains("a constraint refused"), saga.lastError)
         assertTrue("connection lost" !in saga.lastError!!, saga.lastError)
     }
 
-    @Test
-    fun `a throwing onCompleted makes the saga stuck, keeping the output, instead of looping`() {
-        var hookFails = true
-        val stock = FakeStep("stock", { "STK-1" })
-        val engine = newEngine(
+    /** A saga of [steps] whose onCompleted throws while [hookFails] says so: a bug, then fixed. */
+    private fun engineWithFailingOnCompleted(vararg steps: SagaStep<Unit, *>, config: SagaConfig = SagaConfig(maxAttempts = 2)) =
+        newEngine(
             InMemorySagaTransactions(repository), repository,
-            listOf(definition("TEST", listOf(stock), onCompleted = {
+            listOf(definition("TEST", steps.toList(), onCompleted = {
                 check(!hookFails) { "items table locked" }
                 completed += key
             })),
-            clock = clock,
+            config = config, clock = clock,
         )
+
+    @Test
+    fun `a throwing onCompleted loses nothing, the step recorded and the hook alone tried again, then stuck`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        val engine = engineWithFailingOnCompleted(stock)
         val saga = runBlocking { engine.create("TEST", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
 
-        assertEquals(StepStatus.STUCK, saga.stepStatus)
-        assertEquals(SagaState.RUNNING, saga.state)                       // rolled back, not COMPLETED
-        assertTrue(saga.lastError!!.contains("ref=STK-1"))                // what describe() logs, an id
-        assertEquals(mapOf("stock" to "STK-1"), results(saga.id))         // the output is kept with the result
-        assertEquals(1, repository.log.count { it.event == SagaEvents.RECORD_FAILED })
+        assertEquals(SagaState.FINISHING, saga.state)                     // the step's outcome is committed
+        assertEquals(StepStatus.READY, saga.stepStatus)                   // the hook, again after backoff
+        assertEquals(mapOf("stock" to "STK-1"), results(saga.id))
+        assertTrue(saga.lastError!!.contains("items table locked"), saga.lastError)
+        engine.resumeAfter(1.minutes)
+
+        val stuck = repository.find(saga.id)!!
+        assertEquals(StuckReason.HOOK_FAILED, stuck.stuckReason)          // maxAttempts (2) in a row
+        assertEquals(2, repository.log.count { it.event == SagaEvents.HOOK_FAILED })
+        assertEquals(0, repository.log.count { it.event == SagaEvents.RECORD_FAILED })
 
         hookFails = false                                                 // the bug is fixed
-        val after = runBlocking { engine.markDone(saga.id, output = null, actor = "alice") }   // continue with it
+        val after = runBlocking { engine.retry(saga.id, actor = "alice") }   // runs the hook alone
         assertEquals(SagaState.COMPLETED, after.state)
         assertEquals(listOf("item-1"), completed)
-        assertEquals(1, stock.executions)
+        assertEquals(1, stock.executions)                                 // never called again
+        assertEquals(SagaState.COMPLETED.name, repository.log.single { it.event == SagaEvents.FINISHED }.detail)
     }
 
-    /** An engine whose onFailed throws while [hookFails] says so: a bug, then fixed. */
+    @Test
+    fun `an onCompleted that cannot run can be aborted, every step undone`() {
+        val stock = FakeStep("stock", { "STK-1" })
+        val booking = FakeStep("booking", { "RES-1" })
+        val engine = engineWithFailingOnCompleted(stock, booking, config = SagaConfig(maxAttempts = 1))
+        val saga = runBlocking { engine.create("TEST", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
+        assertEquals(StuckReason.HOOK_FAILED, saga.stuckReason)
+        assertFailsWith<IllegalArgumentException> { runBlocking { engine.cancel(saga.id, "too late", "bob") } }
+
+        val after = runBlocking { engine.abort(saga.id, "alice", currentStepApplied = false) }
+
+        assertEquals(SagaState.FAILED, after.state)
+        assertEquals("Aborted by alice", after.failureReason)
+        assertEquals(1, booking.compensations)                            // the last step too
+        assertEquals(1, stock.compensations)
+        assertEquals(emptyList(), completed)
+    }
+
+    /** Fails the record of [event] while [hookFails] says so, as a constraint refusing it would: then fixed. */
     private var hookFails = true
-    private fun engineWithFailingOnFailed(vararg steps: SagaStep<Unit, *>) = newEngine(
-        InMemorySagaTransactions(repository), repository,
-        listOf(definition("TEST", steps.toList(), onFailed = {
-            check(!hookFails) { "items table locked" }
-            failed += key
-        })),
-        clock = clock,
-    )
+    private fun engineWithUnrecordable(event: String, vararg steps: SagaStep<Unit, *>): SagaEngine {
+        val store = object : SagaRepository by repository {
+            override fun log(entry: SagaLogEntry) {
+                if (hookFails && entry.event == event) throw java.sql.SQLException("a constraint refused the row")
+                repository.log(entry)
+            }
+        }
+        return newEngine(
+            InMemorySagaTransactions(repository), store,
+            listOf(definition("TEST", steps.toList(), onFailed = { failed += key })),
+            clock = clock,
+        )
+    }
 
     @Test
     fun `a refusal that cannot be recorded keeps the refusal, and markDone cannot turn it into a success`() {
         val stock = FakeStep("stock", { throw StepRejected("unknown EPC") })   // String?: markDone(null) would pass
-        val engine = engineWithFailingOnFailed(stock)
+        val engine = engineWithUnrecordable("EXECUTE:Rejected", stock)
         val saga = runBlocking { engine.create("TEST", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
 
         assertEquals(StepStatus.STUCK, saga.stepStatus)
         assertEquals(StuckReason.RECORD_FAILED, saga.stuckReason)
-        assertEquals(SagaState.RUNNING, saga.state)                       // FAILED was rolled back with the hook
+        assertEquals(SagaState.RUNNING, saga.state)                       // FAILED was rolled back with the record
         assertEquals("dev.octogene.akta.StepRejected: unknown EPC", saga.failureReason)
         assertTrue(saga.lastError!!.contains("abort(id, currentStepApplied = false)"), saga.lastError)
         val refused = assertFailsWith<IllegalArgumentException> { runBlocking { engine.markDone(saga.id, null, "alice") } }
@@ -882,9 +912,10 @@ class SagaEngineTest {
     @Test
     fun `retry after a refusal that cannot be recorded calls the step again, dropping the refusal`() {
         val stock = FakeStep("stock", { throw StepRejected("no stock yet") }, { "STK-1" })
-        val engine = engineWithFailingOnFailed(stock)
+        val engine = engineWithUnrecordable("EXECUTE:Rejected", stock)
         val saga = runBlocking { engine.create("TEST", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
         assertEquals(StuckReason.RECORD_FAILED, saga.stuckReason)
+        hookFails = false
 
         val after = runBlocking { engine.retry(saga.id, "alice") }       // accepted this time
 
@@ -897,7 +928,7 @@ class SagaEngineTest {
     fun `an undo that cannot be recorded is kept, and markCompensated goes on without undoing it again`() {
         val stock = FakeStep("stock", { "STK-1" })
         val booking = FakeStep("booking", { throw StepRejected("no slot") })
-        val engine = engineWithFailingOnFailed(stock, booking)
+        val engine = engineWithUnrecordable("COMPENSATE:Compensated", stock, booking)
         val saga = runBlocking { engine.create("TEST", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
 
         assertEquals(StuckReason.RECORD_FAILED, saga.stuckReason)
@@ -1239,7 +1270,7 @@ class SagaEngineTest {
     }
 
     @Test
-    fun `a two-step run takes three transactions (claim, record and claim, record)`() {
+    fun `a two-step run takes three transactions (claim, record and claim, record), and one more to run a hook`() {
         val inMemory = InMemorySagaTransactions(repository)
         var transactions = 0
         val counting = object : SagaTransactions {
@@ -1252,6 +1283,14 @@ class SagaEngineTest {
         val saga = runBlocking { engine.run(id, clock.now + 10.seconds) }
         assertEquals(SagaState.COMPLETED, saga.state)
         assertEquals(3, transactions)
+
+        val hooked = definition("HOOKED", listOf(FakeStep("stock", { "STK-1" })), onCompleted = { completed += key })
+        val other = newEngine(counting, repository, listOf(hooked), clock = clock)
+        transactions = 0
+        val ended = runBlocking { other.run(other.create("HOOKED", "item-2"), clock.now + 10.seconds) }
+        assertEquals(SagaState.COMPLETED, ended.state)
+        assertEquals(3, transactions)                                     // claim, record, finish
+        assertEquals(listOf("item-2"), completed)
     }
 
     @Test

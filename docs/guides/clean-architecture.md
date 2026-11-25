@@ -159,7 +159,7 @@ class ExposedItemRepository : ItemRepository {
 ```
 
 !!! warning "Repositories must join the current transaction"
-    `onCompleted` and `onFailed` run inside the engine's transaction. A repository called from a hook that opened its own transaction would commit separately, and the saga's end and the business change would no longer happen together.
+    `onCompleted` and `onFailed` run inside the engine's transaction that ends the saga. A repository called from a hook that opened its own transaction would commit separately, and the saga's end and the business change would no longer happen together.
 
 ## Web: routes and the composition root
 

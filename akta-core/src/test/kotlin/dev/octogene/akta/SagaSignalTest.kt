@@ -4,6 +4,7 @@ import dev.octogene.akta.memory.InMemorySagaRepository
 import dev.octogene.akta.memory.InMemorySagaTransactions
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import kotlin.test.assertEquals
@@ -587,48 +588,47 @@ class SagaSignalTest {
     }
 
     @Test
-    fun `a hook that throws on a delivered signal keeps the signal and stops the saga, instead of failing the listener`() {
+    fun `a hook that throws after a delivered signal never fails the listener, and runs again once fixed`() {
         val definition = endedBySignal()
         val engine = engine(definition)
         val id = engine.create(definition, "R-1")
         engine.run(id)
 
-        assertEquals(SignalResult.Stored(id), engine.pay(id))                   // the listener can commit its offset
+        assertEquals(SignalResult.Delivered(id), engine.pay(id))                // the hook does not run here
         assertEquals(SignalResult.Ignored(id), engine.pay(id))                  // a redelivery changes nothing
+        assertEquals(SagaState.FINISHING, runBlocking { engine.find(id)!! }.state)
 
-        val stuck = runBlocking { engine.find(id)!! }
-        assertEquals(SagaState.RUNNING, stuck.state)
-        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
-        assertTrue(stuck.lastError!!.startsWith("onCompleted threw on signal 'payment'"), stuck.lastError)
-        assertEquals("stored: onCompleted failed ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).first())
-        assertEquals(emptyList(), completed)
+        val tried = engine.run(id)                                               // the hook, in a transaction of its own
+        assertEquals(SagaState.FINISHING, tried.state)
+        assertTrue(tried.lastError!!.startsWith("onCompleted threw"), tried.lastError)
+        assertEquals("P-1", repository.storedResults(id).single().output?.let { Json.decodeFromString<PaymentResult>(it).paymentId })
 
         hookBug = false                                                         // fixed
-        assertEquals(SagaState.COMPLETED, runBlocking { engine.retry(id, "operator") }.state)
+        engine.resumeAfter(1.minutes)
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.find(id)!! }.state)
         assertEquals(listOf("R-1"), completed)
     }
 
     @Test
-    fun `a hook that throws on a rejected signal keeps the signal and stops the saga`() {
+    fun `a hook that throws after a rejected signal runs again once fixed`() {
         val definition = endedBySignal()
         val engine = engine(definition)
         val id = engine.create(definition, "R-1")
         engine.run(id)
 
-        assertEquals(SignalResult.Stored(id), engine.pay(id, succeeded = false))
-
-        val stuck = runBlocking { engine.find(id)!! }
-        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
-        assertTrue(stuck.lastError!!.startsWith("onFailed threw on signal 'payment'"), stuck.lastError)
+        assertEquals(SignalResult.Delivered(id), engine.pay(id, succeeded = false))
+        val tried = engine.run(id)
+        assertEquals(SagaState.FINISHING, tried.state)
+        assertTrue(tried.lastError!!.startsWith("onFailed threw"), tried.lastError)
 
         hookBug = false
-        val done = runBlocking { engine.retry(id, "operator") }                 // the signal kept is rejected again
-        assertEquals(SagaState.FAILED, done.state)
+        engine.resumeAfter(1.minutes)
+        assertEquals(SagaState.FAILED, runBlocking { engine.find(id)!! }.state)
         assertEquals(listOf("R-1"), failed)
     }
 
     @Test
-    fun `a hook that throws on a signal stored earlier stops the saga, instead of failing every resume`() {
+    fun `a hook that throws after a signal stored earlier is no resume failure`() {
         val definition = endedBySignal()
         val engine = engine(definition)
         val id = engine.create(definition, "R-1")
@@ -636,13 +636,14 @@ class SagaSignalTest {
 
         engine.resumeAfter(1.seconds)                                           // no failure reported
 
-        val stuck = runBlocking { engine.find(id)!! }
-        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
-        assertTrue(stuck.lastError!!.startsWith("onCompleted threw on signal 'payment'"), stuck.lastError)
+        val finishing = runBlocking { engine.find(id)!! }
+        assertEquals(SagaState.FINISHING, finishing.state)
         assertTrue(repository.log.none { it.event == SagaEvents.RESUME_FAILED })
+        assertEquals(1, repository.log.count { it.event == SagaEvents.HOOK_FAILED })
 
         hookBug = false
-        assertEquals(SagaState.COMPLETED, runBlocking { engine.retry(id, "operator") }.state)
+        engine.resumeAfter(1.minutes)
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.find(id)!! }.state)
     }
 
     @Test

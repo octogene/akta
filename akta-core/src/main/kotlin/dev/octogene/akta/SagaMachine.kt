@@ -80,6 +80,8 @@ internal sealed interface Move {
     data class NothingToUndo(val record: SagaRecord, val effects: List<Effect>) : Move
     /** A signal step's timeout passed and it has no check: stuck (logged WAIT_TIMED_OUT). The moves end. */
     data class NoSignal(val record: SagaRecord) : Move
+    /** A finishing saga, due: its hook is to run, in a transaction of its own. The moves end. */
+    data class Finish(val record: SagaRecord) : Move
 }
 
 /** The call claimed by [SagaMachine.claim], or why none is. */
@@ -90,7 +92,11 @@ internal sealed interface Claim {
     data class KeyExpired(val record: SagaRecord) : Claim
 }
 
-internal class SagaMachine(private val config: SagaConfig) {
+/**
+ * [hooks]: which hooks a saga type has. A saga that has the hook of its end goes through FINISHING, which runs it in
+ * a transaction of its own; one without it ends at once.
+ */
+internal class SagaMachine(private val config: SagaConfig, private val hooks: (type: String) -> Hooks) {
     /** A new saga, due at once on its first step. */
     fun created(id: Uuid, type: String, key: String, input: String?, traceparent: String?, now: Instant): SagaRecord =
         SagaPhase.Running(
@@ -217,6 +223,7 @@ internal class SagaMachine(private val config: SagaConfig) {
         signalStored: (signal: String) -> Boolean,
     ): Decision {
         require(r.stepStatus == StepStatus.STUCK) { "Saga ${r.id} is not stuck" }
+        require(!newKey || r.state != SagaState.FINISHING) { "Saga ${r.id} is finishing: it has no call, nor a key to renew" }
         require(newKey || r.stuckReason != StuckReason.KEY_EXPIRED) {
             "The idempotency key of saga ${r.id} may be forgotten by its service: confirm the step was not applied, " +
                 "then retry with newKey = true (or markDone, or abort)"
@@ -262,6 +269,13 @@ internal class SagaMachine(private val config: SagaConfig) {
 
     /** See [SagaEngine.abort], which saves the step's output in between, when it was applied. */
     fun checkAbort(r: SagaRecord, currentStepApplied: Boolean) {
+        if (r.state == SagaState.FINISHING) {
+            // Its onCompleted cannot run: every step is done, and all are undone. currentStepApplied changes nothing.
+            require(r.failureReason == null && r.stepStatus == StepStatus.STUCK) {
+                "Saga ${r.id} is finishing: only a stuck onCompleted can be aborted"
+            }
+            return
+        }
         require(r.state == SagaState.RUNNING) { "Saga ${r.id} is not running forward" }
         require(r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.WAITING || r.stepStatus == StepStatus.STUCK) {
             "A call of saga ${r.id} may have been applied: wait for its outcome"
@@ -276,7 +290,11 @@ internal class SagaMachine(private val config: SagaConfig) {
     }
 
     fun abort(r: SagaRecord, currentStepApplied: Boolean, actor: String, now: Instant): SagaRecord =
-        startCompensation(r, if (currentStepApplied) r.stepIndex else r.stepIndex - 1, "Aborted by $actor", now)
+        if (r.state == SagaState.FINISHING) {
+            compensateFrom(r, r.stepIndex, now, failureReason = "Aborted by $actor")          // every step, the last included
+        } else {
+            startCompensation(r, if (currentStepApplied) r.stepIndex else r.stepIndex - 1, "Aborted by $actor", now)
+        }
 
     /** See [SagaEngine.markCompensated]. */
     fun markCompensated(r: SagaRecord, now: Instant): Decision {
@@ -287,6 +305,7 @@ internal class SagaMachine(private val config: SagaConfig) {
     /** See [SagaEngine.cancel]. */
     fun cancel(r: SagaRecord, reason: String, now: Instant): Decision {
         require(!r.state.isFinished) { "Saga ${r.id} is finished: undoing it is a new saga" }
+        require(r.state != SagaState.FINISHING) { "Saga ${r.id} is finishing, its steps all done or undone: undoing it is a new saga" }
         // Already compensating, for another reason: nothing changes, and the history says so.
         if (r.state != SagaState.RUNNING) return Decision(r, emptyList(), detail = "$reason (already compensating: nothing changed)")
         // The first cancellation counts: a second one is only logged.
@@ -309,6 +328,8 @@ internal class SagaMachine(private val config: SagaConfig) {
         idempotent: () -> Boolean,
     ): Move {
         if (r.state.isFinished || r.stepStatus == StepStatus.STUCK) return Move.Rest(r)
+        // Its steps are done: only its hook is left, in a transaction of its own.
+        if (r.state == SagaState.FINISHING) return if (r.nextAttemptAt <= now) Move.Finish(r) else Move.Rest(r)
         var saga = r
         if (saga.stepStatus == StepStatus.IN_PROGRESS) {
             val lockedUntil = checkNotNull(saga.lockedUntil) { "Saga ${saga.id} is IN_PROGRESS without a lock" }
@@ -420,7 +441,7 @@ internal class SagaMachine(private val config: SagaConfig) {
     /**
      * The record of [outcome] (described as [described]) failed, then the outcome alone too, with [error]: the saga
      * [current] stops (RECORD_FAILED) on the [step] that ran, keeping what the outcome established. [onSignalFailed]:
-     * the error is onSignal's, or a hook's after a signal. [signalStored]: whether a signal of a name was received.
+     * the error is onSignal's. [signalStored]: whether a signal of a name was received.
      */
     fun recordFailed(
         current: SagaRecord,
@@ -433,8 +454,8 @@ internal class SagaMachine(private val config: SagaConfig) {
         now: Instant,
         signalStored: (signal: String) -> Boolean,
     ): Decision {
-        // A signal step's timeout check, whose value or signal is what failed to be recorded (onSignal or a hook
-        // threw on it): the value found is stored as the step's signal (a real one stored first wins), so that
+        // A signal step's timeout check, whose value or signal is what failed to be recorded (onSignal threw on
+        // it): the value found is stored as the step's signal (a real one stored first wins), so that
         // retry uses it at once instead of waiting a whole timeout again; a signal received during the check is
         // stored already. No refusal is kept then: the step got its value. An explicit StepRejected from the
         // check still refuses, as in record().
@@ -517,6 +538,33 @@ internal class SagaMachine(private val config: SagaConfig) {
         return r.state == SagaState.RUNNING && waiting
     }
 
+    // ---- Finishing ---------------------------------------------------------------------------------------------
+
+    /** A finishing saga whose hook is about to run: COMPLETED or FAILED, as the hook will see it. */
+    fun finished(r: SagaRecord): SagaRecord {
+        val p = r.phase() as? SagaPhase.Finishing ?: error("Saga ${r.id} is ${r.state}, not finishing")
+        return SagaPhase.Finished(
+            p.identity, p.stepIndex, p.attempts, lastDue = p.due, p.cancellation,
+            lastError = if (p.failureReason == null) null else p.lastError, failureReason = p.failureReason,
+        ).record()
+    }
+
+    /** The hook of the finishing saga [r] threw [error]: run again after backoff, or stopped after too many failures. */
+    fun hookFailed(r: SagaRecord, error: String, now: Instant): SagaRecord {
+        val p = r.phase() as? SagaPhase.Finishing ?: error("Saga ${r.id} is ${r.state}, not finishing")
+        val hook = if (p.failureReason == null) "onCompleted" else "onFailed"
+        val attempts = p.attempts + 1
+        return if (attempts >= config.maxAttempts) {
+            p.with(
+                step = StepState.Stuck(StuckReason.HOOK_FAILED, at = now, from = null, due = p.due), attempts = attempts,
+                lastError = "$hook threw, $attempts times in a row: $error. Every step is " +
+                    (if (p.failureReason == null) "done: fix it, then retry, or abort to undo them" else "undone: fix it, then retry"),
+            )
+        } else {
+            p.with(step = StepState.Ready(now + config.backoff(attempts)), attempts = attempts, lastError = "$hook threw: $error")
+        }.record()
+    }
+
     // ---- Transitions ----------------------------------------------------------------------------------------
 
     /** A saga whose cancellation was requested compensates once no call of it is in flight. */
@@ -567,14 +615,16 @@ internal class SagaMachine(private val config: SagaConfig) {
         val p = r.unfinished() as? SagaPhase.Running ?: error("Saga ${r.id} is ${r.state}: only a running saga moves on")
         if (p.cancellation != null) return startCompensation(r, r.stepIndex, cancelled(r), now)
         val index = p.stepIndex + 1
-        return if (index == stepCount) {
+        return (if (index == stepCount && hooks(p.identity.type).completed) {
+            SagaPhase.Finishing(p.identity, p.stepIndex, StepState.Ready(now), attempts = 0, resumeFailures = 0, null, null, failureReason = null)
+        } else if (index == stepCount) {
             SagaPhase.Finished(p.identity, p.stepIndex, p.attempts, lastDue = p.due, cancellation = null, lastError = null, failureReason = null)
         } else {
             SagaPhase.Running(
                 p.identity, index, StepState.Ready(now), attempts = 0, checkFailures = 0, resumeFailures = 0,
                 key = KeyState(since = null, generation = 0), cancellation = null, lastError = null, refusal = null,
             )
-        }.record()
+        }).record()
     }
 
     /**
@@ -592,19 +642,22 @@ internal class SagaMachine(private val config: SagaConfig) {
 
     /**
      * Undoes the completed steps, from [index] down to the first one, because of [failureReason] (already the saga's
-     * once it compensates). Nothing to undo: FAILED, keeping what it was doing last and its last error.
+     * once it compensates). Nothing to undo: FINISHING if the saga has an onFailed hook, else FAILED, keeping what it
+     * was doing last and its last error.
      */
     fun compensateFrom(r: SagaRecord, index: Int, now: Instant, failureReason: String? = r.failureReason): SagaRecord {
         val p = r.unfinished()
         val reason = checkNotNull(failureReason) { "Saga ${r.id} compensates without a reason" }
-        return if (index < 0) {
+        return (if (index < 0 && hooks(p.identity.type).failed) {
+            SagaPhase.Finishing(p.identity, p.stepIndex, StepState.Ready(now), attempts = 0, resumeFailures = 0, p.cancellation, p.lastError, reason)
+        } else if (index < 0) {
             SagaPhase.Finished(p.identity, p.stepIndex, p.attempts, lastDue = p.due, p.cancellation, p.lastError, reason)
         } else {
             SagaPhase.Compensating(
                 p.identity, index, StepState.Ready(now), attempts = 0, checkFailures = 0, resumeFailures = 0,
                 key = KeyState(since = null, generation = 0), p.cancellation, p.lastError, reason,
             )
-        }.record()
+        }).record()
     }
 
     /**

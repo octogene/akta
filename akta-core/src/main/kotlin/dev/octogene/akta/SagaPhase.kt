@@ -95,6 +95,10 @@ internal sealed interface SagaPhase {
                 step = step, attempts = attempts, checkFailures = checkFailures, resumeFailures = resumeFailures, key = key,
                 cancellation = cancellation, lastError = lastError,
             )
+            is Finishing -> {
+                check(checkFailures == 0 && key == NO_KEY) { "Saga ${identity.id} is finishing: it has no check nor key" }
+                copy(step = step, attempts = attempts, resumeFailures = resumeFailures, cancellation = cancellation, lastError = lastError)
+            }
         }
     }
 
@@ -125,6 +129,26 @@ internal sealed interface SagaPhase {
         override val lastError: String?,
         val failureReason: String,
     ) : Unfinished
+
+    /**
+     * Every step done ([failureReason] null), or every completed step undone: only its hook is left to run, in a
+     * transaction of its own. [attempts] counts the hook's failures; [step] is READY (to run it) or STUCK.
+     */
+    data class Finishing(
+        override val identity: Identity,
+        override val stepIndex: Int,
+        override val step: StepState,
+        override val attempts: Int,
+        override val resumeFailures: Int,
+        override val cancellation: Cancellation?,
+        override val lastError: String?,
+        val failureReason: String?,
+    ) : Unfinished {
+        override val checkFailures: Int get() = 0
+        override val key: KeyState get() = NO_KEY
+        /** What it ends as once its hook ran. */
+        val ending: SagaState get() = if (failureReason == null) SagaState.COMPLETED else SagaState.FAILED
+    }
 
     /**
      * Ended: every step done ([failureReason] null), or every completed step undone. What it was doing last is kept
@@ -161,6 +185,7 @@ internal sealed interface SagaPhase {
                 state = SagaState.COMPENSATING, checkFailures = checkFailures, resumeFailures = resumeFailures,
                 keySince = key.since, keyGeneration = key.generation, failureReason = failureReason,
             )
+            is Finishing -> base.withStep(step).copy(state = SagaState.FINISHING, resumeFailures = resumeFailures, failureReason = failureReason)
             is Finished -> base.copy(state = state, nextAttemptAt = lastDue, failureReason = failureReason)
         }
     }
@@ -179,6 +204,7 @@ internal sealed interface SagaPhase {
             rule((r.stuckReason == null) == (r.stuckAt == null)) { "a stuck reason goes with its time" }
             rule(r.stuckFrom == null || r.stuckReason == StuckReason.RESUME_FAILING) { "stuckFrom is only set by resume failures" }
             rule(r.stuckFrom != StepStatus.STUCK) { "a saga is not stuck from being stuck" }
+            rule((r.stuckReason == StuckReason.HOOK_FAILED) <= (r.state == SagaState.FINISHING)) { "only a finishing saga's hook fails" }
 
             val identity = Identity(r.id, r.type, r.key, r.input, r.traceparent, r.createdAt)
             val cancellation = r.cancelRequestedAt?.let { Cancellation(it, checkNotNull(r.cancelReason)) }
@@ -207,6 +233,17 @@ internal sealed interface SagaPhase {
                         checkNotNull(r.failureReason),
                     )
                 }
+                SagaState.FINISHING -> {
+                    rule(r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.STUCK) { "a finishing saga only runs its hook, or is stuck" }
+                    rule(r.checkFailures == 0 && r.keySince == null && r.keyGeneration == 0) { "a finishing saga has no check nor key" }
+                    rule(r.stuckReason == null || r.stuckReason == StuckReason.HOOK_FAILED || r.stuckReason == StuckReason.RESUME_FAILING) {
+                        "a finishing saga is stuck by its hook, or by resume failures"
+                    }
+                    rule(r.failureReason != null || r.lastError == null || r.stepStatus == StepStatus.STUCK || r.attempts > 0) {
+                        "a completing saga has no error, but its hook's"
+                    }
+                    SagaPhase.Finishing(identity, r.stepIndex, step, r.attempts, r.resumeFailures, cancellation, r.lastError, r.failureReason)
+                }
                 SagaState.COMPLETED, SagaState.FAILED -> {
                     rule(r.stepStatus == StepStatus.READY) { "a finished saga has no step in progress" }
                     rule(r.checkFailures == 0 && r.resumeFailures == 0) { "a finished saga has no failure counted" }
@@ -219,6 +256,8 @@ internal sealed interface SagaPhase {
         }
     }
 }
+
+private val NO_KEY = KeyState(since = null, generation = 0)
 
 /** The same step, due at [due]. */
 internal fun StepState.dueAt(due: Instant): StepState = when (this) {

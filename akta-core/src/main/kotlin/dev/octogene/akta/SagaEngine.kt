@@ -45,7 +45,7 @@ public class SagaEngine(
     private val listeners: List<SagaListener> = emptyList(),
 ) {
     /** Every decision on a saga's row: pure, and tested on its own. */
-    private val machine = SagaMachine(config)
+    private val machine = SagaMachine(config) { type -> this.definitions[type]?.hooks ?: Hooks(completed = true, failed = true) }
 
     @Suppress("UNCHECKED_CAST")
     private val definitions: Map<String, AnyDefinition> = definitions.associateBy { it.type } as Map<String, AnyDefinition>
@@ -132,6 +132,11 @@ public class SagaEngine(
             Cycle(saga = null, next = null)
         }
         while (true) {
+            // The hook runs in a transaction of its own, after the outcome that ended the steps is committed.
+            if (cycle.finish) {
+                cycle = withContext(NonCancellable) { finish(id, trace) }
+                continue
+            }
             val work = cycle.next ?: break
             cycle = withContext(NonCancellable) {
                 val outcome = perform(work)
@@ -154,7 +159,7 @@ public class SagaEngine(
     /**
      * The transaction that recorded [outcome] (and claimed the next step) was rolled back. First, record
      * the outcome alone: if only the claim of the next step failed, the call's result must not be lost.
-     * If that fails too (a throwing onCompleted/onFailed, a constraint…), the saga becomes STUCK with the
+     * If that fails too (onSignal throwing on a value found, a constraint…), the saga becomes STUCK with the
      * outcome kept for a human: otherwise the step would loop through lock expiry and check, forever.
      */
     private suspend fun recordAfterFailure(work: Work, outcome: Outcome, error: Throwable): Cycle =
@@ -163,7 +168,7 @@ public class SagaEngine(
         } catch (e: Throwable) {
             if (e is CancellationException || e.isFatal()) throw e
             // e, not error: what stopped the outcome alone from being recorded. The first failure may have been
-            // a passing one (a database error before onSignal or a hook ever ran).
+            // a passing one (a database error before onSignal ever ran).
             Cycle(tx { recordFailed(work, outcome, e) }, next = null)
         }
 
@@ -361,7 +366,7 @@ public class SagaEngine(
     ): SagaRecord =
         manual(id, actor, SagaEvents.MANUAL_ABORT, runFor) { r, now ->
             machine.checkAbort(r, currentStepApplied)
-            if (currentStepApplied) {
+            if (currentStepApplied && r.state != SagaState.FINISHING) {
                 val step = definition(r.type).stepAt(r.stepIndex)
                 repository.saveResult(r.id, r.stepIndex, step.name, manualOutput(r, step, output).first, now)
             }
@@ -401,8 +406,7 @@ public class SagaEngine(
         return try {
             tx { deliver(sagaId, name, value, type, trace) }
         } catch (e: SignalFailed) {
-            // onSignal threw, or the hook of a saga the signal ended. Rolled back whole, signal included, so
-            // nothing they half wrote is kept. Now the signal is stored and the saga stops for a human,
+            // onSignal threw. Rolled back whole, signal included, so nothing it half wrote is kept. Now the signal is stored and the saga stops for a human,
             // instead of the listener redelivering it for ever.
             tx { deliver(sagaId, name, value, type, trace, failed = e) }
         }
@@ -507,14 +511,6 @@ public class SagaEngine(
     ): SagaRecord {
         val updated = signalDecision(r, def, step, ctx, value, encoded, now)
         save(updated, now)
-        // A hook that throws when the signal ends the saga stops it like a bug in onSignal, the signal kept:
-        // escaping as it is, it would fail the listener on every delivery (or every resume), the signal lost.
-        try {
-            finishIfNeeded(r, updated)
-        } catch (e: Throwable) {
-            if (e.isFatal()) throw e
-            throw SignalFailed(step.signal, if (updated.state == SagaState.COMPLETED) "onCompleted" else "onFailed", e)
-        }
         return updated
     }
 
@@ -554,14 +550,13 @@ public class SagaEngine(
     }
 
     /**
-     * A signal could not be applied: [what] threw. Either onSignal, with something other than StepRejected
-     * (see [onSignal]), or the onCompleted or onFailed hook of a saga the signal ended (see [applySignal]).
+     * A signal could not be applied: [what] (onSignal) threw something other than StepRejected (see [onSignal]).
      */
     private class SignalFailed(val signal: String, val what: String, cause: Throwable) :
         RuntimeException("$what threw on signal '$signal': $cause", cause)
 
     /**
-     * The claim threw [failure]: onSignal, or the hook of a saga the signal ended, failed on a signal stored
+     * The claim threw [failure]: onSignal failed on a signal stored
      * earlier, as the step started waiting or before a timeout check. The claim rolled back whole: the saga
      * stops, the signal kept.
      */
@@ -606,7 +601,6 @@ public class SagaEngine(
             save(updated, now)
             // r: logged on the step the action was taken on
             log(r.id, r.stepIndex, null, event, detail, now, trace, actor)
-            finishIfNeeded(r, updated)
             updated
         }
         val now = currentTime()
@@ -676,9 +670,10 @@ public class SagaEngine(
 
     /**
      * What a transaction leaves: the saga as saved ([saga], or null when it is locked elsewhere or
-     * missing), and the step it claimed, if any ([next]): the call to make before the next transaction.
+     * missing), and the step it claimed, if any ([next]): the call to make before the next transaction. [finish]: the
+     * saga's hook is due instead, to run in a transaction of its own.
      */
-    private class Cycle(val saga: SagaRecord?, val next: Work?)
+    private class Cycle(val saga: SagaRecord?, val next: Work?, val finish: Boolean = false)
 
     /** Transaction 1: claims the current step, if there is something to do now. */
     private fun claim(id: Uuid, skipLocked: Boolean, trace: String?): Cycle {
@@ -709,7 +704,6 @@ public class SagaEngine(
                 is Move.Cancelled -> {
                     save(move.record, now)
                     log(r.id, r.stepIndex, null, SagaEvents.CANCELLED, move.record.cancelReason, now, trace)
-                    finishIfNeeded(r, move.record)
                     r = move.record
                     now = currentTime()
                 }
@@ -717,10 +711,10 @@ public class SagaEngine(
                     write(move.effects, r, now) { def.stepAt(r.stepIndex).name }
                     save(move.record, now)
                     log(r.id, r.stepIndex, def.stepAt(r.stepIndex).name, SagaEvents.NOTHING_TO_UNDO, null, now, trace)
-                    finishIfNeeded(r, move.record)
                     r = move.record
                     now = currentTime()
                 }
+                is Move.Finish -> return Cycle(move.record, next = null, finish = true)
                 is Move.NoSignal -> {
                     save(move.record, now)
                     log(r.id, r.stepIndex, def.stepAt(r.stepIndex).name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
@@ -892,7 +886,6 @@ public class SagaEngine(
             val consumed = listOfNotNull("consumed (stored during the check)", describe(received.step, received.value)?.let { "ref=$it" })
             log(r.id, r.stepIndex, received.step.name, SagaEvents.SIGNAL_RECEIVED, consumed.joinToString(" "), now, work.trace)
         }
-        finishIfNeeded(current, updated)
         return if (claimUntil != null && currentTime() < claimUntil) {
             claimLocked(updated, work.trace)
         } else {
@@ -921,7 +914,7 @@ public class SagaEngine(
 
     /**
      * Fallback transaction, after [record] was rolled back: the saga becomes STUCK on the step that
-     * ran, for a human to resolve once the cause is fixed (a hook that throws, a constraint). What the
+     * ran, for a human to resolve once the cause is fixed (onSignal throwing, a constraint). What the
      * outcome established is kept, and lastError says which action follows from it:
      *
      * - Done: the output is saved with the step's result (never in lastError: it may hold personal
@@ -929,7 +922,7 @@ public class SagaEngine(
      * - Compensated: the step is marked undone, and `markCompensated` goes on, without undoing it again.
      * - Rejected: nothing was applied. The refusal is kept as failureReason, which makes markDone refuse
      *   the saga (it would turn a refusal into a success) and abort keep it as the reason.
-     * - Any other outcome (only a database failure can stop those, no hook runs): look in the external
+     * - Any other outcome (only a database failure can stop those, no user code runs): look in the external
      *   system, then markDone, retry or abort.
      */
     private fun recordFailed(work: Work, outcome: Outcome, error: Throwable): SagaRecord? {
@@ -960,17 +953,46 @@ public class SagaEngine(
         }
     }
 
-    /** Business effects of the end of the saga, in the same transaction. */
-    private fun finishIfNeeded(before: SagaRecord, after: SagaRecord) {
-        if (before.state == after.state || !after.state.isFinished) return
-        // Written before the hook, not when the transaction ends: the hook may read the saga table, or create
-        // the next saga for the same key, which the unique index on unfinished sagas would refuse while this
-        // row still read RUNNING or COMPENSATING. A finished saga is not saved again in this transaction (a
-        // claim returns at once), so this adds no UPDATE.
+    // ---- Finishing: the hook, in a transaction of its own ---------------------------------------------------
+
+    /**
+     * Runs the hook of a finishing saga, in a transaction that also ends it: COMPLETED or FAILED. The outcome that
+     * ended its steps is already committed, so a hook that throws loses nothing: it is tried again after backoff, then
+     * the saga stops (HOOK_FAILED). A transaction that fails for another reason counts the same.
+     */
+    private suspend fun finish(id: Uuid, trace: String?): Cycle =
+        try {
+            tx { finishLocked(id, trace) }
+        } catch (e: Throwable) {
+            if (e is CancellationException || e.isFatal()) throw e
+            Cycle(tx { hookFailedLocked(id, e, trace) }, next = null)
+        }
+
+    private fun finishLocked(id: Uuid, trace: String?): Cycle {
+        val r = lock(id) ?: return Cycle(saga = null, next = null)
+        val now = currentTime()
+        if (r.state != SagaState.FINISHING || r.stepStatus != StepStatus.READY || r.nextAttemptAt > now) return Cycle(r, next = null)
+        val def = definition(r.type)
+        val ended = machine.finished(r)
+        save(ended, now)
+        log(r.id, r.stepIndex, null, SagaEvents.FINISHED, ended.state.name, now, trace)
+        // Written before the hook, not when the transaction ends: the hook may read the saga table, or create the next
+        // saga for the same key, which the unique index on unfinished sagas would refuse while this row read FINISHING.
         txEvents.get()?.let(::writeUnsaved)
-        val def = definition(after.type)
-        val ctx = context(after, def)
-        if (after.state == SagaState.COMPLETED) def.onCompleted(ctx) else def.onFailed(ctx)
+        val ctx = context(ended, def)
+        if (ended.state == SagaState.COMPLETED) def.onCompleted(ctx) else def.onFailed(ctx)
+        return Cycle(ended, next = null)
+    }
+
+    private fun hookFailedLocked(id: Uuid, error: Throwable, trace: String?): SagaRecord? {
+        val r = lock(id) ?: return null
+        // Committed after all (the failure came after the commit), or finished elsewhere: nothing to count.
+        if (r.state != SagaState.FINISHING || r.stepStatus != StepStatus.READY) return r
+        val now = currentTime()
+        val failed = machine.hookFailed(r, error.toString(), now)
+        save(failed, now)
+        log(r.id, r.stepIndex, null, SagaEvents.HOOK_FAILED, failed.lastError, now, trace)
+        return failed
     }
 
     // ---- Saga data --------------------------------------------------------------------------

@@ -20,7 +20,7 @@ Indexes worth knowing:
 | `saga_finished_key` (partial: finished) | `findByKey` for finished sagas. A saga enters it once, when it finishes, and is never updated after |
 | `saga_log_saga`, `saga_log_trace` | `history`, `historyByTrace` |
 
-A query by business key names both states, `state IN ('RUNNING', 'COMPENSATING') OR state IN ('COMPLETED', 'FAILED')`, so that PostgreSQL combines the two partial indexes; on `business_key` alone, it scans the whole table.
+A query by business key names both states, `state IN ('RUNNING', 'COMPENSATING', 'FINISHING') OR state IN ('COMPLETED', 'FAILED')`, so that PostgreSQL combines the two partial indexes; on `business_key` alone, it scans the whole table.
 
 ## Upgrading
 

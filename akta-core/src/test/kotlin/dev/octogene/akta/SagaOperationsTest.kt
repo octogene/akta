@@ -13,6 +13,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Clock
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
@@ -74,12 +75,15 @@ class SagaOperationsTest {
             step("call") { execute { throw IOException("read timeout") }; check { throw IOException("lookup down") } }
         }
         val tooBig = saga("OUTPUT_UNSTORABLE") { step<String>("call") { execute { "x".repeat(100) } } }
-        val hook = saga("RECORD_FAILED") {
+        val hook = saga("HOOK_FAILED") {
             step("call") { execute { } }
             onCompleted { error("hook failed") }
         }
+        val unrecordable = saga("RECORD_FAILED") {
+            awaitSignal<String>("wait", signal = "payment", timeout = 1.hours) { onSignal { error("onSignal bug") } }
+        }
         val signal = saga("NO_SIGNAL") { awaitSignal<String>("wait", signal = "payment", timeout = 1.minutes) }
-        val definitions = arrayOf(unknown, failingCheck, tooBig, hook, signal, notSent())
+        val definitions = arrayOf(unknown, failingCheck, tooBig, hook, unrecordable, signal, notSent())
         val engine = engine(
             *definitions,
             config = SagaConfig(maxAttempts = 1, settleDelay = 1.seconds, checkRetryDelay = 1.seconds, maxDataBytes = 50),
@@ -87,6 +91,7 @@ class SagaOperationsTest {
         val ids = definitions.associate { it.type to engine.create(it, "K-${it.type}") }
         val started = clock.now
         ids.values.forEach { engine.run(it) }
+        runBlocking { engine.signal(ids.getValue("RECORD_FAILED"), "payment", "paid") }
         engine.resumeAfter(2.minutes)                                           // checks and the signal timeout
 
         val reasons = ids.mapValues { (_, id) -> engine.stored(id).stuckReason }
@@ -94,6 +99,7 @@ class SagaOperationsTest {
             mapOf(
                 "CANNOT_TELL" to StuckReason.CANNOT_TELL, "CHECK_FAILING" to StuckReason.CHECK_FAILING,
                 "OUTPUT_UNSTORABLE" to StuckReason.OUTPUT_UNSTORABLE, "RECORD_FAILED" to StuckReason.RECORD_FAILED,
+                "HOOK_FAILED" to StuckReason.HOOK_FAILED,
                 "NO_SIGNAL" to StuckReason.NO_SIGNAL, "NOT_SENT" to StuckReason.TOO_MANY_ATTEMPTS,
             ),
             reasons,

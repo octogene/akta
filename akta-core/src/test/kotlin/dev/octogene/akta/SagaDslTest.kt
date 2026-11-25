@@ -324,17 +324,14 @@ class SagaDslTest {
 
     @Test
     fun `after a record failure the output is kept, and markDone continues with it`() {
-        var hookFails = true
-        val definition = saga("T") {
-            step<Hold>("hold") { execute { Hold("H-1", "north") } }
-            onCompleted { check(!hookFails) { "items table locked" } }
-        }
-        val engine = engine(definition)
+        val definition = saga("T") { step<Hold>("hold") { execute { Hold("H-1", "north") } } }
+        val store = RefusingLog(repository, "EXECUTE:Done")
+        val engine = SagaEngine(InMemorySagaTransactions(repository), store, listOf(definition), KotlinxJsonSagaSerializer(), SagaConfig(), clock)
         val saga = runBlocking { engine.run(engine.create(definition, "item-1"), now + 10.seconds) }
         assertEquals(StepStatus.STUCK, saga.stepStatus)
         assertTrue("H-1" !in saga.lastError!!)                                 // not in the error text
 
-        hookFails = false
+        store.refusing = false
         val done = runBlocking { engine.markDone(saga.id, output = null, actor = "alice") }
         assertEquals(SagaState.COMPLETED, done.state)
         assertEquals("""{"id":"H-1","warehouse":"north"}""", repository.results(saga.id)["hold"])

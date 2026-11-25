@@ -195,8 +195,7 @@ public interface SignalStep<I, S> : SagaStep<I, S> {
      * Decides on a received value: return to accept it, throw [StepRejected] to fail the saga and
      * compensate. Runs inside the engine's transaction, wherever the value comes from (a signal delivered or
      * stored, a value [check] found): no external calls. Anything else it throws is a bug: the saga stops
-     * (RECORD_FAILED) with the signal kept, until fixed and retried; so does a hook that throws when the
-     * signal ends the saga. Default: accept.
+     * (RECORD_FAILED) with the signal kept, until fixed and retried. Default: accept.
      */
     public fun accept(ctx: SagaContext<I>, value: S) {}
 
@@ -226,21 +225,23 @@ public class SagaDefinition<I>(
     inputType: KType?,
     public val steps: List<SagaStep<I, *>>,
     /**
-     * Runs INSIDE the transaction that completes the saga. Must not call external systems.
-     * The saga's row already reads COMPLETED or FAILED: the hook may start the next saga for the same key.
+     * Runs INSIDE the transaction that completes the saga, its own: after the last step's outcome is committed (the
+     * saga is FINISHING meanwhile). Must not call external systems. The saga's row already reads COMPLETED: the hook
+     * may start the next saga for the same key. If it throws, nothing it wrote is kept: it runs again later, then the
+     * saga stops (HOOK_FAILED).
      */
-    public val onCompleted: SagaContext<I>.() -> Unit = {},
-    /**
-     * Runs INSIDE the transaction that ends the saga after compensation. Must not call external systems.
-     * The saga's row already reads COMPLETED or FAILED: the hook may start the next saga for the same key.
-     */
-    public val onFailed: SagaContext<I>.() -> Unit = {},
+    public val onCompleted: SagaContext<I>.() -> Unit = noHook(),
+    /** As [onCompleted], once every completed step is undone: the row already reads FAILED. */
+    public val onFailed: SagaContext<I>.() -> Unit = noHook(),
 ) {
     /**
      * The type of the input, for the engine's serializer. Null when the saga has no input (I is Unit):
      * `typeOf<Unit>()` becomes null, so a saga without input never stores `{}`.
      */
     public val inputType: KType? = inputType?.unlessUnit()
+
+    /** Which hooks the saga has: a saga without one ends at once, without a FINISHING transaction of its own. */
+    internal val hooks: Hooks get() = Hooks(completed = onCompleted !== NO_HOOK, failed = onFailed !== NO_HOOK)
 
     init {
         require(type.isNotBlank()) { "Saga type must not be blank" }
@@ -263,6 +264,15 @@ public class SagaDefinition<I>(
 }
 
 private const val MAX_STEP_NAME = 100
+
+/** No hook declared: the default, told apart from `{}` by identity. */
+private val NO_HOOK: SagaContext<Any?>.() -> Unit = {}
+
+@Suppress("UNCHECKED_CAST")
+internal fun <I> noHook(): SagaContext<I>.() -> Unit = NO_HOOK as SagaContext<I>.() -> Unit
+
+/** Whether a saga has an `onCompleted` and an `onFailed` hook. */
+internal data class Hooks(val completed: Boolean, val failed: Boolean)
 
 /** Null for `Unit`, which carries no data: nothing to store, rather than `{}`. `Unit?` is kept. */
 @PublishedApi

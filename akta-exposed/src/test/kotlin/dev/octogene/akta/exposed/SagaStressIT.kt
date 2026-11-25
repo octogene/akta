@@ -561,7 +561,7 @@ class SagaStressIT {
                     engine.cancel(id, "customer cancelled", "customer")
                     "cancelled"
                 } catch (e: IllegalArgumentException) {
-                    if (!e.message.orEmpty().contains("is finished")) throw e
+                    if (!e.message.orEmpty().contains("is finished") && !e.message.orEmpty().contains("is finishing")) throw e
                     "too late"
                 } catch (e: IllegalStateException) {
                     if (!e.isHook()) throw e
@@ -620,6 +620,8 @@ class SagaStressIT {
                     else -> (step as EventWait).provider.lookup(key).let { it to it?.let { e -> Json.encodeToString(e) } }
                 }
                 val action = when {
+                    // Every step is done or undone: only the hook is left, which retry runs again.
+                    state == SagaState.FINISHING -> "retry"
                     // An undo's key may be forgotten: effect gone → undone by hand; still there → a fresh key.
                     state == SagaState.COMPENSATING && saga.stuckReason == StuckReason.KEY_EXPIRED ->
                         if (truth == null) "markCompensated" else "retry(newKey)"
@@ -659,7 +661,7 @@ class SagaStressIT {
         }
     }
 
-    private fun unfinished() = pg.long("SELECT count(*) FROM saga WHERE state IN ('RUNNING', 'COMPENSATING')") +
+    private fun unfinished() = pg.long("SELECT count(*) FROM saga WHERE state IN ('RUNNING', 'COMPENSATING', 'FINISHING')") +
         (sagaCount - pg.long("SELECT count(*) FROM saga"))
 
     // ---- Invariants -----------------------------------------------------------------------------
@@ -747,7 +749,7 @@ class SagaStressIT {
             SagaEvents.RESUME_FAILED,
             SagaEvents.MANUAL_RETRY, SagaEvents.MANUAL_DONE, SagaEvents.MANUAL_ABORT, SagaEvents.MANUAL_COMPENSATED,
             SagaEvents.WAIT_STARTED, SagaEvents.WAIT_TIMED_OUT, SagaEvents.SIGNAL_RECEIVED, SagaEvents.CANCEL_REQUESTED,
-            SagaEvents.KEY_EXPIRED, SagaEvents.CANCELLED, SagaEvents.NOT_CALLED, SagaEvents.NOTHING_TO_UNDO,
+            SagaEvents.KEY_EXPIRED, SagaEvents.FINISHED, SagaEvents.HOOK_FAILED, SagaEvents.CANCELLED, SagaEvents.NOT_CALLED, SagaEvents.NOTHING_TO_UNDO,
         )
         val outcome = Regex("(EXECUTE|CHECK|COMPENSATE):[A-Za-z]+")
         pg.query("SELECT DISTINCT event FROM saga_log") { it.getString(1) }

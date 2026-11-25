@@ -5,7 +5,7 @@ CREATE TABLE saga (
     id              uuid        PRIMARY KEY,
     type            text        NOT NULL,                 -- e.g. ITEM_SETUP
     business_key    text        NOT NULL,                 -- e.g. the item id
-    state           text        NOT NULL CHECK (state IN ('RUNNING', 'COMPENSATING', 'COMPLETED', 'FAILED')),
+    state           text        NOT NULL CHECK (state IN ('RUNNING', 'COMPENSATING', 'FINISHING', 'COMPLETED', 'FAILED')),
     step_index      int         NOT NULL CHECK (step_index >= 0),
     step_status     text        NOT NULL CHECK (step_status IN ('READY', 'IN_PROGRESS', 'WAITING', 'UNKNOWN', 'STUCK')),
     attempts        int         NOT NULL DEFAULT 0 CHECK (attempts >= 0),
@@ -21,7 +21,7 @@ CREATE TABLE saga (
     failure_reason  text,                                 -- why it compensates: set when compensation starts, never changed
     stuck_reason    text        CHECK (stuck_reason IN ('CANNOT_TELL', 'CHECK_FAILING', 'TOO_MANY_ATTEMPTS',
                                                         'OUTPUT_UNSTORABLE', 'RECORD_FAILED', 'NO_SIGNAL',
-                                                        'KEY_EXPIRED', 'RESUME_FAILING')),
+                                                        'KEY_EXPIRED', 'HOOK_FAILED', 'RESUME_FAILING')),
     stuck_at        timestamptz,                          -- when it became STUCK
     stuck_from      text        CHECK (stuck_from IN ('READY', 'IN_PROGRESS', 'WAITING', 'UNKNOWN')), -- step_status before RESUME_FAILING
     key_since       timestamptz,                          -- first use of the current step's idempotency key
@@ -38,11 +38,11 @@ CREATE TABLE saga (
 
 -- At most one unfinished saga per business key.
 CREATE UNIQUE INDEX saga_one_running_per_key ON saga (business_key)
-    WHERE state IN ('RUNNING', 'COMPENSATING');
+    WHERE state IN ('RUNNING', 'COMPENSATING', 'FINISHING');
 
 -- Recovery: everything to look at (ready step, due check, expired lock).
 CREATE INDEX saga_due ON saga (next_attempt_at)
-    WHERE state IN ('RUNNING', 'COMPENSATING') AND step_status <> 'STUCK';
+    WHERE state IN ('RUNNING', 'COMPENSATING', 'FINISHING') AND step_status <> 'STUCK';
 
 -- Monitoring: stuck sagas.
 CREATE INDEX saga_stuck ON saga (stuck_at, id) WHERE step_status = 'STUCK';

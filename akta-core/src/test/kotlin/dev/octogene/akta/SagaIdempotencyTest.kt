@@ -339,7 +339,10 @@ class SagaIdempotencyTest {
         val engine = engine(inHook)
         val id = engine.create(inHook, "R-1")
         engine.run(id)
-        assertEquals(StuckReason.RECORD_FAILED, engine.stored(id).stuckReason)  // the hook threw
+        engine.stored(id).let {                                                 // the hook threw: tried again later
+            assertEquals(SagaState.FINISHING, it.state)
+            assertTrue(it.lastError!!.contains("No idempotency key outside"), it.lastError)
+        }
 
         assertFailsWith<IllegalArgumentException> {                            // a single call could outlive the key
             engine(payment(keyRetention = 10.seconds))
