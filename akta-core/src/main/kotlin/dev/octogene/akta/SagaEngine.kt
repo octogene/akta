@@ -390,7 +390,8 @@ public class SagaEngine(
      *
      * A stuck step may have been applied (its check could not tell): say so with [currentStepApplied],
      * after looking in the external system. When true, the current step is compensated too, and
-     * receives [output] as its own output (checked as in [markDone]). A step that is READY was never applied.
+     * receives [output] as its own output (checked as in [markDone]). A step that is READY was never applied,
+     * nor was one whose refusal is kept (`RECORD_FAILED`): [currentStepApplied] is then refused.
      */
     public suspend fun abort(
         id: Uuid,
@@ -406,6 +407,10 @@ public class SagaEngine(
             }
             require(!currentStepApplied || r.stepStatus == StepStatus.STUCK) {
                 "The current step of saga $id is ${r.stepStatus}: it was not applied"
+            }
+            // As in markDone: a refused step has nothing to undo, and its compensation must not run.
+            require(!currentStepApplied || r.failureReason == null) {
+                "The stuck step of saga $id was refused (${r.failureReason}), nothing applied: abort with currentStepApplied = false"
             }
             val updated = if (currentStepApplied) {
                 val step = definition(r.type).stepAt(r.stepIndex)

@@ -752,9 +752,14 @@ class SagaEngineTest {
         assertTrue(saga.lastError!!.contains("abort(id, currentStepApplied = false)"), saga.lastError)
         val refused = assertFailsWith<IllegalArgumentException> { runBlocking { engine.markDone(saga.id, null, "alice") } }
         assertTrue(refused.message!!.contains("was refused"), refused.message)
+        val applied = assertFailsWith<IllegalArgumentException> {
+            runBlocking { engine.abort(saga.id, "alice", currentStepApplied = true) }
+        }
+        assertTrue(applied.message!!.contains("currentStepApplied = false"), applied.message)
 
         hookFails = false                                                 // the bug is fixed
         val after = runBlocking { engine.abort(saga.id, "alice", currentStepApplied = false) }
+        assertEquals(0, stock.compensations)                              // nothing applied, nothing to undo
         assertEquals(SagaState.FAILED, after.state)
         assertEquals("dev.octogene.akta.StepRejected: unknown EPC", after.failureReason)   // not "Aborted by alice"
         assertEquals(listOf("item-1"), failed)
