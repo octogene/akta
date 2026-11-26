@@ -12,7 +12,8 @@ import kotlin.uuid.Uuid
 
 /**
  * The engine's decisions on their own: a row in, a row out, no store, clock or coroutine. The engine's behaviour as a
- * whole is tested elsewhere (DifferentialTest among others); these pin the rules that are easy to get wrong.
+ * whole is tested elsewhere (the engine's tests, and the stress test against PostgreSQL); these pin the rules that are
+ * easy to get wrong.
  */
 class SagaMachineTest {
     private val config = SagaConfig(maxAttempts = 3)

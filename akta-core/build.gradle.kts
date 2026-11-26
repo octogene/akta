@@ -31,9 +31,6 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
-    // Forward -Dakta.* options of DifferentialTest (e.g. -Dakta.scripts=50000, -Dakta.seed=42) to the test JVM.
-    System.getProperties().filterKeys { (it as String).startsWith("akta.") }
-        .forEach { (k, v) -> systemProperty(k as String, v) }
 }
 
 publishing {
