@@ -101,7 +101,7 @@ class PaymentListener(
 
 | Result | When |
 |---|---|
-| `Delivered` | The step was waiting: accepted (the saga moves on) or rejected by `onSignal` (it compensates) |
+| `Delivered` | The step was waiting: the signal is stored and the step due at once. `onSignal` accepts it (the saga moves on) or rejects it (it compensates) when the saga runs: `run` it now, or the recovery job will |
 | `Stored` | The step does not wait yet: the event was faster than the HTTP request. It is used as soon as the step waits |
 | `Ignored` | Already received (a redelivery), too late (the saga moved on or finished), or the saga is being cancelled |
 | `NoSaga` | No saga with that id |
@@ -112,7 +112,7 @@ A wrong signal name or value type throws, and so does a saga type this pod does 
 
 === "The payment succeeds"
 
-    The event arrives, `onSignal` accepts it, the saga confirms the reservation and completes.
+    The event arrives and wakes the saga; when it runs, `onSignal` accepts it, and the saga confirms the reservation and completes.
 
 === "The payment fails"
 
@@ -122,7 +122,7 @@ A wrong signal name or value type throws, and so does a saga type this pod does 
 
     After 30 minutes, the recovery job runs the step's `check`: it asks the provider for the payment's status.
 
-    - Succeeded: the value found goes through `onSignal` like an event, and the saga confirms.
+    - Succeeded: the value found is stored as the event, goes through `onSignal` like one, and the saga confirms.
     - No payment: the saga gives up and compensates.
     - The provider cannot tell: the saga stops for a human.
 

@@ -53,7 +53,7 @@ When the saga ends, its `onCompleted` or `onFailed` does not run in this transac
 
 ### When recording fails
 
-If the record transaction rolls back (`onSignal` throwing on a value a check found, a constraint, the database), the call's outcome must not be lost. Hooks never run here: they run once the outcome is committed, on their own (see [the hooks](lifecycle.md#the-hooks)).
+If the record transaction rolls back (a constraint, the database), the call's outcome must not be lost. No user code runs here: a value a check found is stored, and `onSignal` runs on it in the next claim. Hooks never run here: they run once the outcome is committed, on their own (see [the hooks](lifecycle.md#the-hooks)).
 
 1. The engine records the outcome again, alone, without claiming the next step.
 2. If that fails too, the saga becomes `STUCK` (`RECORD_FAILED`) on the step that ran. What the outcome established is kept, and `last_error` says what follows, once the cause is fixed:

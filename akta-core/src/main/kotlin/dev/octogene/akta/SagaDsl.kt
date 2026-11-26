@@ -216,8 +216,8 @@ public class SignalStepBuilder<I, S> @PublishedApi internal constructor(
 
     /**
      * Decides on a received value: return to accept it, throw [StepRejected] to fail the saga and
-     * compensate. Runs inside the engine's transaction, for a signal delivered or stored and for a value the
-     * timeout check found: no external calls. Anything else it throws is a bug: the transaction rolls back
+     * compensate. Runs when the saga runs, in a claim transaction of its own, for a signal delivered or stored and
+     * for a value the timeout check found: no external calls. Anything else it throws is a bug: the transaction rolls back
      * whole, and the saga stops (RECORD_FAILED) with the signal kept, until the bug is fixed and it is retried.
      */
     public fun onSignal(block: SagaContext<I>.(signal: S) -> Unit) {
@@ -225,8 +225,8 @@ public class SignalStepBuilder<I, S> @PublishedApi internal constructor(
     }
 
     /**
-     * At the timeout, asks the external system: [CheckResult.Done] accepts its value, NotDone rejects. A signal
-     * received while it runs is used instead of NotDone or CannotTell.
+     * At the timeout, asks the external system: [CheckResult.Done] gives its value (stored as the signal, and decided
+     * on by onSignal), NotDone rejects. A signal received while it runs is used instead, even of a value found.
      */
     public fun check(block: suspend SagaContext<I>.() -> CheckResult<S>) {
         checkBlock = block

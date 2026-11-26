@@ -231,7 +231,7 @@ public object SagaEvents {
     public const val WAIT_STARTED: String = "WAIT_STARTED"
     /** A signal step's timeout passed without its signal: checked, or stuck. */
     public const val WAIT_TIMED_OUT: String = "WAIT_TIMED_OUT"
-    /** A signal arrived; the detail says delivered, stored, consumed (stored earlier) or ignored. */
+    /** A signal arrived; the detail says delivered (its step woken), stored, consumed (onSignal ran on it) or ignored. */
     public const val SIGNAL_RECEIVED: String = "SIGNAL_RECEIVED"
     /** An idempotent step's key may be forgotten by its service: STUCK ([StuckReason.KEY_EXPIRED]), no call made. */
     public const val KEY_EXPIRED: String = "KEY_EXPIRED"

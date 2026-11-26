@@ -177,7 +177,7 @@ public interface SagaStep<I, O> {
  *
  * At [timeout], the step's [check] decides, if [checksOnTimeout]: the value it finds means accepted,
  * NotDone means rejected (the saga compensates), CannotTell means stuck. A signal received while the
- * check runs, or after it failed, is used instead of NotDone or CannotTell: the timeout is a fallback
+ * check runs, or after it failed, is used instead, even of a value found: the timeout is a fallback
  * for a lost event, not a deadline (a business deadline belongs in [accept]). Without a check, a timeout
  * makes the saga stuck. The DSL (`awaitSignal<S>(…) { … }`) builds these.
  */
@@ -193,7 +193,7 @@ public interface SignalStep<I, S> : SagaStep<I, S> {
 
     /**
      * Decides on a received value: return to accept it, throw [StepRejected] to fail the saga and
-     * compensate. Runs inside the engine's transaction, wherever the value comes from (a signal delivered or
+     * compensate. Runs inside a claim transaction of its own, wherever the value comes from (a signal delivered or
      * stored, a value [check] found): no external calls. Anything else it throws is a bug: the saga stops
      * (RECORD_FAILED) with the signal kept, until fixed and retried. Default: accept.
      */
@@ -209,7 +209,10 @@ public interface SignalStep<I, S> : SagaStep<I, S> {
 
 /** What [SagaEngine.signal] did with a signal. */
 public sealed interface SignalResult {
-    /** The step was waiting for it: accepted (the saga moves on) or rejected (it compensates). */
+    /**
+     * The step was waiting for it: stored, the step due at once. Its onSignal decides (the saga moves on, or it
+     * compensates) when the saga next runs: `run` it now, or the recovery job will.
+     */
     public data class Delivered(val sagaId: Uuid) : SignalResult
     /** The step does not wait yet (or its timeout check is in flight): kept, used when it waits. */
     public data class Stored(val sagaId: Uuid) : SignalResult

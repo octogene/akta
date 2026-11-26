@@ -55,10 +55,8 @@ internal enum class Arrival { TOO_LATE, CANCELLED, STORE }
 
 /** What becomes of a signal once stored: see [SagaMachine.useOfStored]. */
 internal enum class Use {
-    /** Its application failed before: the saga stops, the signal kept. */
-    BLOCK,
-    /** Its step is listening: onSignal decides now. */
-    APPLY,
+    /** Its step is listening: woken, due at once, to consume it (onSignal decides then). */
+    WAKE,
     /** Its step does not listen yet: kept for it. */
     KEEP,
 }
@@ -143,8 +141,22 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
         replay: Boolean,
         unclaimed: SagaRecord,
         now: Instant,
+        signalStored: (signal: String) -> Boolean = { false },
     ): Decision {
         val effects = mutableListOf<Effect>()
+        // A signal step's timeout check: what it found is stored as the signal (one received first wins), and the step
+        // is due at once, to consume it in a claim of its own, through onSignal. If it found nothing, or cannot tell,
+        // a signal received meanwhile answers instead: the lookup raced with the event, which did happen.
+        if (step is SignalStep<*, *>) {
+            if (outcome is Outcome.Found) {
+                effects += Effect.SaveSignal(step.signal, checkNotNull(outcome.done.output) { "Saga ${r.id}: a signal has a value" })
+                return Decision(r.moved(StepState.Ready(now)), effects)
+            }
+            val foundNothing = outcome is Outcome.Rejected && outcome.noSignalFound
+            if ((foundNothing || outcome == Outcome.CannotTell) && signalStored(step.signal)) {
+                return Decision(r.moved(StepState.Ready(now)), effects)
+            }
+        }
         val record = when (outcome) {
             is Outcome.Done -> {
                 effects += Effect.SaveResult(outcome.output)
@@ -197,7 +209,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
                 compensateFrom(r, r.stepIndex - 1, now)
             }
             is Outcome.CompensationFailed -> retryLater(r, outcome.error, now)
-            is Outcome.Found -> error("A value found is decided by its onSignal, in the engine")
+            is Outcome.Found -> error("Saga ${r.id}: a value found is only for a signal step")
             // What the claim changed goes back, due at once: no attempt used, the idempotency key not used.
             // The rest is kept: a cancellation requested meanwhile, for one.
             is Outcome.NotCalled -> unclaimed.unfinished().let { before ->
@@ -504,18 +516,20 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
         else -> Arrival.STORE
     }
 
-    /** What becomes of a signal for the step at [index], once stored; [failed]: its application failed before. */
-    fun useOfStored(r: SagaRecord, index: Int, failed: Boolean): Use {
+    /** What becomes of a signal for the step at [index], once stored. */
+    fun useOfStored(r: SagaRecord, index: Int): Use {
         // WAITING, or UNKNOWN: its timeout passed and a check failed, to be tried again. No call is in flight
         // either way (a check in flight is IN_PROGRESS), so the signal answers now what the check looks up.
         val listening = r.stepStatus == StepStatus.WAITING || r.stepStatus == StepStatus.UNKNOWN
         return when {
-            r.stepIndex == index && listening && failed -> Use.BLOCK
-            r.stepIndex == index && listening -> Use.APPLY
+            r.stepIndex == index && listening -> Use.WAKE
             // Not waiting yet (an earlier step runs, or this one is ready, checking or stuck): kept for it.
             else -> Use.KEEP
         }
     }
+
+    /** A signal arrived for the step that waits for it: due at once, to consume it. */
+    fun woken(r: SagaRecord, now: Instant): SagaRecord = r.moved(StepState.Ready(now))
 
     /** The signal step [step] starts waiting, until its timeout. */
     fun waiting(r: SagaRecord, step: SignalStep<*, *>, now: Instant): SagaRecord =

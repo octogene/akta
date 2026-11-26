@@ -13,12 +13,12 @@ val paid = awaitSignal<PaymentResult>("await-payment", signal = "payment", timeo
 ```
 
 - **`signal`** names the event, not the step. A name is used by one step of a saga, checked at startup.
-- **`onSignal`** runs inside the engine's transaction, whether the value comes from a signal or from the timeout check: it decides, it does not call anything. Throwing `StepRejected` makes the saga compensate. Anything else it throws is a bug: the transaction rolls back whole, then the signal is stored and the saga stops (`RECORD_FAILED`). `engine.signal` answers `Stored`, so a listener does not redeliver the event for ever. Once the bug is fixed, `retry` uses the signal kept. A signal that ends the saga never runs its hook in the listener's transaction: the hook runs on its own, after (see [the hooks](lifecycle.md#the-hooks)).
+- **`onSignal`** runs when the saga runs, in a claim transaction of its own, whatever the value came from: a signal that arrived early or woke the wait, or a value the timeout check found. It decides, it does not call anything. Throwing `StepRejected` makes the saga compensate. Anything else it throws is a bug: that transaction rolls back, and the saga stops (`RECORD_FAILED`) with the signal kept. Once the bug is fixed, `retry` uses it. `engine.signal` never runs `onSignal`, nor a hook: a bug in either never fails the listener.
 - **While it waits**, the saga is a row with status `WAITING` and `next_attempt_at` set to the timeout. No thread, connection or lock is held.
 
 ### Delivering a signal
 
-`engine.signal(sagaId, name, value)` is one short transaction. It locks the saga's row, finds the step of its definition that waits for `name`, checks the value's type against the one the step declares, then:
+`engine.signal(sagaId, name, value)` is one short transaction, which runs no user code. It locks the saga's row, finds the step of its definition that waits for `name`, checks the value's type against the one the step declares, then stores the signal and, if its step waits for it, makes the step due at once:
 
 ```mermaid
 flowchart TD
@@ -31,9 +31,11 @@ flowchart TD
     L -->|no| D{a signal of this name already received?}
     D -->|yes| I2[Ignored]
     D -->|no| W{the step is WAITING, or between two timeout checks?}
-    W -->|yes| DL[Delivered: onSignal accepts or rejects it]
+    W -->|yes| DL[Delivered: stored, the step due at once]
     W -->|no| ST[Stored: used when the step waits]
 ```
+
+**`Delivered` means the saga is ready to go on, not that it has.** `onSignal` decides when the saga next runs: call `engine.run` after `Delivered` to go on at once, as the [Kafka listener example](../use-cases/reservation-payment.md#the-kafka-listener) does; otherwise the recovery job does, within its period. Each stored signal is consumed in a claim of its own, so that `onSignal` never rolls back an outcome recorded before it, or another signal.
 
 **Only the first signal of a name counts.** It is stored in `saga_signal`, whose primary key is the saga and the signal name, so a redelivered event changes nothing. That is what makes a Kafka listener simple: deliver, then commit the offset.
 
@@ -47,15 +49,15 @@ At the timeout, the recovery job claims the step (`WAIT_TIMED_OUT` in the histor
 
 | The step has | What happens |
 |---|---|
-| A check that finds a value | It is accepted, through `onSignal` like a signal |
+| A check that finds a value | It is stored as the signal, then consumed through `onSignal` like one |
 | A check that finds nothing | The saga compensates |
 | A check that cannot tell | The saga stops (`CANNOT_TELL`) |
 | No check | The saga stops (`NO_SIGNAL`). A human delivers the event by hand, then `retry` waits again |
 
 **A signal received after the timeout still counts**, until the saga moves on. The timeout is a fallback for an event that may be lost, not a deadline:
 
-- A signal that arrives while the check runs is stored. If the check finds a value, that value is used: it is the same event. If it finds nothing or cannot tell, the stored signal is used instead: the lookup ran just before the event, which did happen. If the check fails (it throws), it is not tried again: the stored signal is used.
-- A check that failed is retried later, with backoff. A signal that arrives before that retry is delivered at once, as to a waiting step.
+- A signal that arrives while the check runs is stored, and it is used, whatever the check answers: if the check found a value too, it is the same event, and the signal received first is kept. If the check finds nothing or cannot tell, the lookup ran just before the event, which did happen. If the check fails (it throws), it is not tried again: the stored signal is used.
+- A check that failed is retried later, with backoff. A signal that arrives before that retry wakes the step, as a waiting one.
 
 Either way the signal goes through `onSignal`, like any other. **A business deadline belongs there**: to refuse a payment that comes too late, compare its time with the deadline in `onSignal` and throw `StepRejected`.
 

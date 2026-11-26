@@ -50,9 +50,11 @@ class DifferentialTest {
         println("Differential: $scripts scripts from seed $firstSeed. Ends: $ends\nStuck: $reasons\nEvents: $events")
         // A net with holes proves nothing: every kind of event and every stuck reason must have been reached.
         if (scripts >= 8000) {
-            // HOOK_FAILED needs a hook: sagas with one are left out (see Plan.hooks).
-            assertEquals(emptySet(), StuckReason.entries.toSet() - reasons.keys - StuckReason.HOOK_FAILED, "stuck reasons never reached")
-            assertEquals(emptySet(), EXPECTED_EVENTS - events.keys, "events never reached")
+            // HOOK_FAILED needs a hook, NO_SIGNAL a signal step, and RECORD_FAILED now comes from onSignal or the
+            // database alone: sagas with them are left out (see Plan).
+            val unreachable = setOf(StuckReason.HOOK_FAILED, StuckReason.NO_SIGNAL)
+            assertEquals(emptySet(), StuckReason.entries.toSet() - reasons.keys - unreachable, "stuck reasons never reached")
+            assertEquals(emptySet(), EXPECTED_EVENTS - events.keys - SIGNAL_EVENTS, "events never reached")
         }
     }
 
@@ -100,7 +102,10 @@ class DifferentialTest {
     private class Plan(r: Random) {
         val steps = List(1 + r.nextInt(4)) { i ->
             StepPlan(
-                "s$i", signal = r.nextInt(100) < 35, idempotent = r.nextInt(100) < 35, compensates = r.nextInt(100) < 70,
+                // Intended difference: a signal is stored and its step woken, onSignal running when the saga claims it
+                // (step 5 of the refactoring), which the reference does not. Signal steps are tested on their own
+                // (SagaSignalTest, the stress test). The draw is kept, so that the scripts stay the same.
+                "s$i", signal = r.nextInt(100) < 35 && false, idempotent = r.nextInt(100) < 35, compensates = r.nextInt(100) < 70,
                 checks = r.nextInt(100) < 70, output = r.nextInt(100) < 70, timeout = listOf(5.minutes, 30.minutes, 24.hours).random(r),
             )
         }
@@ -458,6 +463,8 @@ class DifferentialTest {
     }
 
     private companion object {
+        /** Events only signal steps reach (see Plan). */
+        val SIGNAL_EVENTS = setOf(SagaEvents.WAIT_STARTED, SagaEvents.WAIT_TIMED_OUT, SagaEvents.SIGNAL_RECEIVED, "CHECK:Rejected")
         val CALL_ACTION = Regex(""", callAction=\w+""")
         val PRIVATE_EXCEPTION = Regex("""dev\.octogene\.akta\.[\w.$]*SignalFailed""")
         val EXPECTED_EVENTS = setOf(

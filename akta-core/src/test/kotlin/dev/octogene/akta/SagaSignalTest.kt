@@ -229,7 +229,7 @@ class SagaSignalTest {
         assertEquals("confirm P-9", calls.last())
         assertEquals(SignalResult.Ignored(id), engine.pay(id))                  // the event, too late
         assertEquals("ignored: too late ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).last())
-        assertNull(repository.signal(id, "payment"))                            // a late value is not kept
+        assertTrue(repository.signal(id, "payment")!!.contains("P-9"))          // the value found, kept; not the late one
     }
 
     @Test
@@ -260,7 +260,7 @@ class SagaSignalTest {
     }
 
     @Test
-    fun `a signal during a timeout check that finds a value is stored, and the value found wins`() {
+    fun `a signal during a timeout check that finds a value is stored, and the signal received wins`() {
         lateinit var engine: SagaEngine
         lateinit var id: Uuid
         val definition = reservation(checkAtTimeout = {
@@ -274,7 +274,8 @@ class SagaSignalTest {
         engine.resumeAfter(31.minutes)
 
         assertEquals(SagaState.COMPLETED, runBlocking { engine.find(id)!! }.state)
-        assertEquals("confirm P-1", calls.last())                               // the check's value, not the signal's
+        // The same event, twice: the signal, received first, is kept; the check's value is not stored over it.
+        assertEquals("confirm P-late", calls.last())
     }
 
     @Test
@@ -295,7 +296,7 @@ class SagaSignalTest {
         assertEquals(SagaState.COMPLETED, saga.state)
         assertEquals("confirm P-2", calls.last())                               // the signal's value
         assertTrue(released.isEmpty())                                          // nothing undone
-        assertEquals("consumed (stored during the check) ref=P-2", details(SagaEvents.SIGNAL_RECEIVED).last())
+        assertEquals("consumed (stored earlier) ref=P-2", details(SagaEvents.SIGNAL_RECEIVED).last())
     }
 
     @Test
@@ -446,19 +447,19 @@ class SagaSignalTest {
     }
 
     @Test
-    fun `a bug in onSignal keeps the signal and stops the saga, instead of failing the listener`() {
+    fun `a bug in onSignal never fails the listener, and stops the saga with the signal kept`() {
         val definition = watchedReservation()
         val engine = watchedEngine(definition)
         val id = engine.create(definition, "R-1")
         engine.run(id)
         onSignalBug = true
 
-        assertEquals(SignalResult.Stored(id), engine.pay(id))                   // the listener can commit its offset
+        assertEquals(SignalResult.Delivered(id), engine.pay(id))                // onSignal does not run here
+        val stuck = engine.run(id)                                               // it does when the saga runs
 
-        val stuck = runBlocking { engine.find(id)!! }
         assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
         assertTrue(stuck.lastError!!.startsWith("onSignal threw on signal 'payment'"), stuck.lastError)
-        assertEquals("stored: onSignal failed ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).single())
+        assertEquals("delivered ref=P-1", details(SagaEvents.SIGNAL_RECEIVED).single())
 
         onSignalBug = false                                                     // fixed
         val done = runBlocking { engine.retry(id, "operator") }                 // uses the signal kept
@@ -596,7 +597,7 @@ class SagaSignalTest {
 
         assertEquals(SignalResult.Delivered(id), engine.pay(id))                // the hook does not run here
         assertEquals(SignalResult.Ignored(id), engine.pay(id))                  // a redelivery changes nothing
-        assertEquals(SagaState.FINISHING, runBlocking { engine.find(id)!! }.state)
+        assertEquals(SagaState.RUNNING, runBlocking { engine.find(id)!! }.state)  // woken: consumed when it runs
 
         val tried = engine.run(id)                                               // the hook, in a transaction of its own
         assertEquals(SagaState.FINISHING, tried.state)
@@ -647,6 +648,27 @@ class SagaSignalTest {
     }
 
     @Test
+    fun `two signals stored early are consumed one transaction each, and a bug stops the right step`() {
+        var bug = true
+        val definition = saga("TWO") {
+            awaitSignal<String>("first", signal = "a", timeout = 1.minutes)
+            awaitSignal<String>("second", signal = "b", timeout = 1.minutes) { onSignal { if (bug) error("onSignal bug") } }
+        }
+        val engine = engine(definition)
+        val id = engine.create(definition, "R-1")
+        runBlocking { engine.signal(id, "a", "A"); engine.signal(id, "b", "B") }  // both faster than the request
+
+        val stuck = engine.run(id)
+
+        assertEquals(1, stuck.stepIndex)                                        // before: step 0 blamed (BUG-02)
+        assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)
+        assertEquals("second", repository.log.single { it.event == SagaEvents.RECORD_FAILED }.stepName)
+        assertEquals(listOf("first"), repository.storedResults(id).map { it.stepName })   // step 0 is kept
+        bug = false
+        assertEquals(SagaState.COMPLETED, runBlocking { engine.retry(id, "operator") }.state)
+    }
+
+    @Test
     fun `a bug in onSignal on a value its check found is not taken for a failing lookup`() {
         var checks = 0
         val definition = watchedReservation(checkAtTimeout = { checks++; CheckResult.Done(PaymentResult("P-1", succeeded = true)) })
@@ -660,7 +682,7 @@ class SagaSignalTest {
         val stuck = runBlocking { engine.find(id)!! }
         assertEquals(StuckReason.RECORD_FAILED, stuck.stuckReason)               // not CHECK_FAILING
         assertTrue(stuck.lastError!!.contains("onSignal threw on signal 'payment'"), stuck.lastError)
-        assertTrue(stuck.lastError!!.contains("The signal is kept (the value the check found)"), stuck.lastError)
+        assertTrue(stuck.lastError!!.contains("The signal is kept"), stuck.lastError)    // the value the check found
         assertEquals(1, checks)                                                 // the lookup is not repeated
 
         onSignalBug = false                                                     // fixed
@@ -832,7 +854,7 @@ class SagaSignalTest {
         engine.run(id)
 
         assertTrue(details(SagaEvents.WAIT_STARTED).single()!!.startsWith("signal 'payment' until "))
-        assertEquals(listOf<String?>("delivered ref=P-1"), details(SagaEvents.SIGNAL_RECEIVED))
+        assertEquals(listOf<String?>("delivered ref=P-1", "consumed (stored earlier) ref=P-1"), details(SagaEvents.SIGNAL_RECEIVED))
         assertTrue(repository.log.none { "PII-" in it.detail.orEmpty() })
     }
 }
