@@ -7,7 +7,7 @@ CREATE TABLE saga (
     business_key    text        NOT NULL,                 -- e.g. the item id
     state           text        NOT NULL CHECK (state IN ('RUNNING', 'COMPENSATING', 'FINISHING', 'COMPLETED', 'FAILED')),
     step_index      int         NOT NULL CHECK (step_index >= 0),
-    step_status     text        NOT NULL CHECK (step_status IN ('READY', 'IN_PROGRESS', 'WAITING', 'UNKNOWN', 'STUCK')),
+    step_status     text        NOT NULL CHECK (step_status IN ('READY', 'IN_PROGRESS', 'WAITING', 'CHECKING', 'REPLAYING', 'STUCK')),
     attempts        int         NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     check_failures  int         NOT NULL DEFAULT 0 CHECK (check_failures >= 0),
     next_attempt_at timestamptz NOT NULL,
@@ -23,7 +23,7 @@ CREATE TABLE saga (
                                                         'OUTPUT_UNSTORABLE', 'RECORD_FAILED', 'NO_SIGNAL',
                                                         'KEY_EXPIRED', 'HOOK_FAILED', 'RESUME_FAILING')),
     stuck_at        timestamptz,                          -- when it became STUCK
-    stuck_from      text        CHECK (stuck_from IN ('READY', 'IN_PROGRESS', 'WAITING', 'UNKNOWN')), -- step_status before RESUME_FAILING
+    stuck_from      text        CHECK (stuck_from IN ('READY', 'IN_PROGRESS', 'WAITING', 'CHECKING', 'REPLAYING')), -- step_status before RESUME_FAILING
     key_since       timestamptz,                          -- first use of the current step's idempotency key
     key_generation  int         NOT NULL DEFAULT 0 CHECK (key_generation >= 0), -- bumped by retry(newKey = true); reset at each step
     resume_failures int         NOT NULL DEFAULT 0 CHECK (resume_failures >= 0), -- RESUME_FAILED in a row; reset when the saga runs

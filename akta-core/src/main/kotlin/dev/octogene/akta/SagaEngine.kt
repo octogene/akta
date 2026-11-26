@@ -552,15 +552,15 @@ public class SagaEngine(
             throw e
         } catch (e: Throwable) {
             if (e.isFatal()) throw e
-            throw SignalFailed(step.signal, "onSignal", e)
+            throw SignalFailed(step.signal, e)
         }
     }
 
     /**
-     * A signal could not be applied: [what] (onSignal) threw something other than StepRejected (see [onSignal]).
+     * A signal could not be applied: onSignal threw something other than StepRejected (see [onSignal]).
      */
-    private class SignalFailed(val signal: String, val what: String, cause: Throwable) :
-        RuntimeException("$what threw on signal '$signal': $cause", cause)
+    private class SignalFailed(val signal: String, cause: Throwable) :
+        RuntimeException("onSignal threw on signal '$signal': $cause", cause)
 
     /**
      * The claim threw [failure]: onSignal failed on a signal stored
@@ -744,7 +744,7 @@ public class SagaEngine(
                     log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
                     r = machine.timedOut(r, signalStep)
                 }
-                // UNKNOWN: its timeout check, claimed below. Unless a signal arrived during a check that then
+                // CHECKING: its timeout check, claimed below. Unless a signal arrived during a check that then
                 // failed: it was stored, and answers what the check would look up again.
                 else -> consumeStored(r, def, signalStep, ctx, now, trace, chained)?.let { return it }
             }

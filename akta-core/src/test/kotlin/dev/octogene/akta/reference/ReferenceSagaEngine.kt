@@ -27,6 +27,9 @@ import kotlin.uuid.Uuid
  * FROZEN: SagaEngine as it was at 4c2af52, before its refactoring, for [dev.octogene.akta.DifferentialTest] to compare
  * the engine with. Never edit it, except to drop it with the test once the refactoring is done.
  *
+ * One edit, mechanical, to compile once StepStatus.CHECKING became CHECKING and REPLAYING: it writes CHECKING wherever
+ * it wrote UNKNOWN, and its tests of UNKNOWN accept both (outcomeUnknown). The test compares both as UNKNOWN.
+ *
  * Runs sagas.
  *
  * Golden rule: no external call inside a transaction. Every step follows the same cycle:
@@ -355,7 +358,7 @@ internal class ReferenceSagaEngine(
             // Stopped by resume failures, not by the step: it resumes as it was.
             val resuming = r.stuckReason == StuckReason.RESUME_FAILING
             val (status, due) = when {
-                replay -> StepStatus.UNKNOWN to now
+                replay -> StepStatus.CHECKING to now
                 resuming && step != null -> resumeAs(r, step, now)
                 else -> StepStatus.READY to now
             }
@@ -380,10 +383,10 @@ internal class ReferenceSagaEngine(
         // An idempotent step whose key was used is replayed (see retry): here its key is fresh, and it is called.
         if (step.idempotency != null) return StepStatus.READY to now
         return when (r.stuckFrom) {
-            StepStatus.UNKNOWN -> StepStatus.UNKNOWN to now
+            StepStatus.CHECKING, StepStatus.REPLAYING -> StepStatus.CHECKING to now
             // Its pod died during the call, and its lock's expiry could not be recorded: checked after the settle
             // delay, which starts at the expiry, before the saga was stopped.
-            StepStatus.IN_PROGRESS -> StepStatus.UNKNOWN to maxOf(now, (r.stuckAt ?: now) + config.settleDelay)
+            StepStatus.IN_PROGRESS -> StepStatus.CHECKING to maxOf(now, (r.stuckAt ?: now) + config.settleDelay)
             // Its timeout still stands, passed or not. Except for what must be acted on at once: a signal received
             // while it was stuck (READY uses it), or a cancellation.
             StepStatus.WAITING ->
@@ -396,7 +399,7 @@ internal class ReferenceSagaEngine(
             StepStatus.READY -> StepStatus.READY to now
             // Stopped before stuckFrom was stored: a call that was attempted counts as possibly applied.
             StepStatus.STUCK, null ->
-                (if (step !is SignalStep<*, *> && r.attempts > 0) StepStatus.UNKNOWN else StepStatus.READY) to now
+                (if (step !is SignalStep<*, *> && r.attempts > 0) StepStatus.CHECKING else StepStatus.READY) to now
         }
     }
 
@@ -534,7 +537,7 @@ internal class ReferenceSagaEngine(
         }
         // WAITING, or UNKNOWN: its timeout passed and a check failed, to be tried again. No call is in flight
         // either way (a check in flight is IN_PROGRESS), so the signal answers now what the check looks up.
-        val listening = r.stepStatus == StepStatus.WAITING || r.stepStatus == StepStatus.UNKNOWN
+        val listening = r.stepStatus == StepStatus.WAITING || r.stepStatus.outcomeUnknown
         return if (r.stepIndex == index && listening && failed != null) {
             save(blockedBy(failed, r, now), now)
             received("stored: ${failed.what} failed")
@@ -673,7 +676,7 @@ internal class ReferenceSagaEngine(
         // The claim that threw may first have expired the lock of a timeout check whose process died: that
         // rolled back too, so the row is still IN_PROGRESS. Left as it is, every resume would do the same again.
         val checkDied = r.stepStatus == StepStatus.IN_PROGRESS && r.lockedUntil?.let { it <= now } == true
-        val waiting = r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.UNKNOWN || checkDied
+        val waiting = r.stepStatus == StepStatus.READY || r.stepStatus.outcomeUnknown || checkDied
         if (r.state != SagaState.RUNNING || step == null || !waiting) return Cycle(r, next = null)
         val blocked = blockedBy(failure, r, now)
         save(blocked, now)
@@ -895,7 +898,7 @@ internal class ReferenceSagaEngine(
                 StepStatus.READY -> return enterWait(r, def, signalStep, ctx, now, trace)
                 StepStatus.WAITING -> {                  // its timeout passed without the signal: the check decides
                     log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
-                    r = r.copy(stepStatus = StepStatus.UNKNOWN, lastError = "No signal '${signalStep.signal}' before the timeout")
+                    r = r.copy(stepStatus = StepStatus.CHECKING, lastError = "No signal '${signalStep.signal}' before the timeout")
                 }
                 // UNKNOWN: its timeout check, claimed below. Unless a signal arrived during a check that then
                 // failed: it was stored, and answers what the check would look up again.
@@ -905,7 +908,7 @@ internal class ReferenceSagaEngine(
         val idempotency = step.idempotency.takeIf { r.state == SagaState.RUNNING }
         val action = when {
             // An idempotent step's unknown outcome is replayed with the same key, never checked.
-            r.stepStatus == StepStatus.UNKNOWN && idempotency == null -> Action.CHECK
+            r.stepStatus.outcomeUnknown && idempotency == null -> Action.CHECK
             r.state == SagaState.RUNNING -> Action.EXECUTE
             else -> Action.COMPENSATE
         }
@@ -1082,7 +1085,7 @@ internal class ReferenceSagaEngine(
             }
             is Outcome.Unknown -> when {
                 work.step.idempotency == null -> r.copy(
-                    stepStatus = StepStatus.UNKNOWN,
+                    stepStatus = StepStatus.CHECKING,
                     nextAttemptAt = now + config.settleDelay,
                     lastError = outcome.error,
                 )
@@ -1107,7 +1110,7 @@ internal class ReferenceSagaEngine(
                     ).copy(checkFailures = failures)
                 } else {
                     r.copy(
-                        stepStatus = StepStatus.UNKNOWN, checkFailures = failures,
+                        stepStatus = StepStatus.CHECKING, checkFailures = failures,
                         nextAttemptAt = now + maxOf(config.checkRetryDelay, config.backoff(failures)),
                         lastError = outcome.error,
                     )
@@ -1293,7 +1296,7 @@ internal class ReferenceSagaEngine(
         if (r.attempts >= config.maxAttempts) {
             stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
         } else {
-            r.copy(stepStatus = StepStatus.UNKNOWN, nextAttemptAt = now + config.backoff(r.attempts), lastError = "$error; retrying with the same key")
+            r.copy(stepStatus = StepStatus.CHECKING, nextAttemptAt = now + config.backoff(r.attempts), lastError = "$error; retrying with the same key")
         }
 
     private fun retryLater(r: SagaRecord, error: String, now: Instant): SagaRecord =
@@ -1315,7 +1318,7 @@ internal class ReferenceSagaEngine(
                 stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the call", now).copy(lockedUntil = null)
             } else {
                 r.copy(
-                    stepStatus = StepStatus.UNKNOWN, lockedUntil = null, nextAttemptAt = since,
+                    stepStatus = StepStatus.CHECKING, lockedUntil = null, nextAttemptAt = since,
                     lastError = "Lock expired during the call; retrying with the same key",
                 )
             }
@@ -1327,7 +1330,7 @@ internal class ReferenceSagaEngine(
             ).copy(lockedUntil = null)
         } else if (r.state == SagaState.RUNNING) {
             r.copy(
-                stepStatus = StepStatus.UNKNOWN, lockedUntil = null, nextAttemptAt = since + config.settleDelay,
+                stepStatus = StepStatus.CHECKING, lockedUntil = null, nextAttemptAt = since + config.settleDelay,
                 lastError = "Lock expired during the ${if (r.checkFailures > 0) "check" else "call"}",
             )
         } else if (r.attempts >= config.maxAttempts) {

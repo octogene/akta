@@ -29,7 +29,8 @@ The claim locks the saga's row, decides what to do, and marks the step `IN_PROGR
 |---|---|
 | `READY`, saga `RUNNING` | **execute** the step |
 | `READY`, saga `COMPENSATING` | **compensate** it |
-| `UNKNOWN` | **check** it, or **replay** it if the step is idempotent |
+| `CHECKING` | **check** it |
+| `REPLAYING` | **replay** it, with the same key |
 | `READY`, signal step | no call: start **waiting**, or use a signal already received |
 
 Before anything is called, the claim also decodes the saga's data: data that cannot be read stops here, with nothing called.
@@ -65,13 +66,13 @@ If the record transaction rolls back (a constraint, the database), the call's ou
 
 `run(id, deadline)` loops through cycles until the saga ends, blocks (a retry later, an outcome to check, a wait, a human), or the deadline passes. The deadline is checked **between** calls, not during them: an HTTP request can wait up to its deadline plus one call, at most `callLock`.
 
-When the deadline passes, nothing is lost: the saga is left `READY` (or `UNKNOWN`, `WAITING`) with its `next_attempt_at`, and the recovery job continues it.
+When the deadline passes, nothing is lost: the saga is left `READY` (or `CHECKING`, `REPLAYING`, `WAITING`) with its `next_attempt_at`, and the recovery job continues it.
 
 ## The crash case
 
 If the pod dies during the call, the row stays `IN_PROGRESS` until `locked_until`. The next claim after that, by any pod, sees an expired lock:
 
-- **Forward**, the call may have been applied: the step becomes `UNKNOWN` and is checked after the settle delay. An idempotent step is replayed at once with its key. If it was a check that the pod was running, it counts as a failed check, up to `maxAttempts`.
+- **Forward**, the call may have been applied: the step becomes `CHECKING`, checked after the settle delay. An idempotent step becomes `REPLAYING`, replayed at once with its key. If it was a check that the pod was running, it counts as a failed check, up to `maxAttempts`.
 - **During a compensation**, the compensation simply runs again: compensations are safe to repeat.
 
 Logged as `LOCK_EXPIRED`. The [next page](unknown-outcomes.md) explains what happens to an unknown outcome.

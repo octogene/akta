@@ -40,7 +40,8 @@ stateDiagram-v2
 | `READY` | Will be called (or undone) at `next_attempt_at` |
 | `IN_PROGRESS` | A call is in flight, protected by a lock until `locked_until` |
 | `WAITING` | A signal step waits for its event, until its timeout at `next_attempt_at`. No call is in flight |
-| `UNKNOWN` | The last call's outcome is unknown: it may have been applied. A check is scheduled, or a replay for an idempotent step |
+| `CHECKING` | The last call's outcome is unknown: it may have been applied. Its check runs at `next_attempt_at` |
+| `REPLAYING` | The same, for an idempotent step: it is executed again with the same key at `next_attempt_at`, which its service answers with the first result |
 | `STUCK` | A human must decide. `stuck_reason` says why |
 
 ```mermaid
@@ -48,13 +49,15 @@ stateDiagram-v2
     [*] --> READY
     READY --> IN_PROGRESS : claimed
     IN_PROGRESS --> READY : done (next step), or not sent (retry later)
-    IN_PROGRESS --> UNKNOWN : unknown outcome, or lock expired
-    UNKNOWN --> IN_PROGRESS : check after the settle delay, or replay with the key
+    IN_PROGRESS --> CHECKING : unknown outcome, or lock expired
+    IN_PROGRESS --> REPLAYING : the same, idempotent step
+    CHECKING --> IN_PROGRESS : check, after the settle delay
+    REPLAYING --> IN_PROGRESS : replay with the key
     IN_PROGRESS --> STUCK : cannot tell, too many attempts, output not stored
     STUCK --> READY : manual retry
     READY --> WAITING : signal step, no signal yet
     WAITING --> READY : signal accepted (next step)
-    WAITING --> UNKNOWN : timeout, with a check
+    WAITING --> CHECKING : timeout, with a check
     WAITING --> STUCK : timeout, without a check
 ```
 

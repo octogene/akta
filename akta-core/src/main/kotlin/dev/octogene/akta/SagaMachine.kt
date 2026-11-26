@@ -169,7 +169,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
                 now,
             )
             is Outcome.Rejected -> refused(r, outcome.error, now)
-            // A replay that never left says nothing of the earlier attempt, which may be applied: still UNKNOWN.
+            // A replay that never left says nothing of the earlier attempt, which may be applied: still REPLAYING.
             // A first attempt that never left did not use the key: its window has not started (keySince cleared).
             is Outcome.NotSent -> if (replay) {
                 replayLater(r, "${outcome.error} (an earlier attempt may be applied)", now)
@@ -177,7 +177,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
                 retryLater(r.unfinished().with(key = KeyState(since = null, generation = r.keyGeneration)).record(), outcome.error, now)
             }
             is Outcome.Unknown -> when {
-                step.idempotency == null -> r.moved(StepState.Unknown(now + config.settleDelay), lastError = outcome.error)
+                step.idempotency == null -> r.moved(StepState.Checking(now + config.settleDelay), lastError = outcome.error)
                 else -> replayLater(r, outcome.error, now)
             }
             // Not applied: safe to execute again, or to stop here if the step keeps failing.
@@ -199,7 +199,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
                     )
                 } else {
                     r.moved(
-                        StepState.Unknown(now + maxOf(config.checkRetryDelay, config.backoff(failures))),
+                        StepState.Checking(now + maxOf(config.checkRetryDelay, config.backoff(failures))),
                         lastError = outcome.error, checkFailures = failures,
                     )
                 }
@@ -215,8 +215,9 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
             is Outcome.NotCalled -> unclaimed.unfinished().let { before ->
                 val step = when (before.step) {
                     is StepState.Ready -> StepState.Ready(now)
-                    is StepState.Unknown -> StepState.Unknown(now)
-                    else -> error("Saga ${r.id}: a call is claimed from READY or UNKNOWN, not ${before.step.status}")
+                    is StepState.Checking -> StepState.Checking(now)
+                    is StepState.Replaying -> StepState.Replaying(now)
+                    else -> error("Saga ${r.id}: a call is claimed from READY, CHECKING or REPLAYING, not ${before.step.status}")
                 }
                 r.unfinished().with(step = step, attempts = before.attempts, checkFailures = before.checkFailures, key = before.key).record()
             }
@@ -242,19 +243,20 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
         }
         val generation = if (newKey) r.keyGeneration + 1 else r.keyGeneration
         val step = if (r.state == SagaState.RUNNING) stepOf() else null
-        // An idempotent step whose key was used may be applied: it is replayed, and stays UNKNOWN meanwhile.
+        // An idempotent step whose key was used may be applied: it is replayed, and stays REPLAYING meanwhile.
         val replay = step?.idempotency != null && !newKey && r.keySince != null
         // Stopped by resume failures, not by the step: it resumes as it was.
         val resuming = r.stuckReason == StuckReason.RESUME_FAILING
         val (status, due) = when {
-            replay -> StepStatus.UNKNOWN to now
+            replay -> StepStatus.REPLAYING to now
             resuming && step != null -> resumeAs(r, step, now, signalStored)
             else -> StepStatus.READY to now
         }
         val resumed = r.unfinished().with(
             step = when (status) {
                 StepStatus.READY -> StepState.Ready(due)
-                StepStatus.UNKNOWN -> StepState.Unknown(due)
+                StepStatus.CHECKING -> StepState.Checking(due)
+                StepStatus.REPLAYING -> StepState.Replaying(due)
                 StepStatus.WAITING -> StepState.Waiting(due)
                 else -> error("Saga ${r.id}: a retry does not resume a step as $status")
             },
@@ -373,14 +375,14 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
 
     /** A signal step whose timeout passed: its check decides. */
     fun timedOut(r: SagaRecord, step: SignalStep<*, *>): SagaRecord =
-        r.moved(StepState.Unknown(r.nextAttemptAt), lastError = "No signal '${step.signal}' before the timeout")
+        r.moved(StepState.Checking(r.nextAttemptAt), lastError = "No signal '${step.signal}' before the timeout")
 
     /** The call of [step] that the saga [r] is due for, claimed: or the step stops, its key possibly forgotten. */
     fun claim(r: SagaRecord, step: SagaStep<*, *>, now: Instant): Claim {
         val idempotency = step.idempotency.takeIf { r.state == SagaState.RUNNING }
         val action = when {
             // An idempotent step's unknown outcome is replayed with the same key, never checked.
-            r.stepStatus == StepStatus.UNKNOWN && idempotency == null -> Action.CHECK
+            r.stepStatus.outcomeUnknown && idempotency == null -> Action.CHECK
             r.state == SagaState.RUNNING -> Action.EXECUTE
             else -> Action.COMPENSATE
         }
@@ -518,9 +520,9 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
 
     /** What becomes of a signal for the step at [index], once stored. */
     fun useOfStored(r: SagaRecord, index: Int): Use {
-        // WAITING, or UNKNOWN: its timeout passed and a check failed, to be tried again. No call is in flight
+        // WAITING, or CHECKING: its timeout passed and a check failed, to be tried again. No call is in flight
         // either way (a check in flight is IN_PROGRESS), so the signal answers now what the check looks up.
-        val listening = r.stepStatus == StepStatus.WAITING || r.stepStatus == StepStatus.UNKNOWN
+        val listening = r.stepStatus == StepStatus.WAITING || r.stepStatus.outcomeUnknown
         return when {
             r.stepIndex == index && listening -> Use.WAKE
             // Not waiting yet (an earlier step runs, or this one is ready, checking or stuck): kept for it.
@@ -548,7 +550,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
         // The claim that threw may first have expired the lock of a timeout check whose process died: that
         // rolled back too, so the row is still IN_PROGRESS. Left as it is, every resume would do the same again.
         val checkDied = r.stepStatus == StepStatus.IN_PROGRESS && r.lockedUntil?.let { it <= now } == true
-        val waiting = r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.UNKNOWN || checkDied
+        val waiting = r.stepStatus == StepStatus.READY || r.stepStatus.outcomeUnknown || checkDied
         return r.state == SagaState.RUNNING && waiting
     }
 
@@ -600,10 +602,11 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
         // An idempotent step whose key was used is replayed (see retry): here its key is fresh, and it is called.
         if (step.idempotency != null) return StepStatus.READY to now
         return when (r.stuckFrom) {
-            StepStatus.UNKNOWN -> StepStatus.UNKNOWN to now
+            StepStatus.CHECKING -> StepStatus.CHECKING to now
+            StepStatus.REPLAYING -> StepStatus.REPLAYING to now
             // Its pod died during the call, and its lock's expiry could not be recorded: checked after the settle
             // delay, which starts at the expiry, before the saga was stopped.
-            StepStatus.IN_PROGRESS -> StepStatus.UNKNOWN to maxOf(now, (r.stuckAt ?: now) + config.settleDelay)
+            StepStatus.IN_PROGRESS -> StepStatus.CHECKING to maxOf(now, (r.stuckAt ?: now) + config.settleDelay)
             // Its timeout still stands, passed or not. Except for what must be acted on at once: a signal received
             // while it was stuck (READY uses it), or a cancellation.
             StepStatus.WAITING ->
@@ -616,7 +619,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
             StepStatus.READY -> StepStatus.READY to now
             // Stopped before stuckFrom was stored: a call that was attempted counts as possibly applied.
             StepStatus.STUCK, null ->
-                (if (step !is SignalStep<*, *> && r.attempts > 0) StepStatus.UNKNOWN else StepStatus.READY) to now
+                (if (step !is SignalStep<*, *> && r.attempts > 0) StepStatus.CHECKING else StepStatus.READY) to now
         }
     }
 
@@ -675,7 +678,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
     }
 
     /**
-     * An idempotent step that may have been applied: it stays UNKNOWN (abort is refused, cancel waits) and is
+     * An idempotent step that may have been applied: it stays REPLAYING (abort is refused, cancel waits) and is
      * replayed with the same key after backoff, until a replay answers. No settle delay: the service answers
      * a replay with the first result.
      */
@@ -683,7 +686,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
         if (r.attempts >= config.maxAttempts) {
             stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
         } else {
-            r.moved(StepState.Unknown(now + config.backoff(r.attempts)), lastError = "$error; retrying with the same key")
+            r.moved(StepState.Replaying(now + config.backoff(r.attempts)), lastError = "$error; retrying with the same key")
         }
 
     fun retryLater(r: SagaRecord, error: String, now: Instant): SagaRecord =
@@ -704,7 +707,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
             if (r.attempts >= config.maxAttempts) {
                 stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the call", now)
             } else {
-                r.moved(StepState.Unknown(since), lastError = "Lock expired during the call; retrying with the same key")
+                r.moved(StepState.Replaying(since), lastError = "Lock expired during the call; retrying with the same key")
             }
         } else if (r.callAction == CallAction.CHECK && r.checkFailures >= config.maxAttempts) {
             // A check that never recorded an outcome, again and again.
@@ -714,7 +717,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
             )
         } else if (r.state == SagaState.RUNNING) {
             r.moved(
-                StepState.Unknown(since + config.settleDelay),
+                StepState.Checking(since + config.settleDelay),
                 lastError = "Lock expired during the ${if (r.callAction == CallAction.CHECK) "check" else "call"}",
             )
         } else if (r.attempts >= config.maxAttempts) {

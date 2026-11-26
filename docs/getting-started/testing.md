@@ -48,7 +48,7 @@ val engine = SagaEngine(
     ```kotlin
     fakeStock.timeoutAfterApplying = true                      // applied, then throws IOException
     val id = engine.create(itemSetup, "item-1", SetupRequest("E-1", "S-1"))
-    engine.run(id, clock.now + 10.seconds)                     // UNKNOWN: waiting for the settle delay
+    engine.run(id, clock.now + 10.seconds)                     // CHECKING: waiting for the settle delay
 
     clock.advance(2.minutes)
     engine.resumeDue()                                         // the check finds the entry

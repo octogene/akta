@@ -221,7 +221,7 @@ class SagaOperationsTest {
         assertEquals("T", stuck.sagaType)
         assertEquals(StepStatus.STUCK, stuck.stepStatus)
         assertEquals(StuckReason.CANNOT_TELL, stuck.stuckReason)
-        assertEquals(StepStatus.UNKNOWN, events.first().stepStatus)             // EXECUTE:Unknown
+        assertEquals(StepStatus.CHECKING, events.first().stepStatus)             // EXECUTE:Unknown
     }
 
     @Test

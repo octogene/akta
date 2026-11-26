@@ -42,10 +42,10 @@ A step marked `idempotent(keyRetention)` sends a key the engine gives it, and it
 |---|---|---|
 | After an unknown outcome | `check` after `settleDelay` | Replay after backoff (1, 2, 4… min) |
 | After a lock expiry | `check` after `settleDelay` | Replay at once |
-| Until the outcome is known | `UNKNOWN` | `UNKNOWN`: a replay that is not sent keeps it so |
+| Until the outcome is known | `CHECKING` | `REPLAYING`: a replay that is not sent keeps it so |
 | Limit | `maxAttempts` executions | `maxAttempts` attempts, and the key's window |
 
-While the step is `UNKNOWN`, it may have been applied: `abort` is refused and `cancel` waits for the answer. The engine never sends a key its service may have forgotten: past `keyRetention`, the saga stops with `KEY_EXPIRED`. See [Services with idempotency keys](../use-cases/idempotent-services.md).
+While the step is `CHECKING` or `REPLAYING`, it may have been applied: `abort` is refused and `cancel` waits for the answer. The engine never sends a key its service may have forgotten: past `keyRetention`, the saga stops with `KEY_EXPIRED`. See [Services with idempotency keys](../use-cases/idempotent-services.md).
 
 ## What it costs
 

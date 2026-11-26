@@ -214,7 +214,7 @@ class SagaEngineTest {
         val engine = engine(stock)
         val saga = engine.start()
 
-        assertEquals(StepStatus.UNKNOWN, saga.stepStatus)
+        assertEquals(StepStatus.CHECKING, saga.stepStatus)
         engine.resumeAfter(1.minutes)
         assertEquals(0, stock.checks)                                     // settle delay not over
         engine.resumeAfter(1.minutes)
@@ -269,7 +269,7 @@ class SagaEngineTest {
         assertEquals(StepStatus.IN_PROGRESS, repository.find(id)!!.stepStatus)
 
         engine.resumeAfter(36.seconds)                        // lock (35 s) expired
-        assertEquals(StepStatus.UNKNOWN, repository.find(id)!!.stepStatus)
+        assertEquals(StepStatus.CHECKING, repository.find(id)!!.stepStatus)
         engine.resumeAfter(2.minutes)                         // check, then execute again
         assertEquals(SagaState.COMPLETED, repository.find(id)!!.state)
         assertEquals(2, executions)
@@ -331,7 +331,7 @@ class SagaEngineTest {
         )
         val engine = engine(stock, booking)
         val saga = engine.start()
-        assertEquals(StepStatus.UNKNOWN, saga.stepStatus)
+        assertEquals(StepStatus.CHECKING, saga.stepStatus)
 
         engine.resumeAfter(2.minutes)                                         // settleDelay: the check runs
 
@@ -351,7 +351,7 @@ class SagaEngineTest {
         }
         val saga = engine(stock).start()                                  // returns normally
 
-        assertEquals(StepStatus.UNKNOWN, saga.stepStatus)
+        assertEquals(StepStatus.CHECKING, saga.stepStatus)
         assertTrue(saga.lastError!!.contains("TimeoutCancellationException"))
     }
 
@@ -735,7 +735,7 @@ class SagaEngineTest {
         assertEquals(StepStatus.IN_PROGRESS, repository.find(id)!!.stuckFrom)
 
         broken = false
-        assertEquals(StepStatus.UNKNOWN, runBlocking { engine.retry(id, "operator") }.stepStatus)   // not executed
+        assertEquals(StepStatus.CHECKING, runBlocking { engine.retry(id, "operator") }.stepStatus)   // not executed
         engine.resumeLater(2.minutes)
 
         assertEquals(SagaState.COMPLETED, repository.find(id)!!.state)
@@ -1076,7 +1076,7 @@ class SagaEngineTest {
         }
         val engine = newEngine(transactions, repository, listOf(definition("TEST", listOf(stock))))
         val saga = engine.start()
-        assertEquals(StepStatus.UNKNOWN, saga.stepStatus)                 // to check after settleDelay
+        assertEquals(StepStatus.CHECKING, saga.stepStatus)                 // to check after settleDelay
 
         transactions.count = 0
         val after = runBlocking { engine.cancel(saga.id, "customer left", "support") }
@@ -1223,7 +1223,7 @@ class SagaEngineTest {
         val saga = engine.start()
         val elapsed = (System.nanoTime() - started).nanoseconds
 
-        assertEquals(StepStatus.UNKNOWN, saga.stepStatus)
+        assertEquals(StepStatus.CHECKING, saga.stepStatus)
         assertTrue(saga.lastError!!.contains("TimeoutCancellationException"))
         // Cut before the lock expires (callLock minus a margin to record it), not at the expiry itself.
         assertTrue(elapsed < 2.seconds, "the call ran $elapsed, as long as its lock")
@@ -1244,7 +1244,7 @@ class SagaEngineTest {
         assertEquals(emptyMap(), result.failures)
         assertEquals(SagaState.COMPLETED, repository.find(healthy)!!.state)
         val unknown = repository.find(stub)!!
-        assertEquals(StepStatus.UNKNOWN, unknown.stepStatus)              // checked later, like any failed call
+        assertEquals(StepStatus.CHECKING, unknown.stepStatus)              // checked later, like any failed call
         assertTrue(unknown.lastError!!.contains("NotImplementedError"))
     }
 

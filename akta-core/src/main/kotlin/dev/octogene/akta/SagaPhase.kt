@@ -41,9 +41,14 @@ internal sealed interface StepState {
         override val status get() = StepStatus.WAITING
     }
 
-    /** The outcome of a call is unknown: checked, or replayed with its key, at [due]. */
-    data class Unknown(override val due: Instant) : StepState {
-        override val status get() = StepStatus.UNKNOWN
+    /** The outcome of a call is unknown: checked at [due]. */
+    data class Checking(override val due: Instant) : StepState {
+        override val status get() = StepStatus.CHECKING
+    }
+
+    /** The outcome of an idempotent step's call is unknown: replayed with its key at [due]. */
+    data class Replaying(override val due: Instant) : StepState {
+        override val status get() = StepStatus.REPLAYING
     }
 
     /**
@@ -212,7 +217,8 @@ internal sealed interface SagaPhase {
             val step = when (r.stepStatus) {
                 StepStatus.READY -> StepState.Ready(r.nextAttemptAt)
                 StepStatus.WAITING -> StepState.Waiting(r.nextAttemptAt)
-                StepStatus.UNKNOWN -> StepState.Unknown(r.nextAttemptAt)
+                StepStatus.CHECKING -> StepState.Checking(r.nextAttemptAt)
+                StepStatus.REPLAYING -> StepState.Replaying(r.nextAttemptAt)
                 StepStatus.IN_PROGRESS -> StepState.InFlight(checkNotNull(r.callAction), checkNotNull(r.lockedUntil), r.nextAttemptAt)
                 StepStatus.STUCK -> StepState.Stuck(checkNotNull(r.stuckReason), checkNotNull(r.stuckAt), r.stuckFrom, r.nextAttemptAt)
             }
@@ -226,7 +232,7 @@ internal sealed interface SagaPhase {
                 }
                 SagaState.COMPENSATING -> {
                     rule(r.failureReason != null) { "a saga compensates for a reason" }
-                    rule(r.stepStatus != StepStatus.WAITING && r.stepStatus != StepStatus.UNKNOWN) { "an undo neither waits nor is checked" }
+                    rule(r.stepStatus != StepStatus.WAITING && !r.stepStatus.outcomeUnknown) { "an undo neither waits nor is checked" }
                     rule(r.callAction == null || r.callAction == CallAction.COMPENSATE) { "a compensating saga only compensates" }
                     SagaPhase.Compensating(
                         identity, r.stepIndex, step, r.attempts, r.checkFailures, r.resumeFailures, key, cancellation, r.lastError,
@@ -263,10 +269,14 @@ private val NO_KEY = KeyState(since = null, generation = 0)
 internal fun StepState.dueAt(due: Instant): StepState = when (this) {
     is StepState.Ready -> copy(due = due)
     is StepState.Waiting -> copy(due = due)
-    is StepState.Unknown -> copy(due = due)
+    is StepState.Checking -> copy(due = due)
+    is StepState.Replaying -> copy(due = due)
     is StepState.InFlight -> copy(due = due)
     is StepState.Stuck -> copy(due = due)
 }
+
+/** CHECKING or REPLAYING: the outcome of the last call is unknown, it may have been applied. */
+internal val StepStatus.outcomeUnknown: Boolean get() = this == StepStatus.CHECKING || this == StepStatus.REPLAYING
 
 /** The typed form of this row: see [SagaPhase.of]. */
 internal fun SagaRecord.phase(): SagaPhase = SagaPhase.of(this)
@@ -276,7 +286,8 @@ internal fun SagaRecord.unfinished(): SagaPhase.Unfinished =
     phase() as? SagaPhase.Unfinished ?: error("Saga $id is $state: it has no step to act on")
 
 private fun SagaRecord.withStep(step: StepState): SagaRecord = when (step) {
-    is StepState.Ready, is StepState.Waiting, is StepState.Unknown -> copy(stepStatus = step.status, nextAttemptAt = step.due)
+    is StepState.Ready, is StepState.Waiting, is StepState.Checking, is StepState.Replaying ->
+        copy(stepStatus = step.status, nextAttemptAt = step.due)
     is StepState.InFlight -> copy(stepStatus = step.status, nextAttemptAt = step.due, lockedUntil = step.lockedUntil, callAction = step.call)
     is StepState.Stuck -> copy(stepStatus = step.status, nextAttemptAt = step.due, stuckReason = step.reason, stuckAt = step.at, stuckFrom = step.from)
 }

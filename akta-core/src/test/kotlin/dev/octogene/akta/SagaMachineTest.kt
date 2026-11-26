@@ -62,7 +62,7 @@ class SagaMachineTest {
     @Test
     fun `an unknown outcome is checked after the settle delay, or replayed with its key`() {
         val checked = decide(Outcome.Unknown("timeout")).record
-        assertEquals(StepStatus.UNKNOWN, checked.stepStatus)
+        assertEquals(StepStatus.CHECKING, checked.stepStatus)
         assertEquals(now + config.settleDelay, checked.nextAttemptAt)
 
         val replayed = decide(Outcome.Unknown("timeout"), step = idempotentCall).record
@@ -78,7 +78,7 @@ class SagaMachineTest {
         assertNull(first.keySince)                                      // the key was not used
 
         val replay = decide(Outcome.NotSent("refused"), r, idempotentCall, replay = true).record
-        assertEquals(StepStatus.UNKNOWN, replay.stepStatus)
+        assertEquals(StepStatus.REPLAYING, replay.stepStatus)
         assertEquals(now, replay.keySince)
     }
 
@@ -109,7 +109,7 @@ class SagaMachineTest {
         assertEquals("Lock expired during the check", expired(saga().copy(checkFailures = 1, callAction = CallAction.CHECK)).lastError)
         assertEquals(since, expired(saga(), idempotent = true).nextAttemptAt)
         assertEquals(StuckReason.CHECK_FAILING, expired(saga().copy(checkFailures = 3, callAction = CallAction.CHECK)).stuckReason)
-        assertEquals(StepStatus.UNKNOWN, expired(saga().copy(checkFailures = 3)).stepStatus)   // an execution: checked
+        assertEquals(StepStatus.CHECKING, expired(saga().copy(checkFailures = 3)).stepStatus)   // an execution: checked
         assertNull(expired(saga()).callAction)
         val undo = expired(saga().copy(state = SagaState.COMPENSATING, failureReason = "refused", callAction = CallAction.COMPENSATE))
         assertEquals(StepStatus.READY, undo.stepStatus)

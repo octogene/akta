@@ -29,7 +29,7 @@ public class StepRejected(message: String, cause: Throwable? = null) : Exception
  */
 public class StepNotSent(message: String, cause: Throwable? = null) : Exception(message, cause)
 
-// Any other exception means the outcome is UNKNOWN: the call may have been applied.
+// Any other exception means the outcome is unknown: the call may have been applied, and is checked (or replayed).
 
 /** A step's answer to "were you already done?", asked after an unknown outcome. */
 public sealed interface CheckResult<out O> {

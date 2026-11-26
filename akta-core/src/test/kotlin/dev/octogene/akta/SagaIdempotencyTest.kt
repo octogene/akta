@@ -76,7 +76,7 @@ class SagaIdempotencyTest {
         val id = engine.create(definition, "R-1")
 
         val unknown = engine.run(id)
-        assertEquals(StepStatus.UNKNOWN, unknown.stepStatus)                    // it may have been applied
+        assertEquals(StepStatus.REPLAYING, unknown.stepStatus)                    // it may have been applied
         assertEquals(clock.now + 1.minutes, unknown.nextAttemptAt)              // backoff, not the 10-minute settle delay
         assertTrue(unknown.lastError!!.endsWith("retrying with the same key"))
 
@@ -157,7 +157,7 @@ class SagaIdempotencyTest {
         id = engine.create(definition, "R-1")
 
         val waiting = engine.run(id)
-        assertEquals(SagaState.RUNNING to StepStatus.UNKNOWN, waiting.state to waiting.stepStatus)   // not undone blindly
+        assertEquals(SagaState.RUNNING to StepStatus.REPLAYING, waiting.state to waiting.stepStatus)   // not undone blindly
         assertFailsWith<IllegalArgumentException> { runBlocking { engine.abort(id, "operator", currentStepApplied = false) } }
 
         engine.resumeAfter(1.minutes)                                           // the replay finds the payment
@@ -189,7 +189,7 @@ class SagaIdempotencyTest {
         assertFailsWith<SimulatedCrash> { runBlocking { engine.run(id, clock.now + 10.seconds) } }
         engine.resumeAfter(SagaConfig().callLock + 1.seconds)                   // lock expired: replayed, not sent
 
-        assertEquals(StepStatus.UNKNOWN, engine.stored(id).stepStatus)          // not READY: it may be applied
+        assertEquals(StepStatus.REPLAYING, engine.stored(id).stepStatus)          // not READY: it may be applied
         runBlocking { engine.cancel(id, "customer cancelled", "support") }
         assertEquals(SagaState.RUNNING, engine.stored(id).state)                // cancel waits for an answer
 
@@ -209,7 +209,7 @@ class SagaIdempotencyTest {
         val first = engine.run(id)
         assertEquals(StepStatus.READY to null, first.stepStatus to first.keySince)   // not a used key
         engine.resumeAfter(1.minutes)
-        assertEquals(StepStatus.READY, engine.stored(id).stepStatus)            // not UNKNOWN: abort is allowed
+        assertEquals(StepStatus.READY, engine.stored(id).stepStatus)            // not REPLAYING: abort is allowed
         engine.resumeAfter(2.minutes)                                           // 3 minutes after the first: no KEY_EXPIRED
 
         val stuck = engine.stored(id)
@@ -271,7 +271,7 @@ class SagaIdempotencyTest {
 
         assertEquals(SagaState.COMPLETED, engine.stored(id).state)
         assertEquals("$id/create-payment/execute/1", keys.last())
-        assertEquals(StepStatus.UNKNOWN, retried.stepStatus)
+        assertEquals(StepStatus.REPLAYING, retried.stepStatus)
         assertEquals("newKey: generation 1", repository.log.last { it.event == SagaEvents.MANUAL_RETRY }.detail)
     }
 

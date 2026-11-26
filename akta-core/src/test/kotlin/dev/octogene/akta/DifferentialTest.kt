@@ -287,10 +287,11 @@ class DifferentialTest {
         fun heard(event: SagaEvent) { heard += text("$event") }
         /**
          * Without the saga's random id, and the name of an engine's private exception (it is in error messages).
-         * Intended differences: callAction, which the reference does not record (the engine records the call in flight).
+         * Intended differences: callAction, which the reference does not record (the engine records the call in flight);
+         * CHECKING and REPLAYING, the reference's UNKNOWN split in two.
          */
         private fun text(s: String) = s.replace(id.toString(), "<id>").replace(PRIVATE_EXCEPTION, "SignalFailed")
-            .replace(CALL_ACTION, ", callAction=null")
+            .replace(CALL_ACTION, ", callAction=null").replace(OUTCOME_UNKNOWN, "UNKNOWN")
 
         /** Everything observable, without the saga's random id. */
         fun state(): Map<String, List<String>> = mapOf(
@@ -335,7 +336,7 @@ class DifferentialTest {
                     if (fails < 4) throw IOException("rolled back")
                     result
                 }
-                statuses += record().run { "$state/$stepIndex/$stepStatus" }       // each commit, not only the last one
+                statuses += text(record().run { "$state/$stepIndex/$stepStatus" })       // each commit, not only the last one
                 clock.now += 1.microseconds                                      // as a real one: two commits, two times
                 if (fails in 4..6) throw IOException("lost after commit")
                 if (plan.pauses && database.nextInt(100) < 10) clock.now += 34.seconds
@@ -466,6 +467,7 @@ class DifferentialTest {
         /** Events only signal steps reach (see Plan). */
         val SIGNAL_EVENTS = setOf(SagaEvents.WAIT_STARTED, SagaEvents.WAIT_TIMED_OUT, SagaEvents.SIGNAL_RECEIVED, "CHECK:Rejected")
         val CALL_ACTION = Regex(""", callAction=\w+""")
+        val OUTCOME_UNKNOWN = Regex("""\b(CHECKING|REPLAYING)\b""")
         val PRIVATE_EXCEPTION = Regex("""dev\.octogene\.akta\.[\w.$]*SignalFailed""")
         val EXPECTED_EVENTS = setOf(
             "EXECUTE:Done", "EXECUTE:Rejected", "EXECUTE:NotSent", "EXECUTE:Unknown", "EXECUTE:OutputUnstorable",

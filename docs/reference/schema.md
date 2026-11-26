@@ -22,16 +22,9 @@ Indexes worth knowing:
 
 A query by business key names both states, `state IN ('RUNNING', 'COMPENSATING', 'FINISHING') OR state IN ('COMPLETED', 'FAILED')`, so that PostgreSQL combines the two partial indexes; on `business_key` alone, it scans the whole table.
 
-## Upgrading
+## Changing it
 
-The script creates the schema from scratch. A database created by an earlier version needs, in a new migration:
-
-| Since | Migration |
-|---|---|
-| `failure_reason` (why a saga failed, never overwritten) | `ALTER TABLE saga ADD COLUMN failure_reason text;` |
-| `RESUME_FAILING` (a saga that cannot be run becomes stuck) | `ALTER TABLE saga ADD COLUMN resume_failures int NOT NULL DEFAULT 0 CHECK (resume_failures >= 0);` then `ALTER TABLE saga DROP CONSTRAINT saga_stuck_reason_check, ADD CONSTRAINT saga_stuck_reason_check CHECK (stuck_reason IN ('CANNOT_TELL', 'CHECK_FAILING', 'TOO_MANY_ATTEMPTS', 'OUTPUT_UNSTORABLE', 'RECORD_FAILED', 'NO_SIGNAL', 'KEY_EXPIRED', 'RESUME_FAILING'));` |
-| `stuck_from` (`retry` resumes a step as it was after `RESUME_FAILING`) | `ALTER TABLE saga ADD COLUMN stuck_from text CHECK (stuck_from IN ('READY', 'IN_PROGRESS', 'WAITING', 'UNKNOWN'));` |
-| `findByKey` | `CREATE INDEX saga_finished_key ON saga (business_key) WHERE state IN ('COMPLETED', 'FAILED');` (on a large table: `CREATE INDEX CONCURRENTLY`, outside a transaction) |
+The script creates the schema from scratch, and no database created by an earlier version is in use: until the first release, it changes without migrations. From then on, each change will come with its migration here.
 
 ```sql title="akta-exposed/src/main/resources/dev/octogene/akta/schema.sql"
 --8<-- "akta-exposed/src/main/resources/dev/octogene/akta/schema.sql"

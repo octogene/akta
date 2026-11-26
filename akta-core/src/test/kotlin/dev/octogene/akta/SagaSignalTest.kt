@@ -344,8 +344,8 @@ class SagaSignalTest {
         val engine = engine(definition)
         val id = engine.create(definition, "R-1")
         engine.run(id)
-        engine.resumeAfter(31.minutes)                                          // the check fails: UNKNOWN
-        assertEquals(StepStatus.UNKNOWN, runBlocking { engine.find(id)!! }.stepStatus)
+        engine.resumeAfter(31.minutes)                                          // the check fails: CHECKING again
+        assertEquals(StepStatus.CHECKING, runBlocking { engine.find(id)!! }.stepStatus)
 
         assertEquals(SignalResult.Delivered(id), engine.pay(id))
         val done = engine.run(id)
@@ -369,7 +369,7 @@ class SagaSignalTest {
         engine = engine(definition)
         id = engine.create(definition, "R-1")
         engine.run(id)
-        engine.resumeAfter(31.minutes)                                          // the check fails: UNKNOWN
+        engine.resumeAfter(31.minutes)                                          // the check fails: CHECKING again
 
         engine.resumeAfter(2.minutes)                                           // when it would check again
 

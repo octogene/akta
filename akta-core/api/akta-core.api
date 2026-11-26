@@ -511,10 +511,11 @@ public final class dev/octogene/akta/StepRejected : java/lang/Exception {
 }
 
 public final class dev/octogene/akta/StepStatus : java/lang/Enum {
+	public static final field CHECKING Ldev/octogene/akta/StepStatus;
 	public static final field IN_PROGRESS Ldev/octogene/akta/StepStatus;
 	public static final field READY Ldev/octogene/akta/StepStatus;
+	public static final field REPLAYING Ldev/octogene/akta/StepStatus;
 	public static final field STUCK Ldev/octogene/akta/StepStatus;
-	public static final field UNKNOWN Ldev/octogene/akta/StepStatus;
 	public static final field WAITING Ldev/octogene/akta/StepStatus;
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
 	public static fun valueOf (Ljava/lang/String;)Ldev/octogene/akta/StepStatus;

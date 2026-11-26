@@ -34,8 +34,13 @@ public enum class StepStatus {
     IN_PROGRESS,
     /** A signal step waits for its signal, until `nextAttemptAt` (its timeout). No call is in flight. */
     WAITING,
-    /** The outcome of the last call is unknown: a check is scheduled at `nextAttemptAt`. */
-    UNKNOWN,
+    /** The outcome of the last call is unknown (it may have been applied): the step's check runs at `nextAttemptAt`. */
+    CHECKING,
+    /**
+     * The outcome of the last call is unknown (it may have been applied), and the step is idempotent: it is executed
+     * again with the same key at `nextAttemptAt`, which its service answers with the first result.
+     */
+    REPLAYING,
     /** Blocked: a human must step in (retry, mark as done, or abort). Why: [SagaRecord.stuckReason]. */
     STUCK,
 }
