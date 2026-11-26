@@ -319,16 +319,20 @@ public class ExposedSagaRepository : SagaRepository {
             .limit(limit)
             .map { it.toRecord() }
 
-    /** Both states are named, so that PostgreSQL combines the two partial indexes on business_key. */
-    override fun findByKey(key: String, limit: Int): List<SagaRecord> =
-        SagaTable.selectAll()
-            .where {
-                (SagaTable.businessKey eq key) and
-                    ((SagaTable.state inList UNFINISHED) or (SagaTable.state inList FINISHED))
-            }
-            .orderBy(SagaTable.createdAt to SortOrder.DESC, SagaTable.id to SortOrder.DESC)
-            .limit(limit)
+    override fun findByKey(key: String, limit: Int): List<SagaRecord> {
+        // The unfinished one first (at most one, by saga_one_running_per_key), then the finished ones newest first: two
+        // queries, each on its partial index. One ordered by created_at alone could put a finished saga first, when
+        // the pod that created the next one has a clock behind the one that finished it.
+        val unfinished = SagaTable.selectAll()
+            .where { (SagaTable.businessKey eq key) and (SagaTable.state inList UNFINISHED) }
             .map { it.toRecord() }
+        if (unfinished.size >= limit) return unfinished.take(limit)
+        return unfinished + SagaTable.selectAll()
+            .where { (SagaTable.businessKey eq key) and (SagaTable.state inList FINISHED) }
+            .orderBy(SagaTable.createdAt to SortOrder.DESC, SagaTable.id to SortOrder.DESC)
+            .limit(limit - unfinished.size)
+            .map { it.toRecord() }
+    }
 
     override fun history(sagaId: Uuid): List<SagaLogEntry> =
         SagaLogTable.selectAll()

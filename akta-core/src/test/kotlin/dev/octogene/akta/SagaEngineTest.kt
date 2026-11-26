@@ -1352,9 +1352,9 @@ class SagaEngineTest {
         val old = engine.start("item-1")                                   // completed
         clock.advance(1.hours)
         val recent = engine.start("item-1")                                // completed, later
-        clock.advance(1.hours)
+        clock.advance((-30).minutes)                                       // a pod whose clock is behind (BUG-07)
         down = true
-        val running = engine.start("item-1")                               // unfinished, holds the key
+        val running = engine.start("item-1")                               // unfinished, holds the key, "older"
         engine.start("item-2")
 
         assertEquals(listOf(running.id, recent.id, old.id), runBlocking { engine.findByKey("item-1") }.map { it.id })

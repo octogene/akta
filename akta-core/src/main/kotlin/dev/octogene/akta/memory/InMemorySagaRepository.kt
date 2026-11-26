@@ -147,7 +147,8 @@ public class InMemorySagaRepository : SagaRepository {
     // logEntries is in the order written.
     override fun findByKey(key: String, limit: Int): List<SagaRecord> =
         sagas.values.filter { it.key == key }
-            .sortedWith(compareByDescending<SagaRecord> { it.createdAt }.thenByDescending { it.id })
+            // The unfinished one first, whatever the clocks of the pods that created them say.
+            .sortedWith(compareBy<SagaRecord> { it.state.isFinished }.thenByDescending { it.createdAt }.thenByDescending { it.id })
             .take(limit)
 
     override fun history(sagaId: Uuid): List<SagaLogEntry> =

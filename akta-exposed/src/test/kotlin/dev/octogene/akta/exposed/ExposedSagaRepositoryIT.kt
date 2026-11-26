@@ -164,6 +164,12 @@ class ExposedSagaRepositoryIT {
         val found = runBlocking { tx.inTransaction { repository.findByKey("item-1", 10) } }
         assertEquals(listOf(running.id, done.id), found.map { it.id })
 
+        // The pod that created the running saga had a clock behind the one that finished the other: still first.
+        transaction(database) { exec("UPDATE saga SET created_at = created_at + interval '1 second' WHERE id = '${done.id}'") }
+        val skewed = runBlocking { tx.inTransaction { repository.findByKey("item-1", 1) } }
+        assertEquals(listOf(running.id), skewed.map { it.id })
+        assertEquals(listOf(running.id, done.id), runBlocking { tx.inTransaction { repository.findByKey("item-1", 10) } }.map { it.id })
+
         val duplicate = assertFailsWith<DuplicateSagaException> {
             runBlocking { tx.inTransaction { engine("stock" to { "X" }).create(current!!, "item-1") } }
         }

@@ -57,7 +57,11 @@ public interface SagaRepository {
     /** Stuck sagas of [types] (null: all), by `stuckAt` then id, after [after]. */
     public fun findStuck(limit: Int, types: Collection<String>?, after: StuckCursor?): List<SagaRecord>
 
-    /** The sagas of business [key], newest first (by createdAt, then id): at most one unfinished, then finished ones. */
+    /**
+     * The sagas of business [key]: the unfinished one first (at most one), whatever its createdAt, then the finished
+     * ones newest first (by createdAt, then id). Pods' clocks may disagree: createdAt alone could put a finished saga
+     * before the one that holds the key.
+     */
     public fun findByKey(key: String, limit: Int): List<SagaRecord>
 
     /** The log of a saga, oldest first; entries of the same instant in the order they were written. */
