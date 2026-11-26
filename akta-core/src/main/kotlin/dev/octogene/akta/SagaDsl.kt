@@ -50,6 +50,10 @@ public class SagaBuilder<I> @PublishedApi internal constructor(
     private val steps = mutableListOf<SagaStep<I, *>>()
     private var onCompleted: SagaContext<I>.() -> Unit = noHook()
     private var onFailed: SagaContext<I>.() -> Unit = noHook()
+    private val declared = mutableSetOf<String>()
+
+    /** A block is declared once: a second one would silently replace the first. */
+    private fun once(block: String) = check(declared.add(block)) { "$block already declared for saga $type" }
 
     /** Declares the next step, without output. Steps run in declaration order. */
     @JvmName("stepWithoutOutput")  // same JVM signature as the typed step<O> below, once erased
@@ -98,6 +102,7 @@ public class SagaBuilder<I> @PublishedApi internal constructor(
      * it throws, it runs again later, then the saga stops (HOOK_FAILED): nothing done by the steps is lost.
      */
     public fun onCompleted(block: SagaContext<I>.() -> Unit) {
+        once("onCompleted")
         onCompleted = block
     }
 
@@ -106,6 +111,7 @@ public class SagaBuilder<I> @PublishedApi internal constructor(
      * The saga's row already reads FAILED: the hook may start the next saga for the same key.
      */
     public fun onFailed(block: SagaContext<I>.() -> Unit) {
+        once("onFailed")
         onFailed = block
     }
 
@@ -123,6 +129,10 @@ public class StepBuilder<I, O> @PublishedApi internal constructor(
     private var checkBlock: suspend SagaContext<I>.() -> CheckResult<O> = { CheckResult.CannotTell }
     private var describeBlock: ((O) -> String?)? = null
     private var idempotency: Idempotency? = null
+    private val declared = mutableSetOf<String>()
+
+    /** A block is declared once: a second one would silently replace the first. */
+    private fun once(block: String) = check(declared.add(block)) { "$block already declared for step '$name'" }
 
     /**
      * The step's service accepts an idempotency key, sent from `idempotencyKey`, and remembers it for
@@ -131,6 +141,7 @@ public class StepBuilder<I, O> @PublishedApi internal constructor(
      * "Before marking a step idempotent" in https://octogene.github.io/akta/use-cases/idempotent-services/
      */
     public fun idempotent(keyRetention: Duration) {
+        once("idempotent")
         idempotency = Idempotency(keyRetention)
     }
 
@@ -139,12 +150,13 @@ public class StepBuilder<I, O> @PublishedApi internal constructor(
      * Throw [StepRejected] or [StepNotSent] when you know nothing was applied.
      */
     public fun execute(block: suspend SagaContext<I>.() -> O) {
-        check(executeBlock == null) { "execute already declared for step '$name'" }
+        once("execute")
         executeBlock = block
     }
 
     /** Undo. Receives this step's own output. Must be safe to run more than once. */
     public fun compensate(block: suspend SagaContext<I>.(own: O?) -> Unit) {
+        once("compensate")
         compensateBlock = block
     }
 
@@ -153,6 +165,7 @@ public class StepBuilder<I, O> @PublishedApi internal constructor(
      * [StepRejected] when the external system shows the call was refused: the saga compensates.
      */
     public fun check(block: suspend SagaContext<I>.() -> CheckResult<O>) {
+        once("check")
         checkBlock = block
     }
 
@@ -161,6 +174,7 @@ public class StepBuilder<I, O> @PublishedApi internal constructor(
      * No match → not done; one match → done (it becomes the step's output); several → cannot tell.
      */
     public fun checkByLookup(lookup: suspend SagaContext<I>.() -> List<O>) {
+        once("check")
         checkBlock = {
             val found = lookup()
             when (found.size) {
@@ -176,6 +190,7 @@ public class StepBuilder<I, O> @PublishedApi internal constructor(
      * the type. A `String` output that is an identifier (a reservation id) is logged with `logAs { it }`.
      */
     public fun logAs(block: (O) -> String?) {
+        once("logAs")
         describeBlock = block
     }
 
@@ -213,6 +228,10 @@ public class SignalStepBuilder<I, S> @PublishedApi internal constructor(
     private var acceptBlock: SagaContext<I>.(S) -> Unit = {}
     private var checkBlock: (suspend SagaContext<I>.() -> CheckResult<S>)? = null
     private var describeBlock: ((S) -> String?)? = null
+    private val declared = mutableSetOf<String>()
+
+    /** A block is declared once: a second one would silently replace the first. */
+    private fun once(block: String) = check(declared.add(block)) { "$block already declared for step '$name'" }
 
     /**
      * Decides on a received value: return to accept it, throw [StepRejected] to fail the saga and
@@ -221,6 +240,7 @@ public class SignalStepBuilder<I, S> @PublishedApi internal constructor(
      * whole, and the saga stops (RECORD_FAILED) with the signal kept, until the bug is fixed and it is retried.
      */
     public fun onSignal(block: SagaContext<I>.(signal: S) -> Unit) {
+        once("onSignal")
         acceptBlock = block
     }
 
@@ -229,11 +249,13 @@ public class SignalStepBuilder<I, S> @PublishedApi internal constructor(
      * on by onSignal), NotDone rejects. A signal received while it runs is used instead, even of a value found.
      */
     public fun check(block: suspend SagaContext<I>.() -> CheckResult<S>) {
+        once("check")
         checkBlock = block
     }
 
     /** At the timeout, looks the value up: none means rejected, one means accepted, several means cannot tell. */
     public fun checkByLookup(lookup: suspend SagaContext<I>.() -> List<S>) {
+        once("check")
         checkBlock = {
             val found = lookup()
             when (found.size) {
@@ -246,6 +268,7 @@ public class SignalStepBuilder<I, S> @PublishedApi internal constructor(
 
     /** What `saga_log` records about the value: an identifier, never personal data. Default: nothing. */
     public fun logAs(block: (S) -> String?) {
+        once("logAs")
         describeBlock = block
     }
 

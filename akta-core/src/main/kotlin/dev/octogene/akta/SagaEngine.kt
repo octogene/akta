@@ -82,12 +82,13 @@ public class SagaEngine(
      * what they identify (`order:123`) unless sagas of different types are meant to exclude each other.
      *
      * @throws DuplicateSagaException if an unfinished saga already exists for [key].
-     * @throws IllegalArgumentException if [definition] is not registered, or the encoded input is over
-     *   [SagaConfig.maxDataBytes]. Nothing is written in either case.
+     * @throws IllegalArgumentException if [definition] is not registered, [key] is blank, or the encoded input is
+     *   over [SagaConfig.maxDataBytes]. Nothing is written in any case.
      */
     @OptIn(ExperimentalUuidApi::class)
     public fun <I> create(definition: SagaDefinition<I>, key: String, input: I, traceparent: String? = null): Uuid {
         require(definitions[definition.type] === definition) { "Saga type ${definition.type} is not registered with this engine" }
+        require(key.isNotBlank()) { "A saga's key must not be blank" }
         val encoded = definition.inputType?.let { type ->
             serializer.encode(input, type).also { text ->
                 val size = text.utf8Size()

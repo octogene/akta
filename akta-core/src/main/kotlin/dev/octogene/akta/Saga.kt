@@ -252,9 +252,11 @@ public class SagaDefinition<I>(
     init {
         require(type.isNotBlank()) { "Saga type must not be blank" }
         require(steps.isNotEmpty()) { "Saga $type has no steps" }
+        steps.forEach { require(it.name.isNotBlank()) { "A step of saga $type has a blank name" } }
         val duplicates = steps.groupBy { it.name }.filterValues { it.size > 1 }.keys
         require(duplicates.isEmpty()) { "Duplicate step names in saga $type: $duplicates" }
         val signals = steps.filterIsInstance<SignalStep<*, *>>()
+        signals.forEach { require(it.signal.isNotBlank()) { "Signal step '${it.name}' of saga $type waits for a blank signal name" } }
         val duplicateSignals = signals.groupBy { it.signal }.filterValues { it.size > 1 }.keys
         require(duplicateSignals.isEmpty()) { "Signal names used by several steps in saga $type: $duplicateSignals" }
         signals.forEach { require(it.outputType != null) { "Signal step '${it.name}' of saga $type needs a value type" } }

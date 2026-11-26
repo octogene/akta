@@ -6,6 +6,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.time.Duration.Companion.hours
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -335,6 +336,30 @@ class SagaDslTest {
         val done = runBlocking { engine.markDone(saga.id, output = null, actor = "alice") }
         assertEquals(SagaState.COMPLETED, done.state)
         assertEquals("""{"id":"H-1","warehouse":"north"}""", repository.results(saga.id)["hold"])
+    }
+
+    @Test
+    fun `a block declared twice is refused, instead of silently replacing the first`() {
+        fun refused(block: StepBuilder<Unit, String>.() -> Unit) =
+            assertFailsWith<IllegalStateException> { saga("T") { step<String>("s") { execute { "x" }; block() } } }.message!!
+        assertTrue(refused { execute { "y" } }.contains("execute already declared for step 's'"))
+        assertTrue(refused { compensate { }; compensate { } }.contains("compensate"))
+        assertTrue(refused { check { CheckResult.NotDone }; checkByLookup { emptyList() } }.contains("check"))
+        assertTrue(refused { logAs { it }; logAs { null } }.contains("logAs"))
+        assertTrue(refused { idempotent(1.hours); idempotent(2.hours) }.contains("idempotent"))
+        assertFailsWith<IllegalStateException> {
+            saga("T") { awaitSignal<String>("w", "payment", 1.hours) { onSignal { }; onSignal { } } }
+        }
+        assertFailsWith<IllegalStateException> { saga("T") { step("s") { execute { } }; onCompleted { }; onCompleted { } } }
+        assertFailsWith<IllegalStateException> { saga("T") { step("s") { execute { } }; onFailed { }; onFailed { } } }
+    }
+
+    @Test
+    fun `blank step names, signal names and keys are refused`() {
+        assertFailsWith<IllegalArgumentException> { saga("T") { step(" ") { execute { } } } }
+        assertFailsWith<IllegalArgumentException> { saga("T") { awaitSignal<String>("w", signal = "", timeout = 1.hours) } }
+        val definition = saga("T") { step("s") { execute { } } }
+        assertFailsWith<IllegalArgumentException> { engine(definition).create(definition, "  ") }
     }
 
     @Test
