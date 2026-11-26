@@ -28,6 +28,7 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.time.Clock
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
@@ -60,8 +61,19 @@ class SagaAdminTest {
         step("book") { execute { throw StepRejected("no slot") } }
     }
 
+    /** An approval that times out at once, and has no check: stuck, for a human to deliver the answer. */
+    private val approval = saga("APPROVAL") {
+        step<String>("hold") {
+            execute { "STK-3" }
+            compensate { own -> released += own }
+        }
+        awaitSignal<String>("await-approval", signal = "approval", timeout = 1.milliseconds) {
+            onSignal { if (it != "yes") throw StepRejected("not approved: $it") }
+        }
+    }
+
     private val engine = SagaEngine(
-        InMemorySagaTransactions(repository), repository, listOf(stock, booking), KotlinxJsonSagaSerializer(),
+        InMemorySagaTransactions(repository), repository, listOf(stock, booking, approval), KotlinxJsonSagaSerializer(),
         SagaConfig(maxAttempts = 1),
     )
 
@@ -206,6 +218,20 @@ class SagaAdminTest {
 
         assertEquals("COMPLETED", saga.state)
         assertEquals("\"STK-9\"", repository.results(id)["hold"])
+    }
+
+    @Test
+    fun `markDone on a signal step delivers its value, which onSignal may refuse`() = api {
+        val id = start(approval, "item-1", Unit)
+        Thread.sleep(5)                                                     // past the timeout
+        runBlocking { engine.resumeDue() }                                  // no check: it cannot tell
+        assertEquals("STUCK", client.get("/admin/sagas/$id").read<SagaView>().stepStatus)
+
+        val saga = post("/$id/mark-done", """{"output": "no"}""").read<SagaView>()
+
+        assertEquals("FAILED", saga.state)                                  // refused, not marked done
+        assertTrue("not approved: no" in saga.failureReason.orEmpty(), saga.failureReason)
+        assertEquals(listOf<String?>("STK-3"), released)
     }
 
     @Test
