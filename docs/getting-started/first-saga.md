@@ -90,7 +90,7 @@ suspend fun moveToTestStock(epc: String, storeId: String): StockEntry {
 | `compensate { own -> … }` | Optional. Undo, given the step's own output. Safe to repeat. |
 | `checkByLookup { … }` | Optional. The matches found in the external system: none, one or several. |
 | `check { … }` | Optional. The same, in full: return `CheckResult.Done(output)`, `NotDone` or `CannotTell`. |
-| `logAs { … }` | Optional. What the history shows about the output. Default: a `String` output itself, nothing otherwise. |
+| `logAs { … }` | Optional. What the history shows about the output: an identifier, never personal data. Default: nothing, whatever the type (a `String` may be an email or a token). |
 | `idempotent(keyRetention)` | Optional. The service accepts an idempotency key: see [Services with idempotency keys](../use-cases/idempotent-services.md). |
 | `awaitSignal<S>(name, signal, timeout) { … }` | A step that waits for an event instead of calling: see [A reservation that waits for a payment](../use-cases/reservation-payment.md). |
 | `onCompleted { … }` / `onFailed { … }` | Business effects at the end, in the saga's last transaction. |

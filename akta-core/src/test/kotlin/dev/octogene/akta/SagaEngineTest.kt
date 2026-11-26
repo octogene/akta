@@ -42,7 +42,7 @@ class SagaEngineTest {
         fun advance(d: Duration) { now += d }
     }
 
-    /** A step whose output is a reference string, logged as it is (like the DSL's step<String>). */
+    /** A step whose output is a reference string, logged as it is (as the DSL's step<String> does with `logAs { it }`). */
     private abstract class RefStep(override val name: String) : SagaStep<Unit, String?> {
         override val outputType = typeOf<String?>()
         override fun describe(output: String?) = output

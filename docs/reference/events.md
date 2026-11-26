@@ -17,7 +17,7 @@ Logged as `<action>:<outcome>`, on the step that ran.
 | `CHECK:NotDone` | Not applied: executed again |
 | `CHECK:CannotTell` | The check cannot decide: stuck |
 | `CHECK:CheckFailed` | The lookup itself threw: checked again later |
-| `CHECK:Rejected` | A signal step's timeout check found nothing, or found a value `onSignal` rejected: the saga compensates |
+| `CHECK:Rejected` | The check found the call refused (it threw `StepRejected`), or a signal step's timeout check found nothing: the saga compensates. A value a timeout check found is stored as the signal, and `onSignal` decides on it as for any signal |
 | `COMPENSATE:Compensated` | The step was undone |
 | `COMPENSATE:CompensationFailed` | The undo failed: retried later |
 
