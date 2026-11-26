@@ -86,5 +86,6 @@ CREATE TABLE saga_log (
     trace_id   text
 );
 
-CREATE INDEX saga_log_saga ON saga_log (saga_id, at);
-CREATE INDEX saga_log_trace ON saga_log (trace_id) WHERE trace_id IS NOT NULL;
+-- In the order history and historyByTrace read them (at, then id for entries of the same instant): no sort.
+CREATE INDEX saga_log_saga ON saga_log (saga_id, at, id);
+CREATE INDEX saga_log_trace ON saga_log (trace_id, at, id) WHERE trace_id IS NOT NULL;
