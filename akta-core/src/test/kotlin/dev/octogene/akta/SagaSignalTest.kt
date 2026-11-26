@@ -369,14 +369,31 @@ class SagaSignalTest {
         engine = engine(definition)
         id = engine.create(definition, "R-1")
         engine.run(id)
-        engine.resumeAfter(31.minutes)                                          // the check fails: CHECKING again
-
-        engine.resumeAfter(2.minutes)                                           // when it would check again
+        engine.resumeAfter(31.minutes)                                          // the check fails: the signal is used
 
         assertEquals(SagaState.COMPLETED, runBlocking { engine.find(id)!! }.state)
         assertEquals("confirm P-2", calls.last())                               // the signal's value
         assertEquals(1, checks)
         assertEquals("consumed (stored earlier) ref=P-2", details(SagaEvents.SIGNAL_RECEIVED).last())
+    }
+
+    @Test
+    fun `a signal during the last check, which fails, is used instead of stopping the saga`() {
+        lateinit var engine: SagaEngine
+        lateinit var id: Uuid
+        val definition = reservation(checkAtTimeout = {
+            assertEquals(SignalResult.Stored(id), engine.pay(id, paymentId = "P-2"))   // arrives mid-check
+            throw java.io.IOException("payments down")
+        })
+        engine = engine(definition, SagaConfig(maxAttempts = 1))                // this check is the last one allowed
+        id = engine.create(definition, "R-1")
+        engine.run(id)
+
+        engine.resumeAfter(31.minutes)
+
+        val saga = runBlocking { engine.find(id)!! }
+        assertEquals(SagaState.COMPLETED, saga.state)                           // not STUCK (CHECK_FAILING)
+        assertEquals("confirm P-2", calls.last())
     }
 
     @Test

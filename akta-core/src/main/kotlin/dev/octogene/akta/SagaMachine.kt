@@ -145,15 +145,17 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
     ): Decision {
         val effects = mutableListOf<Effect>()
         // A signal step's timeout check: what it found is stored as the signal (one received first wins), and the step
-        // is due at once, to consume it in a claim of its own, through onSignal. If it found nothing, or cannot tell,
-        // a signal received meanwhile answers instead: the lookup raced with the event, which did happen.
+        // is due at once, to consume it in a claim of its own, through onSignal. If it found nothing, cannot tell, or
+        // failed, a signal received meanwhile answers instead: the event did happen, whatever the lookup said. A failed
+        // check is not tried again, and does not count towards CHECK_FAILING.
         if (step is SignalStep<*, *>) {
             if (outcome is Outcome.Found) {
                 effects += Effect.SaveSignal(step.signal, checkNotNull(outcome.done.output) { "Saga ${r.id}: a signal has a value" })
                 return Decision(r.moved(StepState.Ready(now)), effects)
             }
             val foundNothing = outcome is Outcome.Rejected && outcome.noSignalFound
-            if ((foundNothing || outcome == Outcome.CannotTell) && signalStored(step.signal)) {
+            val answered = foundNothing || outcome == Outcome.CannotTell || outcome is Outcome.CheckFailed
+            if (answered && signalStored(step.signal)) {
                 return Decision(r.moved(StepState.Ready(now)), effects)
             }
         }
