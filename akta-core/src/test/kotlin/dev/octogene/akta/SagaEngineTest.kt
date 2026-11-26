@@ -1327,6 +1327,13 @@ class SagaEngineTest {
     }
 
     @Test
+    fun `purgeFinished refuses a batch too large for one statement`() {
+        val engine = engine(FakeStep("stock", { "STK-1" }))
+        assertFailsWith<IllegalArgumentException> { runBlocking { engine.purgeFinished(batchSize = 70_000) } }
+        assertEquals(0, runBlocking { engine.purgeFinished(batchSize = 10_000) })
+    }
+
+    @Test
     fun `purgeFinished works in batches until everything old is gone`() {
         val engine = engine(FakeStep("stock", { "STK-1" }))
         repeat(5) { engine.start("item-$it") }

@@ -248,6 +248,7 @@ public class SagaEngine(
     /** How long a manual action runs the saga on by default, after committing its change. */
     private companion object {
         val MANUAL_RUN = 10.seconds
+        const val MAX_PURGE_BATCH = 10_000
     }
 
     /** What [resumeDue] did: how many sagas it looked at, and the ones that threw. */
@@ -298,11 +299,13 @@ public class SagaEngine(
      * Deletes the sagas that finished (COMPLETED or FAILED) more than [olderThan] ago, with their results
      * and their log. Unfinished and stuck sagas are never deleted, however old. Call it periodically
      * from the job runner (daily keeps each run small). It works in batches of [batchSize] sagas, one
-     * short transaction each, so it never holds locks for long. Returns the number of sagas deleted.
+     * short transaction each, so it never holds locks for long ([batchSize] at most 10,000). Returns the number of
+     * sagas deleted.
      */
     public suspend fun purgeFinished(olderThan: Duration = 30.days, batchSize: Int = 1000): Int {
         require(olderThan.isPositive()) { "olderThan must be positive" }
-        require(batchSize >= 1) { "batchSize must be at least 1" }
+        // A batch deletes by its ids, one bind parameter each: PostgreSQL's driver takes at most 65,535 per statement.
+        require(batchSize in 1..MAX_PURGE_BATCH) { "batchSize must be between 1 and $MAX_PURGE_BATCH" }
         val before = currentTime() - olderThan
         var total = 0
         do {
