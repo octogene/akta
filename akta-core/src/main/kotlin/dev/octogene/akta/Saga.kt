@@ -43,6 +43,9 @@ public sealed interface CheckResult<out O> {
 
 /** Typed handle on a step, to read its output: `requireResult(hold)`. */
 public class StepRef<out O>(public val name: String) {
+    /** Two refs of the same step are equal: a step's name is unique in its saga. */
+    override fun equals(other: Any?): Boolean = other is StepRef<*> && other.name == name
+    override fun hashCode(): Int = name.hashCode()
     override fun toString(): String = "StepRef($name)"
 }
 

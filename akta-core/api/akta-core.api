@@ -501,7 +501,9 @@ public final class dev/octogene/akta/StepNotSent : java/lang/Exception {
 
 public final class dev/octogene/akta/StepRef {
 	public fun <init> (Ljava/lang/String;)V
+	public fun equals (Ljava/lang/Object;)Z
 	public final fun getName ()Ljava/lang/String;
+	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 }
 

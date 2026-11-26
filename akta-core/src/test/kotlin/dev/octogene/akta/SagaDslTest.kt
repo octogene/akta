@@ -336,4 +336,12 @@ class SagaDslTest {
         assertEquals(SagaState.COMPLETED, done.state)
         assertEquals("""{"id":"H-1","warehouse":"north"}""", repository.results(saga.id)["hold"])
     }
+
+    @Test
+    fun `two refs of the same step are equal`() {
+        lateinit var first: StepRef<String>
+        val definition = saga("T") { first = step<String>("s") { execute { "x" } } }
+        assertEquals<StepRef<*>>(first, definition.steps.single().ref)
+        assertEquals(setOf<StepRef<*>>(StepRef<String>("s")), setOf(first, StepRef<String>("s")))
+    }
 }
