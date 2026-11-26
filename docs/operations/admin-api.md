@@ -37,7 +37,7 @@ routing {
 | `GET /stats?type=` | Counts and ages of the unfinished sagas: by state and step status, stuck ones by reason, the oldest unfinished, the oldest due. `type` may repeat; none means every type. |
 | `GET /stuck?type=&limit=&after=` | Stuck sagas, stuck longest first: `{"sagas": […], "next": "…"}`. Pass `next` as `after` for the following page; it is `null` on the last one. `limit` is 50 by default, at most 500. |
 | `GET /by-key?key=&limit=` | The sagas of a business key, newest first: the unfinished one if any, then the finished ones still kept. Where an operator starts from "why is this item stuck?". `limit` is 20 by default, at most 500. The key goes in the query, so a key holding a `/` needs no care: encode it as any query value. |
-| `GET /{id}` | One saga: its state and step, `lastError`, `failureReason`, `stuckReason`, the cancellation, and its dates. |
+| `GET /{id}` | One saga: its state and step, `lastError`, `failureReason`, `stuckReason`, the cancellation, and its dates. While a call is in flight, `callAction` says which (`EXECUTE`, `REPLAY`, `CHECK`, `COMPENSATE`); after `RESUME_FAILING`, `stuckFrom` is the status a retry resumes. |
 | `GET /{id}/history` | Everything that happened to it, oldest first, with who did each manual action. |
 | `GET /trace/{traceId}?limit=` | What one request did to sagas, from its trace id. |
 
@@ -55,7 +55,7 @@ Each action is the engine method of the same name: read [Stuck sagas](stuck-saga
 | `POST /{id}/mark-compensated` | none | `markCompensated` |
 | `POST /{id}/cancel` | `{"reason": "customer left"}` | `cancel` |
 
-`output` is the step's output as a **JSON value**: a string, a number or an object, as `KotlinxJsonSagaSerializer` stores it. The engine checks it against the step's type before saving it. Left out, `markDone` keeps the output already saved for the step (after `RECORD_FAILED`), or there is none. If your engine uses another `SagaSerializer`, call the engine directly for `markDone` and `abort` with an output.
+`output` is the step's output as a **JSON value**: a string, a number or an object, as `KotlinxJsonSagaSerializer` stores it. The engine checks it against the step's type before saving it. Left out, `markDone` keeps the output already saved for the step (after `RECORD_FAILED`), or there is none. For a signal step, `output` is the signal's value, delivered by hand: the step's `onSignal` accepts or refuses it as it would a signal received, so a refused value compensates instead of marking the step done. Left out, the signal the saga already keeps is used. If your engine uses another `SagaSerializer`, call the engine directly for `markDone` and `abort` with an output.
 
 ## Errors
 

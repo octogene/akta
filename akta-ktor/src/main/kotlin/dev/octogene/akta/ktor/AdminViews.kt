@@ -21,8 +21,12 @@ public data class SagaView(
     val state: String,
     val stepIndex: Int,
     val stepStatus: String,
+    /** While the step is IN_PROGRESS, what the call in flight does: EXECUTE, REPLAY, CHECK or COMPENSATE. */
+    val callAction: String?,
     val attempts: Int,
     val checkFailures: Int,
+    /** Times in a row the saga could not be resumed, as counted towards RESUME_FAILING. */
+    val resumeFailures: Int,
     val nextAttemptAt: String,
     val lockedUntil: String?,
     /** The latest problem: why the current step is retried, checked or stuck. */
@@ -31,6 +35,8 @@ public data class SagaView(
     val failureReason: String?,
     val stuckReason: String?,
     val stuckAt: String?,
+    /** After RESUME_FAILING, the step status a retry resumes; null otherwise. */
+    val stuckFrom: String?,
     val cancelRequestedAt: String?,
     val cancelReason: String?,
     val keySince: String?,
@@ -86,6 +92,7 @@ public data class MarkDoneRequest(
     /**
      * The step's output, as a JSON value (`"STK-1"`, `{"id": "H-1"}`): what KotlinxJsonSagaSerializer stores.
      * Left out, the output already saved for the step is kept (after a RECORD_FAILED), or there is none.
+     * For a signal step, the signal's value: its onSignal accepts or refuses it, as for a signal received.
      */
     val output: JsonElement? = null,
 )
@@ -105,10 +112,10 @@ public data class CancelRequest(val reason: String)
 
 internal fun SagaRecord.toView() = SagaView(
     id = id.toString(), type = type, key = key, state = state.name, stepIndex = stepIndex,
-    stepStatus = stepStatus.name, attempts = attempts, checkFailures = checkFailures,
-    nextAttemptAt = nextAttemptAt.toString(), lockedUntil = lockedUntil?.toString(),
+    stepStatus = stepStatus.name, callAction = callAction?.name, attempts = attempts, checkFailures = checkFailures,
+    resumeFailures = resumeFailures, nextAttemptAt = nextAttemptAt.toString(), lockedUntil = lockedUntil?.toString(),
     lastError = lastError, failureReason = failureReason, stuckReason = stuckReason?.name,
-    stuckAt = stuckAt?.toString(), cancelRequestedAt = cancelRequestedAt?.toString(),
+    stuckAt = stuckAt?.toString(), stuckFrom = stuckFrom?.name, cancelRequestedAt = cancelRequestedAt?.toString(),
     cancelReason = cancelReason, keySince = keySince?.toString(), keyGeneration = keyGeneration,
     traceparent = traceparent, createdAt = createdAt.toString(),
 )

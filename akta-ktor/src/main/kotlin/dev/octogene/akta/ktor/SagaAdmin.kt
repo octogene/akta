@@ -100,7 +100,8 @@ public fun Route.sagaAdminRead(engine: SagaEngine) {
  * Each answers with the saga after the action: the engine runs it on at once, for up to 10 seconds.
  *
  * - `POST /{id}/retry` `{"newKey": false}` — runs the stuck step (or compensation) again.
- * - `POST /{id}/mark-done` `{"output": …}` — the stuck step was found done by hand: go on.
+ * - `POST /{id}/mark-done` `{"output": …}` — the stuck step was found done by hand: go on. For a signal step,
+ *   the output is the signal's value, which its onSignal accepts or refuses.
  * - `POST /{id}/abort` `{"currentStepApplied": false, "output": …}` — give up, undoing what was done.
  * - `POST /{id}/mark-compensated` — the stuck compensation was done by hand: go on undoing.
  * - `POST /{id}/cancel` `{"reason": "…"}` — abandon an unfinished saga, compensating it.
