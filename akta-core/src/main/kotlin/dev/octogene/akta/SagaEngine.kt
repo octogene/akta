@@ -346,12 +346,17 @@ public class SagaEngine(
      * the engine's serializer writes it (JSON for [KotlinxJsonSagaSerializer]), checked against the
      * step's output type before it is saved. Null keeps the output already saved for the step (after a
      * `RECORD_FAILED`), or means no output.
+     *
+     * For a signal step, [output] is the signal's value, delivered by hand: it is stored as the step's signal, and
+     * the step's onSignal accepts or rejects it when the saga runs, as for any signal. Null uses the signal the
+     * saga already keeps (after its onSignal failed); one it keeps is never replaced by another value.
      */
     public suspend fun markDone(id: Uuid, output: String?, actor: String, runFor: Duration = MANUAL_RUN): SagaRecord =
         manual(id, actor, SagaEvents.MANUAL_DONE, runFor) { r, now ->
             machine.checkMarkDone(r)
             val def = definition(r.type)
             val step = def.stepAt(r.stepIndex)
+            if (step is SignalStep<*, *>) return@manual signalByHand(r, step, output, now)
             val (encoded, decoded) = manualOutput(r, step, output)
             repository.saveResult(r.id, r.stepIndex, step.name, encoded, now)
             ManualChange(machine.next(r, def.steps.size, now), detail = describe(step, decoded)?.let { "ref=$it" })
@@ -625,6 +630,29 @@ public class SagaEngine(
                 committed
             }
         }
+    }
+
+    /**
+     * markDone on a signal step: [output], the signal's value, is stored as its signal (or the one kept is used), and
+     * the step is due at once, to consume it through onSignal: a value onSignal refuses is refused, not marked done.
+     */
+    private fun signalByHand(r: SagaRecord, step: SignalStep<*, *>, output: String?, now: Instant): ManualChange {
+        @Suppress("UNCHECKED_CAST")
+        step as AnySignalStep
+        val kept = repository.signal(r.id, step.signal)
+        val given = output?.let { manualOutput(r, step, it) }
+        require(given != null || kept != null) {
+            "Step '${step.name}' needs the value of signal '${step.signal}': none was received"
+        }
+        if (given != null && kept == null) {
+            repository.saveSignal(r.id, step.signal, checkNotNull(given.first), now)
+        } else {
+            require(given == null || given.first == kept) {
+                "Saga ${r.id} keeps the signal '${step.signal}' it received: retry uses it, or abort gives up"
+            }
+        }
+        val value = given?.second ?: decode(checkNotNull(kept), checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
+        return ManualChange(machine.signalByHand(r, now), detail = listOfNotNull("signal by hand", describe(step, value)?.let { "ref=$it" }).joinToString(" "))
     }
 
     /**

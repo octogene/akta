@@ -41,7 +41,7 @@ The records carry the saga's encoded input, which may hold personal data: decide
 |---|---|
 | `retry(id, actor)` | The cause is fixed. Forward, it **executes the step again without checking**: after `CANNOT_TELL`, first confirm by hand the step was not applied. An idempotent step is replayed with its key instead, which is safe. A signal step waits again, and uses a signal received meanwhile. |
 | `retry(id, actor, newKey = true)` | An idempotent step was not applied, and its key expired or holds a remembered failure: send a fresh key. |
-| `markDone(id, output, actor)` | The step was applied, as you confirmed by hand. `output` is its output as JSON, checked against the step's type; `null` keeps the output already saved. |
+| `markDone(id, output, actor)` | The step was applied, as you confirmed by hand. `output` is its output as JSON, checked against the step's type; `null` keeps the output already saved. On a signal step, `output` is the signal's value, delivered by hand: its `onSignal` accepts or refuses it, as any signal; `null` uses the signal the saga keeps. |
 | `abort(id, actor, currentStepApplied, output)` | Give up: the completed steps are undone. With `currentStepApplied = true`, the stuck step is undone too, and its compensation receives `output`. Refused while a call is in flight or an outcome is unknown; `currentStepApplied = true` is refused too for a step whose refusal is kept (`RECORD_FAILED`): nothing was applied. |
 | `markCompensated(id, actor)` | A compensation is stuck and you undid the step by hand, or there was nothing to undo: the saga goes on undoing the earlier steps. |
 | `cancel(id, reason, actor)` | Abandon a saga that is not stuck, at any time before it finishes. |

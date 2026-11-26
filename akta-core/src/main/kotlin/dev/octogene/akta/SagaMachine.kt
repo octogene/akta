@@ -281,6 +281,10 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
         }
     }
 
+    /** markDone on a stuck signal step, whose signal is now stored: due at once, to consume it through onSignal. */
+    fun signalByHand(r: SagaRecord, now: Instant): SagaRecord =
+        r.unfinished().with(step = StepState.Ready(now), checkFailures = 0, resumeFailures = 0, lastError = null).record()
+
     /** See [SagaEngine.abort], which saves the step's output in between, when it was applied. */
     fun checkAbort(r: SagaRecord, currentStepApplied: Boolean) {
         if (r.state == SagaState.FINISHING) {

@@ -647,6 +647,61 @@ class SagaSignalTest {
         assertEquals(SagaState.COMPLETED, runBlocking { engine.find(id)!! }.state)
     }
 
+    // ---- markDone on a signal step: the value delivered by hand, through onSignal (BUG-06) ------------
+
+    /** The reservation, stuck at its payment's timeout (no check): NO_SIGNAL. */
+    private fun stuckWithoutSignal(): Pair<SagaEngine, Uuid> {
+        val definition = reservation()
+        val engine = engine(definition)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+        engine.resumeAfter(31.minutes)
+        assertEquals(StuckReason.NO_SIGNAL, runBlocking { engine.find(id)!! }.stuckReason)
+        return engine to id
+    }
+
+    @Test
+    fun `markDone on a signal step delivers the value by hand, and onSignal accepts it`() {
+        val (engine, id) = stuckWithoutSignal()
+
+        val done = runBlocking { engine.markDone(id, Json.encodeToString(PaymentResult("P-7", succeeded = true)), "operator") }
+
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals("confirm P-7", calls.last())
+        assertEquals("signal by hand ref=P-7", details(SagaEvents.MANUAL_DONE).single())
+    }
+
+    @Test
+    fun `markDone on a signal step with a value onSignal refuses compensates, instead of moving on`() {
+        val (engine, id) = stuckWithoutSignal()
+
+        val refused = runBlocking { engine.markDone(id, Json.encodeToString(PaymentResult("P-7", succeeded = false)), "operator") }
+
+        assertEquals(SagaState.FAILED, refused.state)                           // before: COMPLETED, onSignal skipped
+        assertEquals("dev.octogene.akta.StepRejected: payment P-7 failed", refused.failureReason)
+        assertEquals(listOf<String?>("P-1"), released)                          // the payment is undone
+        assertTrue("confirm P-7" !in calls)
+    }
+
+    @Test
+    fun `markDone on a signal step uses the signal kept, and never replaces it`() {
+        val definition = watchedReservation()
+        val engine = watchedEngine(definition)
+        val id = engine.create(definition, "R-1")
+        engine.run(id)
+        onSignalBug = true
+        engine.pay(id)
+        assertEquals(StuckReason.RECORD_FAILED, engine.run(id).stuckReason)     // the signal kept
+        onSignalBug = false
+
+        val other = Json.encodeToString(PaymentResult("P-other", succeeded = true))
+        assertFailsWith<IllegalArgumentException> { runBlocking { engine.markDone(id, other, "operator") } }
+        val done = runBlocking { engine.markDone(id, null, "operator") }
+
+        assertEquals(SagaState.COMPLETED, done.state)
+        assertEquals("confirm P-1", calls.last())                               // the signal received
+    }
+
     @Test
     fun `two signals stored early are consumed one transaction each, and a bug stops the right step`() {
         var bug = true
