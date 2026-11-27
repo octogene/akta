@@ -620,7 +620,7 @@ public class SagaEngine(
                 // A signal step's check found the signal's value: record() stores it as the signal, and onSignal
                 // decides on it at the step's next claim, as for a signal delivered.
                 is CheckResult.Done -> done(work, c.output).let { done ->
-                    if (work.step is SignalStep<*, *> && done is Outcome.Done) Outcome.Found(c.output, done) else done
+                    if (work.step is SignalStep<*, *> && done is Outcome.Done) Outcome.Found(done) else done
                 }
                 // A signal step's check found nothing at its timeout: the signal will not come, so the saga gives up
                 // (unless a signal arrived meanwhile: record() looks).

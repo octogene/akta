@@ -38,10 +38,10 @@ internal sealed class Outcome(val event: String, val detail: String? = null) {
     object Compensated : Outcome("Compensated")
     class CompensationFailed(val error: String) : Outcome("CompensationFailed", error)
     /**
-     * A signal step's timeout check found [value], encoded in [done]. [SagaMachine.decide] stores it as the step's
-     * signal, and the step's onSignal decides on it at the next claim, as for a signal delivered.
+     * A signal step's timeout check found the signal's value, encoded in [done]. [SagaMachine.decide] stores it as the
+     * step's signal, and the step's onSignal decides on it at the next claim, as for a signal delivered.
      */
-    class Found(val value: Any?, val done: Done) : Outcome("Done", done.detail)
+    class Found(val done: Done) : Outcome("Done", done.detail)
     /** No time was left to call before the lock expires: nothing was called. Logged as NOT_CALLED. */
     class NotCalled(reason: String) : Outcome("NotCalled", reason)
 }
