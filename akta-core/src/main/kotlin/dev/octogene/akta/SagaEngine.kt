@@ -45,7 +45,7 @@ public class SagaEngine(
     private val listeners: List<SagaListener> = emptyList(),
 ) {
     /** Every decision on a saga's row: pure, and tested on its own. */
-    private val machine = SagaMachine(config) { type -> this.definitions[type]?.hooks ?: Hooks(completed = true, failed = true) }
+    private val machine = SagaMachine(config) { type -> this.definitions[type] }
 
     @Suppress("UNCHECKED_CAST")
     private val definitions: Map<String, AnyDefinition> = definitions.associateBy { it.type } as Map<String, AnyDefinition>
@@ -349,7 +349,7 @@ public class SagaEngine(
      */
     public suspend fun retry(id: Uuid, actor: String, newKey: Boolean = false, runFor: Duration = MANUAL_RUN): SagaRecord =
         manual(id, actor, SagaEvents.MANUAL_RETRY, runFor) { r, now ->
-            machine.retry(r, newKey, now, stepOf = { definition(r.type).stepAt(r.stepIndex) }) { signal ->
+            machine.retry(r, newKey, now) { signal ->
                 repository.signal(r.id, signal) != null
             }.let { ManualChange(it.saga, it.detail) }
         }
@@ -480,62 +480,33 @@ public class SagaEngine(
         }
     }
 
-    /** The signal step [step] starts waiting, or consumes at once a signal that arrived before it. */
-    private fun enterWait(
-        r: SagaPhase.Unfinished,
-        def: AnyDefinition,
-        step: AnySignalStep,
-        ctx: SagaContext<Any?>,
-        now: Instant,
-        trace: String?,
-        chained: Boolean,
-    ): Cycle {
-        consumeStored(r, def, step, ctx, now, trace, chained)?.let { return it }
+    /** The signal step [step] starts waiting for its signal, until its timeout. */
+    private fun startWaiting(r: SagaPhase.Unfinished, step: AnySignalStep, now: Instant, trace: String?): SagaPhase {
         val waiting = machine.waiting(r, step, now)
         save(waiting, now)
         log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_STARTED, "signal '${step.signal}' until ${waiting.due}", now, trace)
-        return Cycle.Rest(waiting)
+        return waiting
     }
 
     /**
-     * The signal of [step] received earlier and stored, if any, applied now: the saga moves on (or compensates),
-     * and the next step is claimed. Null when none was received. [chained]: this transaction already recorded an
-     * outcome or applied a signal, which onSignal must not roll back: the signal waits for a claim of its own.
+     * The signal of [step] received earlier, [stored], applied now: the saga moves on (or compensates). Saved and
+     * logged; the next step is for the caller to claim.
      */
     private fun consumeStored(
         r: SagaPhase.Unfinished,
         def: AnyDefinition,
         step: AnySignalStep,
         ctx: SagaContext<Any?>,
+        stored: String,
         now: Instant,
         trace: String?,
-        chained: Boolean,
-    ): Cycle? {
-        val stored = repository.signal(r.id, step.signal) ?: return null
-        if (chained) {
-            save(r, now)
-            return Cycle.ClaimAgain(r)
-        }
+    ): SagaPhase {
         val value = decode(stored, checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
-        val updated = applySignal(r, def, step, ctx, value, stored, now)
+        val updated = signalDecision(r, def, step, ctx, value, stored, now)
+        save(updated, now)
         // Logged after the change, as in deliver(): the event shows the saga as the signal left it.
         val detail = listOfNotNull("consumed (stored earlier)", describe(step, value)?.let { "ref=$it" }).joinToString(" ")
         log(r.id, r.stepIndex, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
-        return claimLocked(updated, trace, chained = true)
-    }
-
-    /** A signal for the waiting [step]: its onSignal accepts it (the saga moves on) or rejects it (it compensates). */
-    private fun applySignal(
-        r: SagaPhase.Unfinished,
-        def: AnyDefinition,
-        step: AnySignalStep,
-        ctx: SagaContext<Any?>,
-        value: Any?,
-        encoded: String,
-        now: Instant,
-    ): SagaPhase {
-        val updated = signalDecision(r, def, step, ctx, value, encoded, now)
-        save(updated, now)
         return updated
     }
 
@@ -743,80 +714,88 @@ public class SagaEngine(
     }
 
     /**
-     * Claims the current step of [current], whose row this transaction has locked, if it is due now. First the moves
-     * that call nothing (a lock expired, a cancellation, a step with nothing to undo), each saved and logged here,
-     * until the saga rests or its step is to be acted on; then the step's data is read and the call claimed.
+     * Claims the call of the current step of [current], whose row this transaction has locked, if it is due now. On the
+     * way, each change that calls nothing is saved and logged here: a lock expired, a cancellation, a step with nothing
+     * to undo, a signal step that starts waiting, or consumes a signal received earlier.
+     *
+     * [chained]: this transaction already recorded an outcome or applied a signal, which onSignal must not roll back:
+     * a stored signal then waits for a claim of its own ([Cycle.ClaimAgain]).
      */
     private fun claimLocked(current: SagaPhase, trace: String?, chained: Boolean = false): Cycle {
-        var r = current
-        var now = currentTime()
-        lateinit var def: AnyDefinition
-        lateinit var acting: SagaPhase.Unfinished
+        var saga = current
+        var afterChange = chained
         while (true) {
-            when (val move = machine.move(r, now, definitionOf = { definition(r.type).also { def = it } }, stepOf = { def.stepAt(r.stepIndex) }) {
-                definition(r.type).stepAt(r.stepIndex).idempotency != null
-            }) {
+            val now = currentTime()
+            var acting = when (val move = machine.move(saga, now)) {
                 is Move.Rest -> return Cycle.Rest(move.saga)
-                is Move.Act -> { acting = move.saga; break }
-                is Move.LockExpired -> {                         // the process died during the call: on, at the same time
-                    r = move.saga
-                    save(r, now)
-                    log(r.id, r.stepIndex, null, SagaEvents.LOCK_EXPIRED, r.lastError, now, trace)
-                }
-                is Move.Cancelled -> {
-                    save(move.saga, now)
-                    log(r.id, r.stepIndex, null, SagaEvents.CANCELLED, move.saga.cancellation?.reason, now, trace)
-                    r = move.saga
-                    now = currentTime()
-                }
-                is Move.NothingToUndo -> {
-                    write(move.effects, r, now) { def.stepAt(r.stepIndex).name }
-                    save(move.saga, now)
-                    log(r.id, r.stepIndex, def.stepAt(r.stepIndex).name, SagaEvents.NOTHING_TO_UNDO, null, now, trace)
-                    r = move.saga
-                    now = currentTime()
-                }
                 is Move.Finish -> return Cycle.Finish(move.saga)
                 is Move.NoSignal -> {
                     save(move.saga, now)
-                    log(r.id, r.stepIndex, def.stepAt(r.stepIndex).name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
+                    log(saga.id, saga.stepIndex, stepName(saga), SagaEvents.WAIT_TIMED_OUT, null, now, trace)
                     return Cycle.Rest(move.saga)
                 }
-            }
-        }
-        var saga = acting
-        val step = def.stepAt(saga.stepIndex)
-        val signalStep = (step as? SignalStep<*, *>)?.takeIf { saga is SagaPhase.Running }
-        // Decoded before anything is called: data that cannot be read throws here, and the transaction
-        // rolls back. resumeDue then postpones the saga (another version of the code may read it).
-        val ctx = context(saga, def)
-        if (signalStep != null) {
-            @Suppress("UNCHECKED_CAST")
-            signalStep as AnySignalStep
-            when (saga.step) {
-                is StepState.Ready -> return enterWait(saga, def, signalStep, ctx, now, trace, chained)
-                is StepState.Waiting -> {                // its timeout passed without the signal: the check decides
-                    log(saga.id, saga.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
-                    saga = machine.timedOut(saga, signalStep)
+                is Move.LockExpired -> {                         // the process died during the call
+                    save(move.saga, now)
+                    log(saga.id, saga.stepIndex, null, SagaEvents.LOCK_EXPIRED, move.saga.lastError, now, trace)
+                    saga = move.saga
+                    continue
                 }
-                // CHECKING: its timeout check, claimed below. Unless a signal arrived during a check that then
-                // failed: it was stored, and answers what the check would look up again.
-                else -> consumeStored(saga, def, signalStep, ctx, now, trace, chained)?.let { return it }
+                is Move.Cancelled -> {
+                    save(move.saga, now)
+                    log(saga.id, saga.stepIndex, null, SagaEvents.CANCELLED, move.saga.cancellation?.reason, now, trace)
+                    saga = move.saga
+                    continue
+                }
+                is Move.NothingToUndo -> {
+                    write(move.effects, saga, now) { stepName(saga) }
+                    save(move.saga, now)
+                    log(saga.id, saga.stepIndex, stepName(saga), SagaEvents.NOTHING_TO_UNDO, null, now, trace)
+                    saga = move.saga
+                    continue
+                }
+                is Move.Act -> move.saga
             }
-        }
-        return when (val claim = machine.claim(saga, step, now)) {
-            is Claim.KeyExpired -> {
-                save(claim.saga, now)
-                log(saga.id, saga.stepIndex, step.name, SagaEvents.KEY_EXPIRED, claim.saga.lastError, now, trace)
-                Cycle.Rest(claim.saga)
+            val def = definition(acting.type)
+            val step = def.stepAt(acting.stepIndex)
+            // Decoded before anything is called: data that cannot be read throws here, and the transaction
+            // rolls back. resumeDue then postpones the saga (another version of the code may read it).
+            val ctx = context(acting, def)
+            val signalStep = if (step is SignalStep<*, *> && acting is SagaPhase.Running) def.signalStepAt(acting.stepIndex) else null
+            if (signalStep != null && acting.step is StepState.Waiting) {
+                // Its timeout passed without the signal: the check decides, claimed below.
+                log(acting.id, acting.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
+                acting = machine.timedOut(acting, signalStep)
+            } else if (signalStep != null) {
+                // READY, to start waiting; or CHECKING, its timeout check to claim. Either way, a signal received
+                // earlier answers first (during a check that then failed, it answers what the check looks up).
+                val stored = repository.signal(acting.id, signalStep.signal)
+                if (stored != null && afterChange) {
+                    save(acting, now)
+                    return Cycle.ClaimAgain(acting)
+                }
+                if (stored != null) {
+                    saga = consumeStored(acting, def, signalStep, ctx, stored, now, trace)
+                    afterChange = true
+                    continue
+                }
+                if (acting.step is StepState.Ready) return Cycle.Rest(startWaiting(acting, signalStep, now, trace))
             }
-            is Claim.Call -> {
-                save(claim.saga, now)
-                val key = machine.keyOf(claim.saga, step.name, claim.action)
-                Cycle.Call(Work(claim.saga, step, claim.action, ctx.forCall(key), trace, claim.replay, unclaimed = saga))
+            return when (val claim = machine.claim(acting, step, now)) {
+                is Claim.KeyExpired -> {
+                    save(claim.saga, now)
+                    log(acting.id, acting.stepIndex, step.name, SagaEvents.KEY_EXPIRED, claim.saga.lastError, now, trace)
+                    Cycle.Rest(claim.saga)
+                }
+                is Claim.Call -> {
+                    save(claim.saga, now)
+                    val key = machine.keyOf(claim.saga, step.name, claim.action)
+                    Cycle.Call(Work(claim.saga, step, claim.action, ctx.forCall(key), trace, claim.replay, unclaimed = acting))
+                }
             }
         }
     }
+
+    private fun stepName(saga: SagaPhase): String = definition(saga.type).stepAt(saga.stepIndex).name
 
     /**
      * Outside any transaction: the external call. It is cut [recordMargin] before the step's lock

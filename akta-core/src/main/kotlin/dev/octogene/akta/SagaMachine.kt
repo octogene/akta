@@ -97,10 +97,20 @@ internal sealed interface Claim {
 }
 
 /**
- * [hooks]: which hooks a saga type has. A saga that has the hook of its end goes through FINISHING, which runs it in
- * a transaction of its own; one without it ends at once.
+ * [definitions]: the definition of a saga type, null for a type this engine does not know. Read for a saga's current
+ * step, and for its hooks: a saga that has the hook of its end goes through FINISHING, which runs it in a transaction
+ * of its own; one without it ends at once.
  */
-internal class SagaMachine(private val config: SagaConfig, private val hooks: (type: String) -> Hooks) {
+internal class SagaMachine(private val config: SagaConfig, private val definitions: (type: String) -> SagaDefinition<*>?) {
+    private fun definition(type: String): SagaDefinition<*> =
+        definitions(type) ?: throw IllegalArgumentException("Unknown saga type: $type")
+
+    /** The step [r] is on. Throws for a type this engine does not know, or a step its definition no longer has. */
+    private fun stepOf(r: SagaPhase): SagaStep<*, *> = definition(r.type).steps[r.stepIndex]
+
+    /** A type this engine does not know is taken to have both hooks: it then waits in FINISHING for an engine that does. */
+    private fun hooks(type: String): Hooks = definitions(type)?.hooks ?: Hooks(completed = true, failed = true)
+
     /** A new saga, due at once on its first step. */
     fun created(id: Uuid, type: String, key: String, input: String?, traceparent: String?, now: Instant): Running =
         Running(
@@ -237,14 +247,8 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
 
     // ---- Manual actions: each checks the saga can take it (IllegalArgumentException), then decides -----------
 
-    /** See [SagaEngine.retry]. [stepOf] gives the current step; [signalStored] whether a signal of a name was received. */
-    fun retry(
-        r: SagaPhase,
-        newKey: Boolean,
-        now: Instant,
-        stepOf: () -> SagaStep<*, *>,
-        signalStored: (signal: String) -> Boolean,
-    ): Decision {
+    /** See [SagaEngine.retry]. [signalStored]: whether a signal of a name was received. */
+    fun retry(r: SagaPhase, newKey: Boolean, now: Instant, signalStored: (signal: String) -> Boolean): Decision {
         val p = r as? Unfinished
         val stuck = p?.step as? StepState.Stuck
         require(p != null && stuck != null) { "Saga ${r.id} is not stuck" }
@@ -254,7 +258,7 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
                 "then retry with newKey = true (or markDone, or abort)"
         }
         val generation = if (newKey) p.key.generation + 1 else p.key.generation
-        val step = if (p is Running) stepOf() else null
+        val step = if (p is Running) stepOf(p) else null
         // An idempotent step whose key was used may be applied: it is replayed, and stays REPLAYING meanwhile.
         val replay = step?.idempotency != null && !newKey && p.key.since != null
         // Stopped by resume failures, not by the step: it resumes as it was.
@@ -341,17 +345,11 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
     // ---- Claims -------------------------------------------------------------------------------------------
 
     /**
-     * The next move on the saga [r], before its step's data is read: a [Move.Rest] or [Move.Act] ends the moves; the
-     * others are saved, then the next move is asked. [definitionOf] is asked once the saga is due (an unknown type
-     * throws there), [stepOf] after a cancellation, [idempotent] only for a forward step whose lock expired.
+     * The next move on the saga [r], before its step's data is read: [Move.Rest], [Move.Act], [Move.Finish] and
+     * [Move.NoSignal] end the moves; the others are saved, then the next move is asked. The definition is only read
+     * once it is needed: a saga at rest, or a compensation whose lock expired, never throws for an unknown type.
      */
-    fun move(
-        r: SagaPhase,
-        now: Instant,
-        definitionOf: () -> SagaDefinition<*>,
-        stepOf: () -> SagaStep<*, *>,
-        idempotent: () -> Boolean,
-    ): Move {
+    fun move(r: SagaPhase, now: Instant): Move {
         if (r !is Unfinished || r.step is StepState.Stuck) return Move.Rest(r)
         // Its steps are done: only its hook is left, in a transaction of its own.
         if (r is Finishing) return if (r.due <= now) Move.Finish(r) else Move.Rest(r)
@@ -359,18 +357,18 @@ internal class SagaMachine(private val config: SagaConfig, private val hooks: (t
         if (inFlight is StepState.InFlight) {
             if (inFlight.lockedUntil > now) return Move.Rest(r)                // a call is in flight elsewhere
             // Saved and logged; then the next move, at the same time: it rests if the saga is stuck or not due yet.
-            return Move.LockExpired(lockExpired(r, now, idempotent))
+            return Move.LockExpired(lockExpired(r, now) { stepOf(r).idempotency != null })
         }
         if (r.due > now) return Move.Rest(r)
         // Every move from here saves the saga: if this transaction commits, the saga could be run, which ends a
         // series of resume failures.
         val saga = if (r.resumeFailures != 0) r.with(resumeFailures = 0) else r
-        definitionOf()
+        definition(saga.type)                                           // an unknown type throws here, once due
         // A cancellation that waited for a call to end: compensate now that none is in flight. Before the data is
         // decoded: the claim decodes it, in this same transaction.
         val cancelled = cancelIfRequested(saga, now)
         if (cancelled !== saga) return Move.Cancelled(cancelled)
-        val step = stepOf()
+        val step = stepOf(saga)
         // A step with nothing to undo: marked undone at once, no call, and on to the previous one, all in this
         // transaction (usually the one that recorded the refusal or the previous undo).
         if (saga is Compensating && !step.compensates) {

@@ -7,6 +7,7 @@ import kotlin.test.assertNull
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
+import kotlin.reflect.typeOf
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
@@ -17,7 +18,6 @@ import kotlin.uuid.Uuid
  */
 class SagaMachineTest {
     private val config = SagaConfig(maxAttempts = 3)
-    private val machine = SagaMachine(config) { Hooks(completed = false, failed = false) }
     private val now = Instant.parse("2026-11-25T10:00:00Z")
     private val call = object : SagaStep<Unit, String> {
         override val name = "call"
@@ -30,6 +30,14 @@ class SagaMachineTest {
         override val idempotency = Idempotency(1.hours)
         override suspend fun execute(ctx: SagaContext<Unit>) = "out"
     }
+
+    /** A machine that knows the type "T", with these steps and no hooks. */
+    private fun machine(vararg steps: SagaStep<Unit, *>): SagaMachine {
+        val definition = SagaDefinition("T", null, steps.toList())
+        return SagaMachine(config) { definition }
+    }
+
+    private val machine = machine(call, idempotentCall)
 
     private fun saga(stepIndex: Int = 0, status: StepStatus = StepStatus.READY, attempts: Int = 1) = SagaRecord(
         id = Uuid.parse("01900000-0000-7000-8000-000000000001"), type = "T", key = "k", state = SagaState.RUNNING,
@@ -129,10 +137,10 @@ class SagaMachineTest {
 
     @Test
     fun `a manual action refused leaves the decision unmade`() {
-        assertFailsWith<IllegalArgumentException> { machine.retry(saga().phase(), newKey = false, now, { call }) { false } }
+        assertFailsWith<IllegalArgumentException> { machine.retry(saga().phase(), newKey = false, now) { false } }
         val expired = stuck(saga(), StuckReason.KEY_EXPIRED, "forgotten").phase()
-        assertFailsWith<IllegalArgumentException> { machine.retry(expired, newKey = false, now, { call }) { false } }
-        assertEquals(1, machine.retry(expired, newKey = true, now, { call }) { false }.record.keyGeneration)
+        assertFailsWith<IllegalArgumentException> { machine.retry(expired, newKey = false, now) { false } }
+        assertEquals(1, machine.retry(expired, newKey = true, now) { false }.record.keyGeneration)
 
         val refused = stuck(saga(), StuckReason.RECORD_FAILED, "hook").copy(failureReason = "refused").phase()
         assertFailsWith<IllegalArgumentException> { machine.checkMarkDone(refused) }
@@ -148,15 +156,16 @@ class SagaMachineTest {
             override val signal = "payment"
             override val timeout = 1.hours
             override val checksOnTimeout = true
-            override val outputType = null
+            override val outputType = typeOf<String>()
         }
         val stopped = stuck(saga().copy(nextAttemptAt = deadline), StuckReason.RESUME_FAILING, "unreadable")
             .copy(stuckFrom = StepStatus.WAITING).phase()
 
-        val waiting = machine.retry(stopped, newKey = false, now, { signalStep }) { false }.record
+        val machine = machine(signalStep)
+        val waiting = machine.retry(stopped, newKey = false, now) { false }.record
         assertEquals(StepStatus.WAITING, waiting.stepStatus)
         assertEquals(deadline, waiting.nextAttemptAt)
-        assertEquals(StepStatus.READY, machine.retry(stopped, newKey = false, now, { signalStep }) { true }.record.stepStatus)
+        assertEquals(StepStatus.READY, machine.retry(stopped, newKey = false, now) { true }.record.stepStatus)
     }
 
     @Test
