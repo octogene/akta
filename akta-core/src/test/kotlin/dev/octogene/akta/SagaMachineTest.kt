@@ -37,8 +37,16 @@ class SagaMachineTest {
         lastError = "earlier", traceparent = null, createdAt = now,
     )
 
+    /** A row in, typed as the engine reads it. */
+    private fun SagaRecord.typed() = phase() as SagaPhase.Unfinished
+
+    /** The row a decision writes. */
+    private val Decision.record get() = saga.record()
+
     private fun decide(outcome: Outcome, r: SagaRecord = saga(), step: SagaStep<*, *> = call, steps: Int = 2, replay: Boolean = false) =
-        machine.decide(r, r.checkFailures, outcome, step, steps, replay, unclaimed = r, now)
+        r.typed().let { machine.decide(it, it.checkFailures, outcome, step, steps, replay, unclaimed = it, now) }
+
+    private fun stuck(r: SagaRecord, reason: StuckReason, error: String) = machine.stuck(r.typed(), reason, error, now).record()
 
     @Test
     fun `a step done saves its output and moves on, or completes the saga at the last step`() {
@@ -104,7 +112,9 @@ class SagaMachineTest {
     fun `an expired lock is checked, replayed, run again, or stopped after too many checks`() {
         val since = now - 1.minutes
         fun expired(r: SagaRecord, idempotent: Boolean = false) =
-            machine.lockExpired(r.copy(stepStatus = StepStatus.IN_PROGRESS, lockedUntil = since, callAction = r.callAction ?: CallAction.EXECUTE), since, now) { idempotent }
+            machine.lockExpired(
+                r.copy(stepStatus = StepStatus.IN_PROGRESS, lockedUntil = since, callAction = r.callAction ?: CallAction.EXECUTE).typed(), now,
+            ) { idempotent }.record()
 
         assertEquals(since + config.settleDelay, expired(saga()).nextAttemptAt)
         assertEquals("Lock expired during the check", expired(saga().copy(checkFailures = 1, callAction = CallAction.CHECK)).lastError)
@@ -119,12 +129,12 @@ class SagaMachineTest {
 
     @Test
     fun `a manual action refused leaves the decision unmade`() {
-        assertFailsWith<IllegalArgumentException> { machine.retry(saga(), newKey = false, now, { call }) { false } }
-        val expired = machine.stuck(saga(), StuckReason.KEY_EXPIRED, "forgotten", now)
+        assertFailsWith<IllegalArgumentException> { machine.retry(saga().phase(), newKey = false, now, { call }) { false } }
+        val expired = stuck(saga(), StuckReason.KEY_EXPIRED, "forgotten").phase()
         assertFailsWith<IllegalArgumentException> { machine.retry(expired, newKey = false, now, { call }) { false } }
         assertEquals(1, machine.retry(expired, newKey = true, now, { call }) { false }.record.keyGeneration)
 
-        val refused = machine.stuck(saga(), StuckReason.RECORD_FAILED, "hook", now).copy(failureReason = "refused")
+        val refused = stuck(saga(), StuckReason.RECORD_FAILED, "hook").copy(failureReason = "refused").phase()
         assertFailsWith<IllegalArgumentException> { machine.checkMarkDone(refused) }
         assertFailsWith<IllegalArgumentException> { machine.checkAbort(refused, currentStepApplied = true) }
         machine.checkAbort(refused, currentStepApplied = false)
@@ -140,8 +150,8 @@ class SagaMachineTest {
             override val checksOnTimeout = true
             override val outputType = null
         }
-        val stopped = machine.stuck(saga().copy(nextAttemptAt = deadline), StuckReason.RESUME_FAILING, "unreadable", now)
-            .copy(stuckFrom = StepStatus.WAITING)
+        val stopped = stuck(saga().copy(nextAttemptAt = deadline), StuckReason.RESUME_FAILING, "unreadable")
+            .copy(stuckFrom = StepStatus.WAITING).phase()
 
         val waiting = machine.retry(stopped, newKey = false, now, { signalStep }) { false }.record
         assertEquals(StepStatus.WAITING, waiting.stepStatus)
@@ -153,25 +163,28 @@ class SagaMachineTest {
     fun `a claim is ours only if the same call is in flight, not the undo claimed at the same instant`() {
         val lock = now + 35.seconds
         val execution = saga(stepIndex = 1, status = StepStatus.IN_PROGRESS).copy(lockedUntil = lock, callAction = CallAction.EXECUTE)
-        assertEquals(true, machine.stillClaimed(execution, execution))
+        assertEquals(true, machine.stillClaimed(execution.phase(), execution.typed()))
         // Its outcome was recorded, the saga cancelled meanwhile undoes it, and the undo was claimed in the same
         // transaction, at the same time, which committed but was reported as failed.
         val undo = execution.copy(state = SagaState.COMPENSATING, callAction = CallAction.COMPENSATE, failureReason = "Cancelled: x")
-        assertEquals(false, machine.stillClaimed(undo, execution))
-        assertEquals(false, machine.stillClaimed(execution.copy(callAction = CallAction.CHECK), execution))
+        assertEquals(false, machine.stillClaimed(undo.phase(), execution.typed()))
+        assertEquals(false, machine.stillClaimed(execution.copy(callAction = CallAction.CHECK).phase(), execution.typed()))
     }
 
     @Test
     fun `a row the engine must never write is refused, not decided on`() {
-        assertFailsWith<IllegalStateException> { machine.stuck(saga(status = StepStatus.IN_PROGRESS), StuckReason.CANNOT_TELL, "x", now) }
-        assertFailsWith<IllegalStateException> { machine.next(saga().copy(failureReason = "refused"), 2, now) }
+        // A call in flight without its lock, and a refusal kept by a running saga that is not stuck.
+        assertFailsWith<IllegalStateException> { saga(status = StepStatus.IN_PROGRESS).phase() }
+        assertFailsWith<IllegalStateException> { saga().copy(failureReason = "refused").phase() }
+        // A decision the phase it is given cannot take.
+        assertFailsWith<IllegalStateException> { machine.next(saga().copy(state = SagaState.COMPENSATING, failureReason = "x").typed(), 2, now) }
     }
 
     @Test
     fun `a second cancellation changes nothing`() {
-        val first = machine.cancel(saga(status = StepStatus.IN_PROGRESS).copy(lockedUntil = now, callAction = CallAction.EXECUTE), "first", now).record
+        val first = machine.cancel(saga(status = StepStatus.IN_PROGRESS).copy(lockedUntil = now, callAction = CallAction.EXECUTE).phase(), "first", now).record
         assertEquals("first", first.cancelReason)                       // a call in flight: compensates later
         assertEquals(SagaState.RUNNING, first.state)
-        assertEquals("first", machine.cancel(first, "second", now).record.cancelReason)
+        assertEquals("first", machine.cancel(first.phase(), "second", now).record.cancelReason)
     }
 }

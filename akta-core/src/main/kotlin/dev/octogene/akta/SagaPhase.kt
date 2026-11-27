@@ -67,6 +67,10 @@ internal sealed interface StepState {
 
 internal sealed interface SagaPhase {
     val identity: Identity
+    val id: Uuid get() = identity.id
+    val type: String get() = identity.type
+    /** The state the row stores: the phase itself, or for a finished saga how it ended. */
+    val state: SagaState
     val stepIndex: Int
     val attempts: Int
     val lastError: String?
@@ -119,7 +123,9 @@ internal sealed interface SagaPhase {
         override val cancellation: Cancellation?,
         override val lastError: String?,
         val refusal: String?,
-    ) : Unfinished
+    ) : Unfinished {
+        override val state: SagaState get() = SagaState.RUNNING
+    }
 
     /** Undoing its completed steps, last to first, because of [failureReason]. */
     data class Compensating(
@@ -133,7 +139,9 @@ internal sealed interface SagaPhase {
         override val cancellation: Cancellation?,
         override val lastError: String?,
         val failureReason: String,
-    ) : Unfinished
+    ) : Unfinished {
+        override val state: SagaState get() = SagaState.COMPENSATING
+    }
 
     /**
      * Every step done ([failureReason] null), or every completed step undone: only its hook is left to run, in a
@@ -149,6 +157,7 @@ internal sealed interface SagaPhase {
         override val lastError: String?,
         val failureReason: String?,
     ) : Unfinished {
+        override val state: SagaState get() = SagaState.FINISHING
         override val checkFailures: Int get() = 0
         override val key: KeyState get() = NO_KEY
         /** What it ends as once its hook ran. */
@@ -168,7 +177,7 @@ internal sealed interface SagaPhase {
         override val lastError: String?,
         val failureReason: String?,
     ) : SagaPhase {
-        val state: SagaState get() = if (failureReason == null) SagaState.COMPLETED else SagaState.FAILED
+        override val state: SagaState get() = if (failureReason == null) SagaState.COMPLETED else SagaState.FAILED
         override val due: Instant get() = lastDue
     }
 
@@ -276,14 +285,13 @@ internal fun StepState.dueAt(due: Instant): StepState = when (this) {
 }
 
 /** CHECKING or REPLAYING: the outcome of the last call is unknown, it may have been applied. */
+internal val StepState.outcomeUnknown: Boolean get() = this is StepState.Checking || this is StepState.Replaying
+
+/** CHECKING or REPLAYING: the outcome of the last call is unknown, it may have been applied. */
 internal val StepStatus.outcomeUnknown: Boolean get() = this == StepStatus.CHECKING || this == StepStatus.REPLAYING
 
 /** The typed form of this row: see [SagaPhase.of]. */
 internal fun SagaRecord.phase(): SagaPhase = SagaPhase.of(this)
-
-/** The typed form of this row, which must be an unfinished saga's. */
-internal fun SagaRecord.unfinished(): SagaPhase.Unfinished =
-    phase() as? SagaPhase.Unfinished ?: error("Saga $id is $state: it has no step to act on")
 
 private fun SagaRecord.withStep(step: StepState): SagaRecord = when (step) {
     is StepState.Ready, is StepState.Waiting, is StepState.Checking, is StepState.Replaying ->
