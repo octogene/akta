@@ -121,35 +121,25 @@ public class SagaEngine(
         // too: a transaction that commits while its caller is cancelled must still lead to the call.
         val caller = currentCoroutineContext()
         caller.ensureActive()
-        var cycle = if (currentTime() < deadline) {
+        var cycle: Cycle = if (currentTime() < deadline) {
             withContext(NonCancellable) { claimTx(id, skipLocked, trace) }
         } else {
-            Cycle(saga = null, next = null)
+            Cycle.Rest(saga = null)
         }
         while (true) {
-            // The hook runs in a transaction of its own, after the outcome that ended the steps is committed.
-            if (cycle.finish) {
-                cycle = withContext(NonCancellable) { finish(id, trace) }
-                continue
-            }
-            // A stored signal to consume after an outcome or another signal: in a transaction of its own, so that
-            // what onSignal throws never rolls back what was recorded.
-            if (cycle.claimAgain) {
-                cycle = withContext(NonCancellable) { claimTx(id, skipLocked = false, trace) }
-                continue
-            }
-            val work = cycle.next ?: break
-            cycle = withContext(NonCancellable) {
-                val outcome = perform(work)
-                // Records this outcome and, in the same transaction, claims the next step if it is due,
-                // unless the caller was cancelled meanwhile.
-                val claimUntil = deadline.takeIf { caller.isActive }
-                try {
-                    tx { record(work, outcome, claimUntil) }
-                } catch (e: Throwable) {
-                    if (e.isFatal()) throw e
-                    recordAfterFailure(work, outcome, e)
+            cycle = when (val current = cycle) {
+                is Cycle.Rest -> break
+                is Cycle.Call -> withContext(NonCancellable) {
+                    val outcome = perform(current.work)
+                    // Records this outcome and, in the same transaction, claims the next step if it is due,
+                    // unless the caller was cancelled meanwhile.
+                    recordTx(current.work, outcome, claimUntil = deadline.takeIf { caller.isActive })
                 }
+                // The hook runs in a transaction of its own, after the outcome that ended the steps is committed.
+                is Cycle.Finish -> withContext(NonCancellable) { finish(id, trace) }
+                // A stored signal to consume after an outcome or another signal: in a transaction of its own, so
+                // that what onSignal throws never rolls back what was recorded.
+                is Cycle.ClaimAgain -> withContext(NonCancellable) { claimTx(id, skipLocked = false, trace) }
             }
         }
         caller.ensureActive()
@@ -166,6 +156,25 @@ public class SagaEngine(
         }
 
     /**
+     * Transaction 2: records [outcome]. While the row is locked, it also claims the next step if it is due and
+     * [claimUntil] has not passed: one transaction instead of two. With [claimUntil] null, it only records.
+     */
+    private suspend fun recordTx(work: Work, outcome: Outcome, claimUntil: Instant?): Cycle =
+        try {
+            tx {
+                val recorded = record(work, outcome) ?: return@tx Cycle.Rest(saga = null)
+                if (claimUntil != null && currentTime() < claimUntil) {
+                    claimLocked(recorded, work.trace, chained = true)
+                } else {
+                    Cycle.Rest(recorded)
+                }
+            }
+        } catch (e: Throwable) {
+            if (e.isFatal()) throw e
+            recordAfterFailure(work, outcome, e)
+        }
+
+    /**
      * The transaction that recorded [outcome] (and claimed the next step) was rolled back. First, record
      * the outcome alone: if only the claim of the next step failed, the call's result must not be lost.
      * If that fails too (a constraint, the database…), the saga becomes STUCK with the
@@ -173,12 +182,12 @@ public class SagaEngine(
      */
     private suspend fun recordAfterFailure(work: Work, outcome: Outcome, error: Throwable): Cycle =
         try {
-            Cycle(tx { record(work, outcome, claimUntil = null) }.saga, next = null)
+            Cycle.Rest(tx { record(work, outcome) })
         } catch (e: Throwable) {
             if (e is CancellationException || e.isFatal()) throw e
             // e, not error: what stopped the outcome alone from being recorded. The first failure may have been
             // a passing one (a database error before onSignal ever ran).
-            Cycle(tx { recordFailed(work, outcome, e) }, next = null)
+            Cycle.Rest(tx { recordFailed(work, outcome, e) })
         }
 
     /**
@@ -485,7 +494,7 @@ public class SagaEngine(
         val waiting = machine.waiting(r, step, now)
         save(waiting, now)
         log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_STARTED, "signal '${step.signal}' until ${waiting.due}", now, trace)
-        return Cycle(waiting, next = null)
+        return Cycle.Rest(waiting)
     }
 
     /**
@@ -505,7 +514,7 @@ public class SagaEngine(
         val stored = repository.signal(r.id, step.signal) ?: return null
         if (chained) {
             save(r, now)
-            return Cycle(r, next = null, claimAgain = true)
+            return Cycle.ClaimAgain(r)
         }
         val value = decode(stored, checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
         val updated = applySignal(r, def, step, ctx, value, stored, now)
@@ -577,13 +586,13 @@ public class SagaEngine(
      * stops, the signal kept.
      */
     private fun blockOnStoredSignal(id: Uuid, failure: SignalFailed, trace: String?): Cycle {
-        val r = lock(id) ?: return Cycle(saga = null, next = null)
-        val step = definition(r.type).steps[r.stepIndex] as? SignalStep<*, *> ?: return Cycle(r, next = null)
+        val r = lock(id) ?: return Cycle.Rest(saga = null)
+        val step = definition(r.type).steps[r.stepIndex] as? SignalStep<*, *> ?: return Cycle.Rest(r)
         val now = currentTime()
-        val blocked = machine.blockedByStoredSignal(r, failure.message, now) ?: return Cycle(r, next = null)
+        val blocked = machine.blockedByStoredSignal(r, failure.message, now) ?: return Cycle.Rest(r)
         save(blocked, now)
         log(r.id, r.stepIndex, step.name, SagaEvents.RECORD_FAILED, blocked.lastError, now, trace)
-        return Cycle(blocked, next = null)
+        return Cycle.Rest(blocked)
     }
 
     /**
@@ -707,17 +716,29 @@ public class SagaEngine(
     private fun describe(work: Work, outcome: Outcome): String =
         listOfNotNull(eventOf(work, outcome), outcome.detail).joinToString(" ")
 
-    /**
-     * What a transaction leaves: the saga as saved ([saga], or null when it is locked elsewhere or
-     * missing), and the step it claimed, if any ([next]): the call to make before the next transaction. [finish]: the
-     * saga's hook is due instead, to run in a transaction of its own. [claimAgain]: a stored signal is due, to consume
-     * in a claim of its own.
-     */
-    private class Cycle(val saga: SagaPhase?, val next: Work?, val finish: Boolean = false, val claimAgain: Boolean = false)
+    /** What a transaction leaves for [run] to do next, and the saga as it saved it. */
+    private sealed interface Cycle {
+        /** The saga as saved: null when it is locked elsewhere or missing. */
+        val saga: SagaPhase?
+
+        /** Nothing to do now: the saga is finished, stuck, waiting, not due, or locked elsewhere. */
+        class Rest(override val saga: SagaPhase?) : Cycle
+
+        /** A call claimed: to make outside any transaction, then record its outcome. */
+        class Call(val work: Work) : Cycle {
+            override val saga: SagaPhase get() = work.saga
+        }
+
+        /** The saga's hook is due, to run in a transaction of its own. */
+        class Finish(override val saga: SagaPhase.Finishing) : Cycle
+
+        /** A stored signal is due, to consume in a claim of its own. */
+        class ClaimAgain(override val saga: SagaPhase) : Cycle
+    }
 
     /** Transaction 1: claims the current step, if there is something to do now. */
     private fun claim(id: Uuid, skipLocked: Boolean, trace: String?): Cycle {
-        val r = lock(id, skipLocked) ?: return Cycle(saga = null, next = null)
+        val r = lock(id, skipLocked) ?: return Cycle.Rest(saga = null)
         return claimLocked(r, trace)
     }
 
@@ -735,7 +756,7 @@ public class SagaEngine(
             when (val move = machine.move(r, now, definitionOf = { definition(r.type).also { def = it } }, stepOf = { def.stepAt(r.stepIndex) }) {
                 definition(r.type).stepAt(r.stepIndex).idempotency != null
             }) {
-                is Move.Rest -> return Cycle(move.saga, next = null)
+                is Move.Rest -> return Cycle.Rest(move.saga)
                 is Move.Act -> { acting = move.saga; break }
                 is Move.LockExpired -> {                         // the process died during the call: on, at the same time
                     r = move.saga
@@ -755,11 +776,11 @@ public class SagaEngine(
                     r = move.saga
                     now = currentTime()
                 }
-                is Move.Finish -> return Cycle(move.saga, next = null, finish = true)
+                is Move.Finish -> return Cycle.Finish(move.saga)
                 is Move.NoSignal -> {
                     save(move.saga, now)
                     log(r.id, r.stepIndex, def.stepAt(r.stepIndex).name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
-                    return Cycle(move.saga, next = null)
+                    return Cycle.Rest(move.saga)
                 }
             }
         }
@@ -787,12 +808,12 @@ public class SagaEngine(
             is Claim.KeyExpired -> {
                 save(claim.saga, now)
                 log(saga.id, saga.stepIndex, step.name, SagaEvents.KEY_EXPIRED, claim.saga.lastError, now, trace)
-                Cycle(claim.saga, next = null)
+                Cycle.Rest(claim.saga)
             }
             is Claim.Call -> {
                 save(claim.saga, now)
                 val key = machine.keyOf(claim.saga, step.name, claim.action)
-                Cycle(claim.saga, Work(claim.saga, step, claim.action, ctx.forCall(key), trace, claim.replay, unclaimed = saga))
+                Cycle.Call(Work(claim.saga, step, claim.action, ctx.forCall(key), trace, claim.replay, unclaimed = saga))
             }
         }
     }
@@ -883,16 +904,15 @@ public class SagaEngine(
     }
 
     /**
-     * Transaction 2: records the outcome and decides what comes next. While the row is locked, it also
-     * claims the next step if it is due and [claimUntil] has not passed: one transaction instead of two.
-     * With [claimUntil] null, it only records.
+     * Records the outcome of [work]'s call and decides what comes next: the saga as saved. Null when the outcome is
+     * not recorded: the saga is gone, or the call is no longer the one in flight (logged LATE_RESULT_IGNORED).
      */
-    private fun record(work: Work, reported: Outcome, claimUntil: Instant?): Cycle {
-        val current = lock(work.saga.id) ?: return Cycle(saga = null, next = null)
+    private fun record(work: Work, reported: Outcome): SagaPhase? {
+        val current = lock(work.saga.id) ?: return null
         val now = currentTime()
         if (!machine.stillClaimed(current, work.saga)) {
             log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, reported), now)
-            return Cycle(current, next = null)
+            return null
         }
         val outcome = reported
         val def = definition(current.type)
@@ -913,11 +933,7 @@ public class SagaEngine(
         }
         // Logged on the step that ran, not on the one the saga moved to.
         log(work, eventOf(work, outcome), detail, now)
-        return if (claimUntil != null && currentTime() < claimUntil) {
-            claimLocked(updated, work.trace, chained = true)
-        } else {
-            Cycle(updated, next = null)
-        }
+        return updated
     }
 
     /**
@@ -974,13 +990,13 @@ public class SagaEngine(
             tx { finishLocked(id, trace) }
         } catch (e: Throwable) {
             if (e is CancellationException || e.isFatal()) throw e
-            Cycle(tx { hookFailedLocked(id, e, trace) }, next = null)
+            Cycle.Rest(tx { hookFailedLocked(id, e, trace) })
         }
 
     private fun finishLocked(id: Uuid, trace: String?): Cycle {
-        val r = lock(id) ?: return Cycle(saga = null, next = null)
+        val r = lock(id) ?: return Cycle.Rest(saga = null)
         val now = currentTime()
-        if (r !is SagaPhase.Finishing || r.step !is StepState.Ready || r.due > now) return Cycle(r, next = null)
+        if (r !is SagaPhase.Finishing || r.step !is StepState.Ready || r.due > now) return Cycle.Rest(r)
         val def = definition(r.type)
         val ended = machine.finished(r)
         save(ended, now)
@@ -990,7 +1006,7 @@ public class SagaEngine(
         txEvents.get()?.let(::writeUnsaved)
         val ctx = context(ended, def)
         if (ended.state == SagaState.COMPLETED) def.onCompleted(ctx) else def.onFailed(ctx)
-        return Cycle(ended, next = null)
+        return Cycle.Rest(ended)
     }
 
     private fun hookFailedLocked(id: Uuid, error: Throwable, trace: String?): SagaPhase? {
