@@ -22,6 +22,17 @@ import kotlin.time.Instant
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
+/*
+ * How the engine is put together, for whoever works on it:
+ *
+ * - SagaEngine (this file): the public API, and the cycle of each step: claim, call, record, finish.
+ * - SagaMachine: every decision on a saga, pure. It takes a SagaPhase and returns the SagaPhase it becomes.
+ * - SagaPhase: a saga's row, typed, so that a combination the engine must never write cannot be built.
+ * - SagaStore: the transactions, the row read as a phase and saved back, the log, and listener events.
+ * - SagaSignals: signals, delivered by signal() and consumed through onSignal when the saga runs.
+ * - SagaManualActions: retry, markDone, abort, markCompensated and cancel.
+ */
+
 /**
  * Runs sagas.
  *
@@ -124,12 +135,12 @@ public class SagaEngine(
      * a human) or [deadline] passes. Returns its state: an HTTP handler can map it to 201, 422 or 202.
      */
     public suspend fun run(id: Uuid, deadline: Instant, skipLocked: Boolean = false): SagaRecord {
-        val trace = traceId()      // here, on the caller's coroutine: transactions may switch threads
-        // A step, once claimed, is called and its outcome recorded even if the caller is cancelled (an HTTP
-        // client that disconnects, a shutdown): abandoned, it would stay IN_PROGRESS until its lock expires,
-        // then count as an unknown outcome, to check or stuck. The caller's cancellation only stops the next
-        // claim; run() then throws it. The wait it adds is bounded by callLock. The claim itself is shielded
-        // too: a transaction that commits while its caller is cancelled must still lead to the call.
+        val trace = traceId()      // read here, on the caller's coroutine: transactions may switch threads
+        // Once a step is claimed, it is called and its outcome recorded even if the caller is cancelled (an HTTP
+        // client disconnects, the pod shuts down). Abandoned, the step would stay IN_PROGRESS until its lock
+        // expires, then count as an unknown outcome. So each transaction and call below runs NonCancellable, the
+        // claim included: once its transaction commits, the call must follow. The caller's cancellation only stops
+        // the next claim, and run() rethrows it at the end, at most callLock later.
         val caller = currentCoroutineContext()
         caller.ensureActive()
         var cycle: Cycle = if (store.now() < deadline) {
@@ -142,23 +153,27 @@ public class SagaEngine(
                 is Cycle.Rest -> break
                 is Cycle.Call -> withContext(NonCancellable) {
                     val outcome = perform(current.work)
-                    // Records this outcome and, in the same transaction, claims the next step if it is due,
-                    // unless the caller was cancelled meanwhile.
+                    // Record the outcome. In the same transaction, claim the next step if it is due, unless the
+                    // caller was cancelled meanwhile.
                     recordTx(current.work, outcome, claimUntil = deadline.takeIf { caller.isActive })
                 }
-                // The hook runs in a transaction of its own, after the outcome that ended the steps is committed.
+                // The hook runs in a transaction of its own, once the outcome that ended the steps is committed.
                 is Cycle.Finish -> withContext(NonCancellable) { finish(id, trace) }
-                // A stored signal to consume after an outcome or another signal: in a transaction of its own, so
-                // that what onSignal throws never rolls back what was recorded.
+                // A stored signal is due after an outcome or another signal. It gets a transaction of its own, so
+                // that onSignal throwing cannot roll back what was just recorded.
                 is Cycle.ClaimAgain -> withContext(NonCancellable) { claimTx(id, skipLocked = false, trace) }
             }
         }
         caller.ensureActive()
-        // Read again only when no transaction gave us the saga (deadline already passed, row locked elsewhere).
+        // Read the saga again only if no transaction returned it (deadline already passed, row locked elsewhere,
+        // a late result ignored).
         return cycle.saga?.record() ?: store.tx { repository.find(id) } ?: error("Saga $id not found")
     }
 
-    /** A claim, in a transaction; if onSignal threw on a stored signal, the saga stops instead, the signal kept. */
+    /**
+     * Transaction 1: claims the saga's next call. If onSignal threw on a signal stored earlier, the claim rolls back
+     * and a second transaction stops the saga instead, keeping the signal.
+     */
     private suspend fun claimTx(id: Uuid, skipLocked: Boolean, trace: String?): Cycle =
         try {
             store.tx { claim(id, skipLocked, trace) }
@@ -167,7 +182,7 @@ public class SagaEngine(
         }
 
     /**
-     * Transaction 2: records [outcome]. While the row is locked, it also claims the next step if it is due and
+     * Transaction 2: records [outcome]. While the row is locked, it also claims the next step, if it is due and
      * [claimUntil] has not passed: one transaction instead of two. With [claimUntil] null, it only records.
      */
     private suspend fun recordTx(work: Work, outcome: Outcome, claimUntil: Instant?): Cycle =
@@ -186,18 +201,19 @@ public class SagaEngine(
         }
 
     /**
-     * The transaction that recorded [outcome] (and claimed the next step) was rolled back. First, record
-     * the outcome alone: if only the claim of the next step failed, the call's result must not be lost.
-     * If that fails too (a constraint, the database…), the saga becomes STUCK with the
-     * outcome kept for a human: otherwise the step would loop through lock expiry and check, forever.
+     * Called when the transaction that recorded [outcome] (and claimed the next step) was rolled back.
+     *
+     * It first records the outcome alone: if only the claim of the next step failed, the call's result is kept.
+     * If that fails too (a constraint, the database), [recordFailed] stops the saga (STUCK) and keeps the outcome
+     * for a human. Without that, the step would cycle through lock expiry and check forever.
      */
     private suspend fun recordAfterFailure(work: Work, outcome: Outcome, error: Throwable): Cycle =
         try {
             Cycle.Rest(store.tx { record(work, outcome) })
         } catch (e: Throwable) {
             if (e is CancellationException || e.isFatal()) throw e
-            // e, not error: what stopped the outcome alone from being recorded. The first failure may have been
-            // a passing one (a database error before onSignal ever ran).
+            // Report e, not error: e is what stopped the outcome alone from being recorded. The first failure may
+            // have been a passing one (a database error before onSignal ever ran).
             Cycle.Rest(store.tx { recordFailed(work, outcome, e) })
         }
 
@@ -243,11 +259,12 @@ public class SagaEngine(
     }
 
     /**
-     * After [run] threw in [resumeDue], or after a manual action (a database error, a bug…): moves the saga back in the queue,
-     * so that sagas failing on every attempt cannot fill each batch and starve the others. After
-     * [SagaConfig.maxAttempts] such failures in a row, the saga becomes STUCK ([StuckReason.RESUME_FAILING]):
-     * postponed for ever, it would never reach an operator, and would fill its log.
-     * Best effort: if this fails too, the error is already reported by [resumeDue].
+     * Called when [run] threw, in [resumeDue] or after a manual action (a database error, a bug). It moves the saga
+     * back in the queue, so that sagas failing on every attempt cannot fill each batch and starve the others.
+     *
+     * After [SagaConfig.maxAttempts] such failures in a row, the saga becomes STUCK ([StuckReason.RESUME_FAILING]).
+     * Postponed forever, it would never reach an operator, and would fill its log. Best effort: if this fails
+     * too, the error is already reported by [resumeDue].
      */
     private suspend fun postpone(id: Uuid, error: Throwable, trace: String?) {
         try {
@@ -259,8 +276,8 @@ public class SagaEngine(
                 store.log(r.id, r.stepIndex, null, SagaEvents.RESUME_FAILED, error.toString(), now, trace)
             }
         } catch (e: Throwable) {
-            // The database is probably down: nothing more to do here. Any non-fatal error, as in resumeDue:
-            // escaping, it would end the batch (or fail a manual action that is already committed).
+            // The database is probably down: nothing more to do. Swallow any non-fatal error, as resumeDue does:
+            // escaping, it would end the batch, or fail a manual action that is already committed.
             if (e is CancellationException || e.isFatal()) throw e
         }
     }
@@ -480,12 +497,14 @@ public class SagaEngine(
     }
 
     /**
-     * Claims the call of the current step of [current], whose row this transaction has locked, if it is due now. On the
-     * way, each change that calls nothing is saved and logged here: a lock expired, a cancellation, a step with nothing
-     * to undo, a signal step that starts waiting, or consumes a signal received earlier.
+     * Claims the call of [current]'s step, if one is due now. The caller's transaction has locked the row.
      *
-     * [chained]: this transaction already recorded an outcome or applied a signal, which onSignal must not roll back:
-     * a stored signal then waits for a claim of its own ([Cycle.ClaimAgain]).
+     * First it applies every change that needs no call, saving and logging each one: an expired lock, a
+     * cancellation, a step with nothing to undo, a signal step that starts waiting, a signal that arrived earlier.
+     * After each change it looks at the saga again, until the saga rests or a call is claimed.
+     *
+     * [chained] is true when this transaction already recorded an outcome or applied a signal. A stored signal then
+     * waits for a transaction of its own ([Cycle.ClaimAgain]), so that onSignal throwing cannot roll that back.
      */
     private fun claimLocked(current: SagaPhase, trace: String?, chained: Boolean = false): Cycle {
         var saga = current
@@ -523,17 +542,17 @@ public class SagaEngine(
             }
             val def = definition(acting.type)
             val step = def.stepAt(acting.stepIndex)
-            // Decoded before anything is called: data that cannot be read throws here, and the transaction
-            // rolls back. resumeDue then postpones the saga (another version of the code may read it).
+            // Decoded before any call. Data that cannot be read throws here and rolls the transaction back; resumeDue
+            // then postpones the saga, since another version of the code may be able to read it.
             val ctx = context(acting, def)
             val signalStep = if (step is SignalStep<*, *> && acting is SagaPhase.Running) def.signalStepAt(acting.stepIndex) else null
             if (signalStep != null && acting.step is StepState.Waiting) {
-                // Its timeout passed without the signal: the check decides, claimed below.
+                // The timeout passed without the signal: the step's timeout check decides, claimed below.
                 store.log(acting.id, acting.stepIndex, step.name, SagaEvents.WAIT_TIMED_OUT, null, now, trace)
                 acting = machine.timedOut(acting, signalStep)
             } else if (signalStep != null) {
-                // READY, to start waiting; or CHECKING, its timeout check to claim. Either way, a signal received
-                // earlier answers first (during a check that then failed, it answers what the check looks up).
+                // READY (about to wait) or CHECKING (a timeout check to claim). Either way, a signal that already
+                // arrived answers first: it is what the check would look up.
                 val stored = repository.signal(acting.id, signalStep.signal)
                 if (stored != null && afterChange) {
                     store.save(acting, now)
@@ -564,26 +583,25 @@ public class SagaEngine(
     private fun stepName(saga: SagaPhase): String = definition(saga.type).stepAt(saga.stepIndex).name
 
     /**
-     * Outside any transaction: the external call. It is cut [recordMargin] before the step's lock
-     * expires, so that its outcome is recorded while this engine still owns the step: a call still
-     * running after its lock expired could land after another instance has checked it (or re-run a
-     * compensation alongside it). The lock's clock started in the claim transaction, before the call.
+     * The external call, outside any transaction. It is cut off [recordMargin] before the step's lock expires, so
+     * that its outcome is recorded while this engine still owns the step. A call that ran past its lock could land
+     * after another instance already checked the step, or ran its compensation again. The lock was taken in the
+     * claim transaction, so its clock is already running.
      */
     private suspend fun perform(work: Work): Outcome {
         val lockedUntil = (work.saga.step as? StepState.InFlight)?.lockedUntil ?: error("Claimed saga ${work.saga.id} without a lock")
         val budget = lockedUntil - store.now() - recordMargin
-        // A long pause since the claim (GC, a stalled thread) may leave no time at all. withTimeout would
-        // then fail at once, before the step runs, and that would count as a failed call: an attempt
-        // used, an outcome to check. Nothing was called, so the claim is undone instead.
+        // A long pause since the claim (GC, a stalled thread) can leave no time at all. withTimeout would then fail
+        // before the step runs, and count as a failed call (an attempt used, an outcome to check). Nothing was
+        // called, so the claim is undone instead.
         if (budget <= Duration.ZERO) {
             return Outcome.NotCalled("No time left to call before the lock expires (${-budget} late): nothing was called")
         }
         return try {
             withTimeout(budget) { call(work) }
         } catch (e: CancellationException) {
-            // run() calls this shielded from its caller's cancellation, so this is a timeout (ours, or the
-            // step's own): a failed call. Should anything else cancel it, rethrow: the step stays IN_PROGRESS
-            // and its lock will expire.
+            // run() shields this from its caller's cancellation, so this is a timeout, ours or the step's own: a
+            // failed call. If anything else cancelled it, rethrow: the step stays IN_PROGRESS until its lock expires.
             currentCoroutineContext().ensureActive()
             failure(work.action, e)
         } catch (e: Throwable) {
@@ -599,11 +617,13 @@ public class SagaEngine(
         when (work.action) {
             Action.EXECUTE -> done(work, work.step.execute(work.ctx))
             Action.CHECK -> when (val c = work.step.check(work.ctx)) {
-                // A signal step's value: onSignal decides on it in record(), inside the transaction.
+                // A signal step's check found the signal's value: record() stores it as the signal, and onSignal
+                // decides on it at the step's next claim, as for a signal delivered.
                 is CheckResult.Done -> done(work, c.output).let { done ->
                     if (work.step is SignalStep<*, *> && done is Outcome.Done) Outcome.Found(c.output, done) else done
                 }
-                // A signal step found nothing at its timeout: the signal will not come, the saga gives up.
+                // A signal step's check found nothing at its timeout: the signal will not come, so the saga gives up
+                // (unless a signal arrived meanwhile: record() looks).
                 CheckResult.NotDone -> (work.step as? SignalStep<*, *>)
                     ?.let { Outcome.Rejected("No signal '${it.signal}' before the timeout, and the check found none", noSignalFound = true) }
                     ?: Outcome.NotDone
@@ -616,8 +636,8 @@ public class SagaEngine(
         }
 
     /**
-     * The call returned [output]: encode it now, outside any transaction. The call was made, so if the
-     * output cannot be stored the step must not run again: it becomes STUCK for a human.
+     * The call returned [output]: encode it now, outside any transaction. The call was made, so if its output
+     * cannot be stored, the step must not run again: it becomes STUCK (OUTPUT_UNSTORABLE) for a human.
      */
     private fun done(work: Work, output: Any?): Outcome {
         val type = work.step.outputType ?: return Outcome.Done(output = null, logged = null)
@@ -641,16 +661,17 @@ public class SagaEngine(
                 is StepNotSent -> Outcome.NotSent(error)
                 else -> Outcome.Unknown(error)
             }
-            // A check that finds the call was refused (a record of the attempt, REJECTED): the same answer as
-            // execute's StepRejected, so the saga compensates. Anything else: the lookup failed, check again.
+            // A check that finds the call was refused (it throws StepRejected) answers as execute would: the saga
+            // compensates. Any other error means the lookup failed: check again later.
             Action.CHECK -> if (e is StepRejected) Outcome.Rejected(error) else Outcome.CheckFailed(error)
             Action.COMPENSATE -> Outcome.CompensationFailed(error)
         }
     }
 
     /**
-     * Records the outcome of [work]'s call and decides what comes next: the saga as saved. Null when the outcome is
-     * not recorded: the saga is gone, or the call is no longer the one in flight (logged LATE_RESULT_IGNORED).
+     * Records the outcome of [work]'s call and decides what comes next. Returns the saga as saved, or null when
+     * nothing was recorded: the saga is gone, or this call is no longer the one in flight (logged
+     * LATE_RESULT_IGNORED).
      */
     private fun record(work: Work, reported: Outcome): SagaPhase? {
         val current = store.lock(work.saga.id) ?: return null
@@ -663,15 +684,16 @@ public class SagaEngine(
         val def = definition(current.type)
         current as SagaPhase.Unfinished                       // still claimed: its call is in flight
         val r = machine.released(current)
-        // A signal step's check that found nothing, or could not tell: a signal received meanwhile answers instead.
+        // For a signal step's check that found nothing or could not tell: a signal received meanwhile answers instead.
         val signalStored = { signal: String -> repository.signal(r.id, signal) != null }
         val decided = machine.decide(r, current.checkFailures, outcome, work.step, def.steps.size, work.replay, work.unclaimed, now, signalStored)
             .also { store.write(it.effects, r, now) { work.step.name } }.saga
-        // Cancelled while the call was in flight: the call's outcome is recorded, now compensate (it included).
+        // Cancelled while the call was in flight: the outcome is recorded, and the saga now compensates, this step
+        // included if it was applied.
         val updated = machine.cancelIfRequested(decided, now)
         store.save(updated, now)
-        // The new lastError when it changed (it may add "Too many attempts"), else the outcome's own
-        // detail: a repeated error is logged every time, not only the first.
+        // Log the new lastError if it changed (it may add "Too many attempts"), else the outcome's own detail, so
+        // that a repeated error is logged every time, not only the first.
         val detail = when {
             outcome is Outcome.Done || outcome is Outcome.Found -> outcome.detail
             else -> updated.lastError.takeIf { it != current.lastError } ?: outcome.detail
@@ -682,9 +704,9 @@ public class SagaEngine(
     }
 
     /**
-     * Fallback transaction, after [record] was rolled back: the saga becomes STUCK on the step that
-     * ran, for a human to resolve once the cause is fixed (onSignal throwing, a constraint). What the
-     * outcome established is kept, and lastError says which action follows from it:
+     * Last resort, when even the outcome alone could not be recorded (see [recordAfterFailure]). The saga becomes
+     * STUCK (RECORD_FAILED) on the step that ran, for a human to resolve once the cause is fixed. What the outcome
+     * established is kept, and lastError says which action follows from it:
      *
      * - Done: the output is saved with the step's result (never in lastError: it may hold personal
      *   data), and `markDone(id, null)` continues with it.
@@ -715,9 +737,10 @@ public class SagaEngine(
     // ---- Finishing: the hook, in a transaction of its own ---------------------------------------------------
 
     /**
-     * Runs the hook of a finishing saga, in a transaction that also ends it: COMPLETED or FAILED. The outcome that
-     * ended its steps is already committed, so a hook that throws loses nothing: it is tried again after backoff, then
-     * the saga stops (HOOK_FAILED). A transaction that fails for another reason counts the same.
+     * Runs a finishing saga's hook (onCompleted or onFailed) in a transaction that also ends the saga: COMPLETED or
+     * FAILED. The outcome that ended its steps is already committed, so a hook that throws loses nothing. It is
+     * retried after backoff, and after [SagaConfig.maxAttempts] failures the saga stops (HOOK_FAILED). A transaction
+     * that fails for any other reason counts the same.
      */
     private suspend fun finish(id: Uuid, trace: String?): Cycle =
         try {
@@ -735,8 +758,8 @@ public class SagaEngine(
         val ended = machine.finished(r)
         store.save(ended, now)
         store.log(r.id, r.stepIndex, null, SagaEvents.FINISHED, ended.state.name, now, trace)
-        // Written before the hook, not when the transaction ends: the hook may read the saga table, or create the next
-        // saga for the same key, which the unique index on unfinished sagas would refuse while this row read FINISHING.
+        // Write the row now, before the hook, not at commit. The hook may read the saga table, or create the next saga
+        // for the same key, which the unique index on unfinished sagas refuses while this row still says FINISHING.
         store.flush()
         val ctx = context(ended, def)
         if (ended.state == SagaState.COMPLETED) def.onCompleted(ctx) else def.onFailed(ctx)
@@ -745,7 +768,8 @@ public class SagaEngine(
 
     private fun hookFailedLocked(id: Uuid, error: Throwable, trace: String?): SagaPhase? {
         val r = store.lock(id) ?: return null
-        // Committed after all (the failure came after the commit), or finished elsewhere: nothing to count.
+        // The transaction committed after all (it failed after the commit), or another instance finished the saga:
+        // nothing to count.
         if (r !is SagaPhase.Finishing || r.step !is StepState.Ready) return r
         val now = store.now()
         val failed = machine.hookFailed(r, error.toString(), now)
