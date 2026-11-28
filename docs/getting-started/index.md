@@ -32,6 +32,7 @@ dependencies {
 | `akta-core` | The engine, the DSL, the model, and an in-memory store for tests | kotlinx.coroutines, kotlinx.serialization |
 | `akta-exposed` | The PostgreSQL store and its schema | `akta-core`, Exposed |
 | `akta-ktor` | An [admin API](../operations/admin-api.md) for operators, mounted in your Ktor application | `akta-core`, Ktor server |
+| `akta-opentelemetry` | [Spans and metrics](../operations/observability.md#with-opentelemetry-akta-opentelemetry) with OpenTelemetry | `akta-core`, OpenTelemetry API |
 
 A module that only declares sagas can depend on `akta-core` alone, with no database library on its classpath: see [Clean architecture with Ktor](../guides/clean-architecture.md). `akta-core` brings kotlinx.serialization JSON with it (an `api` dependency), since your saga data types use its annotations.
 

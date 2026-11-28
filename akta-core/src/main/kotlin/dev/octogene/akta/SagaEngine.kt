@@ -54,6 +54,11 @@ public class SagaEngine(
     private val traceId: () -> String? = { null },
     /** Told about every log entry, after its transaction commits: for metrics and hooks. See [SagaListener]. */
     private val listeners: List<SagaListener> = emptyList(),
+    /**
+     * Wraps each call a step makes, to trace it (a span per call). When it is set, a call's history entry carries
+     * the trace id [traceId] reads during the call, in the tracer's span, rather than the caller's. See [SagaTracer].
+     */
+    private val tracer: SagaTracer? = null,
 ) {
     /** Transactions, and what is read and written in them. */
     private val store = SagaStore(transactions, repository, listeners, clock)
@@ -156,10 +161,10 @@ public class SagaEngine(
             cycle = when (val current = cycle) {
                 is Cycle.Rest -> break
                 is Cycle.Call -> withContext(NonCancellable) {
-                    val outcome = perform(current.work)
+                    val (outcome, callTrace) = traced(current.work)
                     // Record the outcome. In the same transaction, claim the next step if it is due, unless the
                     // caller was cancelled meanwhile.
-                    recordTx(current.work, outcome, claimUntil = deadline.takeIf { caller.isActive })
+                    recordTx(current.work.tracedBy(callTrace), outcome, claimUntil = deadline.takeIf { caller.isActive })
                 }
                 // The hook runs in a transaction of its own, once the outcome that ended the steps is committed.
                 is Cycle.Finish -> withContext(NonCancellable) { finish(id, trace) }
@@ -529,7 +534,10 @@ public class SagaEngine(
         val replay: Boolean,
         /** The saga as it was before the claim: what it goes back to when the call could not be made. */
         val unclaimed: SagaPhase.Unfinished,
-    )
+    ) {
+        /** The same work, its outcome to be logged under [trace] when it has one: the call's span's. */
+        fun tracedBy(trace: String?): Work = if (trace == null || trace == this.trace) this else Work(saga, step, action, ctx, trace, replay, unclaimed)
+    }
 
     /** The logged event, e.g. "EXECUTE:Done". */
     private fun eventOf(work: Work, outcome: Outcome): String =
@@ -650,6 +658,59 @@ public class SagaEngine(
     }
 
     private fun stepName(saga: SagaPhase): String = definition(saga.type).stepAt(saga.stepIndex).name
+
+    /**
+     * [perform], inside the [tracer] if there is one, and the trace id read during the call (in the tracer's span).
+     * The call is made exactly once whatever the tracer does: a tracer that throws before it runs the call is
+     * bypassed, one that throws after it, or runs it twice, does not change its outcome.
+     */
+    private suspend fun traced(work: Work): Pair<Outcome, String?> {
+        val tracer = tracer ?: return perform(work) to null
+        var outcome: Outcome? = null
+        var callTrace: String? = null
+        var thrown: Throwable? = null                                   // by the call itself: passed on as it is
+        try {
+            tracer.trace(work.call()) {
+                thrown?.let { throw it }                                // called again after the call threw: not twice
+                val made = outcome ?: try {
+                    perform(work).also {
+                        outcome = it
+                        callTrace = runCatching { traceId() }.getOrNull()
+                    }
+                } catch (e: Throwable) {
+                    thrown = e
+                    throw e
+                }
+                made.forTracer()
+            }
+        } catch (e: Throwable) {
+            if (e.isFatal()) throw e                                    // anything else: the tracer's, unless the call's
+        }
+        thrown?.let { throw it }
+        return (outcome ?: perform(work)) to callTrace
+    }
+
+    private fun Work.call() = SagaCall(
+        saga.id, saga.type, saga.identity.key, step.name, saga.stepIndex,
+        action = (saga.step as? StepState.InFlight)?.call ?: CallAction.EXECUTE,
+        attempt = if (action == Action.CHECK) saga.checkFailures else saga.attempts,
+        traceparent = saga.identity.traceparent,
+    )
+
+    private fun Outcome.forTracer(): SagaCallOutcome {
+        val failed = this is Outcome.Unknown || this is Outcome.NotSent || this is Outcome.CheckFailed ||
+            this is Outcome.CompensationFailed || this is Outcome.OutputUnstorable || this == Outcome.CannotTell
+        val error = when (this) {
+            is Outcome.Unknown -> error
+            is Outcome.NotSent -> error
+            is Outcome.CheckFailed -> error
+            is Outcome.CompensationFailed -> error
+            is Outcome.Rejected -> error
+            is Outcome.OutputUnstorable -> reason
+            else -> null
+        }
+        return SagaCallOutcome(event, failed, error)
+    }
 
     /**
      * The external call, outside any transaction. It is cut off [recordMargin] before the step's lock expires, so

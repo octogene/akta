@@ -135,6 +135,46 @@ public final class dev/octogene/akta/SagaBuilder {
 	public final fun stepWithoutOutput (Ljava/lang/String;Lkotlin/jvm/functions/Function1;)Ldev/octogene/akta/StepRef;
 }
 
+public final class dev/octogene/akta/SagaCall {
+	public fun <init> (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILdev/octogene/akta/CallAction;ILjava/lang/String;)V
+	public final fun component1 ()Lkotlin/uuid/Uuid;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()I
+	public final fun component6 ()Ldev/octogene/akta/CallAction;
+	public final fun component7 ()I
+	public final fun component8 ()Ljava/lang/String;
+	public final fun copy (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILdev/octogene/akta/CallAction;ILjava/lang/String;)Ldev/octogene/akta/SagaCall;
+	public static synthetic fun copy$default (Ldev/octogene/akta/SagaCall;Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILdev/octogene/akta/CallAction;ILjava/lang/String;ILjava/lang/Object;)Ldev/octogene/akta/SagaCall;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAction ()Ldev/octogene/akta/CallAction;
+	public final fun getAttempt ()I
+	public final fun getKey ()Ljava/lang/String;
+	public final fun getSagaId ()Lkotlin/uuid/Uuid;
+	public final fun getSagaType ()Ljava/lang/String;
+	public final fun getStep ()Ljava/lang/String;
+	public final fun getStepIndex ()I
+	public final fun getTraceparent ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class dev/octogene/akta/SagaCallOutcome {
+	public fun <init> (Ljava/lang/String;ZLjava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Z
+	public final fun component3 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;ZLjava/lang/String;)Ldev/octogene/akta/SagaCallOutcome;
+	public static synthetic fun copy$default (Ldev/octogene/akta/SagaCallOutcome;Ljava/lang/String;ZLjava/lang/String;ILjava/lang/Object;)Ldev/octogene/akta/SagaCallOutcome;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getError ()Ljava/lang/String;
+	public final fun getFailed ()Z
+	public final fun getName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class dev/octogene/akta/SagaConfig {
 	public fun <init> ()V
 	public synthetic fun <init> (JJJIJJIILkotlin/jvm/internal/DefaultConstructorMarker;)V
@@ -195,8 +235,8 @@ public abstract interface annotation class dev/octogene/akta/SagaDslMarker : jav
 }
 
 public final class dev/octogene/akta/SagaEngine {
-	public fun <init> (Ldev/octogene/akta/SagaTransactions;Ldev/octogene/akta/SagaRepository;Ljava/util/List;Ldev/octogene/akta/SagaSerializer;Ldev/octogene/akta/SagaConfig;Lkotlin/time/Clock;Lkotlin/jvm/functions/Function0;Ljava/util/List;)V
-	public synthetic fun <init> (Ldev/octogene/akta/SagaTransactions;Ldev/octogene/akta/SagaRepository;Ljava/util/List;Ldev/octogene/akta/SagaSerializer;Ldev/octogene/akta/SagaConfig;Lkotlin/time/Clock;Lkotlin/jvm/functions/Function0;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Ldev/octogene/akta/SagaTransactions;Ldev/octogene/akta/SagaRepository;Ljava/util/List;Ldev/octogene/akta/SagaSerializer;Ldev/octogene/akta/SagaConfig;Lkotlin/time/Clock;Lkotlin/jvm/functions/Function0;Ljava/util/List;Ldev/octogene/akta/SagaTracer;)V
+	public synthetic fun <init> (Ldev/octogene/akta/SagaTransactions;Ldev/octogene/akta/SagaRepository;Ljava/util/List;Ldev/octogene/akta/SagaSerializer;Ldev/octogene/akta/SagaConfig;Lkotlin/time/Clock;Lkotlin/jvm/functions/Function0;Ljava/util/List;Ldev/octogene/akta/SagaTracer;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun abort-myKFqkg (Lkotlin/uuid/Uuid;Ljava/lang/String;ZLjava/lang/String;JLkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun abort-myKFqkg$default (Ldev/octogene/akta/SagaEngine;Lkotlin/uuid/Uuid;Ljava/lang/String;ZLjava/lang/String;JLkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun actions (Ldev/octogene/akta/SagaRecord;)Ljava/util/List;
@@ -489,6 +529,10 @@ public final class dev/octogene/akta/SagaStepProgress {
 	public final fun getRef ()Ljava/lang/String;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class dev/octogene/akta/SagaTracer {
+	public abstract fun trace (Ldev/octogene/akta/SagaCall;Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 }
 
 public abstract interface class dev/octogene/akta/SagaTransactions {
