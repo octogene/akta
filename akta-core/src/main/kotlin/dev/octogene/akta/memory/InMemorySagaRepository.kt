@@ -7,6 +7,7 @@ import dev.octogene.akta.SagaRecord
 import dev.octogene.akta.SagaRepository
 import dev.octogene.akta.SagaStats
 import dev.octogene.akta.SagaTransactions
+import dev.octogene.akta.StepResultRecord
 import dev.octogene.akta.StepStatus
 import dev.octogene.akta.StuckCursor
 import java.util.concurrent.locks.ReentrantLock
@@ -95,6 +96,10 @@ public class InMemorySagaRepository : SagaRepository {
             .sortedBy { it.nextAttemptAt }
             .take(limit)
             .map { it.id }
+
+    override fun stepResults(sagaId: Uuid): List<StepResultRecord> =
+        results.filter { it.sagaId == sagaId }.sortedBy { it.stepIndex }
+            .map { StepResultRecord(it.stepIndex, it.stepName, it.output, it.doneAt, it.compensatedAt) }
 
     override fun results(sagaId: Uuid): Map<String, String?> =
         results.filter { it.sagaId == sagaId && it.compensatedAt == null }.associate { it.stepName to it.output }

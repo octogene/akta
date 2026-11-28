@@ -271,6 +271,47 @@ public object SagaEvents {
      */
 }
 
+/** A step's saved result, as a [SagaRepository] keeps it: done at [doneAt], and undone at [compensatedAt] if it was. */
+public data class StepResultRecord(
+    val stepIndex: Int,
+    val stepName: String,
+    /** Encoded, as the serializer wrote it. */
+    val output: String?,
+    val doneAt: Instant,
+    val compensatedAt: Instant?,
+)
+
+/** Where a step of a saga stands, as [SagaEngine.steps] reports it. */
+public enum class StepProgress {
+    /** Applied, and not undone. */
+    DONE,
+
+    /** The step the saga is on: running, waiting, checked, undone, or stuck. */
+    CURRENT,
+
+    /** Not reached yet: the saga runs forward and will get to it. */
+    PENDING,
+
+    /** Applied, then undone (or found with nothing to undo). */
+    UNDONE,
+
+    /** Never applied, and never will be: the step that refused, or one the saga gave up before reaching. */
+    NOT_APPLIED,
+}
+
+/**
+ * One step of a saga, in the order of its definition: what an operator's screen draws as a line. [ref] is what the
+ * step's `logAs` says of its output (an identifier to look up in the external system), never the output itself.
+ */
+public data class SagaStepProgress(
+    val index: Int,
+    val name: String,
+    val progress: StepProgress,
+    val ref: String?,
+    val doneAt: Instant?,
+    val compensatedAt: Instant?,
+)
+
 /** The manual actions on a saga, as [SagaEngine.actions] reports them. */
 public enum class ManualAction {
     /** [SagaEngine.retry]. */

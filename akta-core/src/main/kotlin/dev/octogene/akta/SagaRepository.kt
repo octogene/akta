@@ -32,6 +32,9 @@ public interface SagaRepository {
     /** Encoded outputs of the completed steps that were not compensated, by step name. */
     public fun results(sagaId: Uuid): Map<String, String?>
 
+    /** Every saved step result of the saga, undone ones included, by step index. */
+    public fun stepResults(sagaId: Uuid): List<StepResultRecord>
+
     /** Saves a completed step's encoded output, replacing one already saved for that step. */
     public fun saveResult(sagaId: Uuid, stepIndex: Int, stepName: String, output: String?, now: Instant)
 

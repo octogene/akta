@@ -17,6 +17,7 @@ public final class dev/octogene/akta/exposed/ExposedSagaRepository : dev/octogen
 	public fun saveSignal (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;)Z
 	public fun signal (Lkotlin/uuid/Uuid;Ljava/lang/String;)Ljava/lang/String;
 	public fun stats (Lkotlin/time/Instant;Ljava/util/Collection;)Ldev/octogene/akta/SagaStats;
+	public fun stepResults (Lkotlin/uuid/Uuid;)Ljava/util/List;
 }
 
 public final class dev/octogene/akta/exposed/ExposedSagaTransactions : dev/octogene/akta/SagaTransactions {

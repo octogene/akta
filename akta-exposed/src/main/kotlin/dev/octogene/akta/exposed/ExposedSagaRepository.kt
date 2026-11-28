@@ -7,6 +7,7 @@ import dev.octogene.akta.SagaRecord
 import dev.octogene.akta.SagaRepository
 import dev.octogene.akta.SagaState
 import dev.octogene.akta.SagaStats
+import dev.octogene.akta.StepResultRecord
 import dev.octogene.akta.StepStatus
 import dev.octogene.akta.StuckCursor
 import dev.octogene.akta.StuckReason
@@ -169,6 +170,20 @@ public class ExposedSagaRepository : SagaRepository {
             .orderBy(SagaTable.nextAttemptAt)
             .limit(limit)
             .map { it[SagaTable.id] }
+
+    override fun stepResults(sagaId: Uuid): List<StepResultRecord> =
+        SagaStepResultTable.selectAll()
+            .where { SagaStepResultTable.sagaId eq sagaId }
+            .orderBy(SagaStepResultTable.stepIndex)
+            .map {
+                StepResultRecord(
+                    stepIndex = it[SagaStepResultTable.stepIndex],
+                    stepName = it[SagaStepResultTable.stepName],
+                    output = it[SagaStepResultTable.output],
+                    doneAt = it[SagaStepResultTable.doneAt].toKotlin(),
+                    compensatedAt = it[SagaStepResultTable.compensatedAt]?.toKotlin(),
+                )
+            }
 
     override fun results(sagaId: Uuid): Map<String, String?> =
         SagaStepResultTable.selectAll()

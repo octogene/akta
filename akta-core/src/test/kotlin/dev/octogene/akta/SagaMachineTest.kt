@@ -139,6 +139,29 @@ class SagaMachineTest {
     }
 
     @Test
+    fun `each step's progress comes from where the saga is and what was saved for it`() {
+        val running = saga(stepIndex = 1).phase()
+        assertEquals(
+            listOf(StepProgress.DONE, StepProgress.CURRENT, StepProgress.PENDING, StepProgress.PENDING),
+            machine.progress(running, stepCount = 4, undone = mapOf(0 to false)),
+        )
+        // Undoing step 0, step 1 undone, step 2 refused: it and step 3 will never run.
+        val compensating = saga().copy(state = SagaState.COMPENSATING, failureReason = "refused").phase()
+        assertEquals(
+            listOf(StepProgress.CURRENT, StepProgress.UNDONE, StepProgress.NOT_APPLIED, StepProgress.NOT_APPLIED),
+            machine.progress(compensating, stepCount = 4, undone = mapOf(0 to false, 1 to true)),
+        )
+        val failed = saga(stepIndex = 0, attempts = 0).copy(state = SagaState.FAILED, failureReason = "refused", lastError = null).phase()
+        assertEquals(
+            listOf(StepProgress.UNDONE, StepProgress.NOT_APPLIED),
+            machine.progress(failed, stepCount = 2, undone = mapOf(0 to true)),
+        )
+        // A finishing saga has no current step: only its hook is left.
+        val finishing = saga(stepIndex = 1).copy(state = SagaState.FINISHING, lastError = null).phase()
+        assertEquals(listOf(StepProgress.DONE, StepProgress.DONE), machine.progress(finishing, stepCount = 2, undone = mapOf(0 to false, 1 to false)))
+    }
+
+    @Test
     fun `a manual action refused leaves the decision unmade`() {
         assertFailsWith<IllegalArgumentException> { machine.retry(saga().phase(), newKey = false, now) { false } }
         val expired = stuck(saga(stepIndex = 1), StuckReason.KEY_EXPIRED, "forgotten").phase()   // the idempotent step

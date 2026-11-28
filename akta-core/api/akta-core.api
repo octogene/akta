@@ -199,6 +199,7 @@ public final class dev/octogene/akta/SagaEngine {
 	public final fun signal (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/Object;Lkotlin/reflect/KType;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun stats (Ljava/util/Collection;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun stats$default (Ldev/octogene/akta/SagaEngine;Ljava/util/Collection;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
+	public final fun steps (Lkotlin/uuid/Uuid;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 }
 
 public final class dev/octogene/akta/SagaEngine$ResumeResult {
@@ -369,6 +370,7 @@ public abstract interface class dev/octogene/akta/SagaRepository {
 	public abstract fun saveSignal (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;)Z
 	public abstract fun signal (Lkotlin/uuid/Uuid;Ljava/lang/String;)Ljava/lang/String;
 	public abstract fun stats (Lkotlin/time/Instant;Ljava/util/Collection;)Ldev/octogene/akta/SagaStats;
+	public abstract fun stepResults (Lkotlin/uuid/Uuid;)Ljava/util/List;
 }
 
 public final class dev/octogene/akta/SagaRepository$Companion {
@@ -433,6 +435,27 @@ public final class dev/octogene/akta/SagaStep$DefaultImpls {
 	public static fun getCompensates (Ldev/octogene/akta/SagaStep;)Z
 	public static fun getIdempotency (Ldev/octogene/akta/SagaStep;)Ldev/octogene/akta/Idempotency;
 	public static fun getRef (Ldev/octogene/akta/SagaStep;)Ldev/octogene/akta/StepRef;
+}
+
+public final class dev/octogene/akta/SagaStepProgress {
+	public fun <init> (ILjava/lang/String;Ldev/octogene/akta/StepProgress;Ljava/lang/String;Lkotlin/time/Instant;Lkotlin/time/Instant;)V
+	public final fun component1 ()I
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ldev/octogene/akta/StepProgress;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()Lkotlin/time/Instant;
+	public final fun component6 ()Lkotlin/time/Instant;
+	public final fun copy (ILjava/lang/String;Ldev/octogene/akta/StepProgress;Ljava/lang/String;Lkotlin/time/Instant;Lkotlin/time/Instant;)Ldev/octogene/akta/SagaStepProgress;
+	public static synthetic fun copy$default (Ldev/octogene/akta/SagaStepProgress;ILjava/lang/String;Ldev/octogene/akta/StepProgress;Ljava/lang/String;Lkotlin/time/Instant;Lkotlin/time/Instant;ILjava/lang/Object;)Ldev/octogene/akta/SagaStepProgress;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCompensatedAt ()Lkotlin/time/Instant;
+	public final fun getDoneAt ()Lkotlin/time/Instant;
+	public final fun getIndex ()I
+	public final fun getName ()Ljava/lang/String;
+	public final fun getProgress ()Ldev/octogene/akta/StepProgress;
+	public final fun getRef ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
 }
 
 public abstract interface class dev/octogene/akta/SagaTransactions {
@@ -527,6 +550,17 @@ public final class dev/octogene/akta/StepNotSent : java/lang/Exception {
 	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/Throwable;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 }
 
+public final class dev/octogene/akta/StepProgress : java/lang/Enum {
+	public static final field CURRENT Ldev/octogene/akta/StepProgress;
+	public static final field DONE Ldev/octogene/akta/StepProgress;
+	public static final field NOT_APPLIED Ldev/octogene/akta/StepProgress;
+	public static final field PENDING Ldev/octogene/akta/StepProgress;
+	public static final field UNDONE Ldev/octogene/akta/StepProgress;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Ldev/octogene/akta/StepProgress;
+	public static fun values ()[Ldev/octogene/akta/StepProgress;
+}
+
 public final class dev/octogene/akta/StepRef {
 	public fun <init> (Ljava/lang/String;)V
 	public fun equals (Ljava/lang/Object;)Z
@@ -538,6 +572,25 @@ public final class dev/octogene/akta/StepRef {
 public final class dev/octogene/akta/StepRejected : java/lang/Exception {
 	public fun <init> (Ljava/lang/String;Ljava/lang/Throwable;)V
 	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/Throwable;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+}
+
+public final class dev/octogene/akta/StepResultRecord {
+	public fun <init> (ILjava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;Lkotlin/time/Instant;)V
+	public final fun component1 ()I
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Lkotlin/time/Instant;
+	public final fun component5 ()Lkotlin/time/Instant;
+	public final fun copy (ILjava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;Lkotlin/time/Instant;)Ldev/octogene/akta/StepResultRecord;
+	public static synthetic fun copy$default (Ldev/octogene/akta/StepResultRecord;ILjava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;Lkotlin/time/Instant;ILjava/lang/Object;)Ldev/octogene/akta/StepResultRecord;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCompensatedAt ()Lkotlin/time/Instant;
+	public final fun getDoneAt ()Lkotlin/time/Instant;
+	public final fun getOutput ()Ljava/lang/String;
+	public final fun getStepIndex ()I
+	public final fun getStepName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
 }
 
 public final class dev/octogene/akta/StepStatus : java/lang/Enum {
@@ -605,6 +658,7 @@ public final class dev/octogene/akta/memory/InMemorySagaRepository : dev/octogen
 	public fun saveSignal (Lkotlin/uuid/Uuid;Ljava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;)Z
 	public fun signal (Lkotlin/uuid/Uuid;Ljava/lang/String;)Ljava/lang/String;
 	public fun stats (Lkotlin/time/Instant;Ljava/util/Collection;)Ldev/octogene/akta/SagaStats;
+	public fun stepResults (Lkotlin/uuid/Uuid;)Ljava/util/List;
 	public final fun storedResults (Lkotlin/uuid/Uuid;)Ljava/util/List;
 }
 
