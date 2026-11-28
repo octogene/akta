@@ -489,19 +489,20 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
         val then = when {
             signalKept -> "The signal is kept" + (if (outcome is Outcome.Found) " (the value the check found)" else "") +
                 ": fix the cause, then retry, which uses it"
-            onSignalFailed -> "onSignal failed: fix the cause, then retry (a signal received is used; " +
-                "otherwise the step waits again, then checks), or markDone with the value found"
+            onSignalFailed ->
+                "onSignal failed: fix the cause, then retry (a signal received is used; " +
+                    "otherwise the step waits again, then checks), or markDone with the value found"
             else -> when (outcome) {
-            is Outcome.Done -> {
-                effects += Effect.SaveResult(outcome.output)
-                "The output is saved: markDone(id, null) continues with it"
-            }
-            Outcome.Compensated -> {
-                effects += Effect.MarkCompensated
-                "The undo was done: markCompensated(id) goes on with the previous steps"
-            }
-            is Outcome.Rejected -> "The step was refused, nothing applied: abort(id, currentStepApplied = false) gives up, as the refusal asked"
-            else -> "Look in the external system for what the call did, then markDone, retry or abort"
+                is Outcome.Done -> {
+                    effects += Effect.SaveResult(outcome.output)
+                    "The output is saved: markDone(id, null) continues with it"
+                }
+                Outcome.Compensated -> {
+                    effects += Effect.MarkCompensated
+                    "The undo was done: markCompensated(id) goes on with the previous steps"
+                }
+                is Outcome.Rejected -> "The step was refused, nothing applied: abort(id, currentStepApplied = false) gives up, as the refusal asked"
+                else -> "Look in the external system for what the call did, then markDone, retry or abort"
             }
         }
         val refusal = (outcome as? Outcome.Rejected)?.error?.takeUnless { signalKept }

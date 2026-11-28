@@ -5,13 +5,13 @@ import dev.octogene.akta.memory.InMemorySagaTransactions
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.Test
+import kotlin.reflect.typeOf
 import kotlin.test.assertEquals
-import kotlin.time.Duration.Companion.hours
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import kotlin.reflect.typeOf
 import kotlin.time.Clock
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant

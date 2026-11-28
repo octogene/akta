@@ -28,12 +28,14 @@ class PostgresFixture(private val durable: Boolean) : AutoCloseable {
 
     fun start(poolSize: Int): PostgresFixture {
         container.start()
-        dataSource = HikariDataSource(HikariConfig().apply {
-            jdbcUrl = container.jdbcUrl
-            username = container.username
-            password = container.password
-            maximumPoolSize = poolSize
-        })
+        dataSource = HikariDataSource(
+            HikariConfig().apply {
+                jdbcUrl = container.jdbcUrl
+                username = container.username
+                password = container.password
+                maximumPoolSize = poolSize
+            },
+        )
         database = Database.connect(dataSource, databaseConfig = DatabaseConfig { defaultMaxAttempts = 1 })
         sql { exec("CREATE EXTENSION IF NOT EXISTS pg_stat_statements") }
         return this

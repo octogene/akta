@@ -160,7 +160,8 @@ class SagaBenchmarkIT {
         if (timing.perSaga.isNotEmpty()) {
             val sorted = timing.perSaga.sorted()
             fun pct(p: Double) = sorted[((sorted.size - 1) * p).toInt()]
-            report.appendLine("| Latency per saga (create + run) | avg ${ms(sorted.average().toLong())}, p50 ${ms(pct(0.5))}, p95 ${ms(pct(0.95))}, p99 ${ms(pct(0.99))} |")
+            val average = ms(sorted.average().toLong())
+            report.appendLine("| Latency per saga (create + run) | avg $average, p50 ${ms(pct(0.5))}, p95 ${ms(pct(0.95))}, p99 ${ms(pct(0.99))} |")
         }
         val isTx = { s: Statement -> s.query.trim().uppercase().let { it == "BEGIN" || it == "COMMIT" || it == "ROLLBACK" } }
         // The driver commits at protocol level (no COMMIT statement), but sends one BEGIN per transaction.
