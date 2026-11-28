@@ -17,6 +17,7 @@ import dev.octogene.akta.StuckCursor
 import dev.octogene.akta.StuckReason
 import dev.octogene.akta.saga
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
@@ -32,10 +33,12 @@ import org.junit.jupiter.api.TestInstance
 import org.testcontainers.postgresql.PostgreSQLContainer
 import java.sql.Connection
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.hours
@@ -101,6 +104,18 @@ class ExposedSagaRepositoryIT {
 
     private fun storedResults(id: kotlin.uuid.Uuid) =
         runBlocking { ExposedSagaTransactions(database).inTransaction { repository.results(id) } }
+
+    @Test
+    fun `transactions run on the dispatcher they are given`() {
+        Executors.newSingleThreadExecutor { Thread(it, "saga-tx") }.asCoroutineDispatcher().use { dispatcher ->
+            val transactions = ExposedSagaTransactions(database, dispatcher)
+            val thread = runBlocking { transactions.inTransaction { Thread.currentThread().name } }
+            assertTrue(thread.startsWith("saga-tx"), thread)                 // " @coroutine#n" added in debug mode
+        }
+        // The default stays Dispatchers.IO, whose threads are named after it.
+        val thread = runBlocking { ExposedSagaTransactions(database).inTransaction { Thread.currentThread().name } }
+        assertTrue(thread.startsWith("DefaultDispatcher-worker"), thread)
+    }
 
     @Test
     fun `completes, stores results and runs the completion hook in the final transaction`() {

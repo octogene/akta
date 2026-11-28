@@ -22,7 +22,8 @@ public final class dev/octogene/akta/exposed/ExposedSagaRepository : dev/octogen
 public final class dev/octogene/akta/exposed/ExposedSagaTransactions : dev/octogene/akta/SagaTransactions {
 	public fun <init> ()V
 	public fun <init> (Lorg/jetbrains/exposed/v1/jdbc/Database;)V
-	public synthetic fun <init> (Lorg/jetbrains/exposed/v1/jdbc/Database;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lorg/jetbrains/exposed/v1/jdbc/Database;Lkotlinx/coroutines/CoroutineDispatcher;)V
+	public synthetic fun <init> (Lorg/jetbrains/exposed/v1/jdbc/Database;Lkotlinx/coroutines/CoroutineDispatcher;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun inTransaction (Lkotlin/jvm/functions/Function0;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 }
 
