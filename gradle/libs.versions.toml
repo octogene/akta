@@ -9,6 +9,7 @@ junit = "5.14.4"
 testcontainers = "2.0.5"
 hikaricp = "6.3.0"
 ktor = "3.6.1"
+opentelemetry = "1.68.0"
 ktlint-cli = "1.8.0"
 ktlint-plugin = "14.2.0"
 
@@ -26,6 +27,9 @@ testcontainers-postgresql = { module = "org.testcontainers:testcontainers-postgr
 hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
 ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
 ktor-server-test-host = { module = "io.ktor:ktor-server-test-host", version.ref = "ktor" }
+opentelemetry-api = { module = "io.opentelemetry:opentelemetry-api", version.ref = "opentelemetry" }
+opentelemetry-extension-kotlin = { module = "io.opentelemetry:opentelemetry-extension-kotlin", version.ref = "opentelemetry" }
+opentelemetry-sdk-testing = { module = "io.opentelemetry:opentelemetry-sdk-testing", version.ref = "opentelemetry" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

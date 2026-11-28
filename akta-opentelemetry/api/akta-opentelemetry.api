@@ -1,0 +1,19 @@
+public final class dev/octogene/akta/opentelemetry/OpenTelemetrySagaKt {
+	public static final fun currentTraceparent ()Ljava/lang/String;
+	public static final fun openTelemetryTraceId ()Ljava/lang/String;
+	public static final fun sagaGauges-zkXUZaI (Ldev/octogene/akta/SagaEngine;Lio/opentelemetry/api/OpenTelemetry;Lkotlinx/coroutines/CoroutineScope;JLkotlin/time/Clock;)Lkotlinx/coroutines/Job;
+	public static synthetic fun sagaGauges-zkXUZaI$default (Ldev/octogene/akta/SagaEngine;Lio/opentelemetry/api/OpenTelemetry;Lkotlinx/coroutines/CoroutineScope;JLkotlin/time/Clock;ILjava/lang/Object;)Lkotlinx/coroutines/Job;
+}
+
+public final class dev/octogene/akta/opentelemetry/OpenTelemetrySagaListener : dev/octogene/akta/SagaListener {
+	public fun <init> (Lio/opentelemetry/api/OpenTelemetry;)V
+	public fun onEvent (Ldev/octogene/akta/SagaEvent;)V
+}
+
+public final class dev/octogene/akta/opentelemetry/OpenTelemetrySagaTracer : dev/octogene/akta/SagaTracer {
+	public fun <init> (Lio/opentelemetry/api/OpenTelemetry;)V
+	public fun <init> (Lio/opentelemetry/api/OpenTelemetry;Z)V
+	public synthetic fun <init> (Lio/opentelemetry/api/OpenTelemetry;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun trace (Ldev/octogene/akta/SagaCall;Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+}
+
