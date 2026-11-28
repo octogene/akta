@@ -51,6 +51,7 @@ A recovery job calls `engine.resumeDue()` every 30 seconds to take on whatever i
 | `akta-core` | The engine, the DSL, the model, and an in-memory store for tests | kotlinx.coroutines, kotlinx.serialization |
 | `akta-exposed` | The PostgreSQL store (`ExposedSagaRepository`, `ExposedSagaTransactions`) and its schema | `akta-core`, Exposed |
 | `akta-ktor` | An admin API for operators (`sagaAdminRead`, `sagaAdminActions`), mounted in your Ktor application | `akta-core`, Ktor server |
+| `akta-opentelemetry` | A span per step call, and the engine's events and stats as metrics, with OpenTelemetry | `akta-core`, OpenTelemetry API |
 
 It targets Kotlin 2.x on JVM 17+, Exposed 1.x and PostgreSQL 12+. There is no published release yet: `./gradlew publishToMavenLocal`, then depend on `dev.octogene:akta-exposed:0.1.0`, and copy [`schema.sql`](akta-exposed/src/main/resources/dev/octogene/akta/schema.sql) into a Flyway migration. [Installation](https://octogene.github.io/akta/getting-started/) has the details.
 
