@@ -105,8 +105,8 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
     private fun definition(type: String): SagaDefinition<*> =
         definitions(type) ?: throw IllegalArgumentException("Unknown saga type: $type")
 
-    /** The step [r] is on. Throws for a type this engine does not know, or a step its definition no longer has. */
-    private fun stepOf(r: SagaPhase): SagaStep<*, *> = definition(r.type).steps[r.stepIndex]
+    /** The step [saga] is on. Throws for a type this engine does not know, or a step its definition no longer has. */
+    private fun stepOf(saga: SagaPhase): SagaStep<*, *> = definition(saga.type).steps[saga.stepIndex]
 
     /** A type this engine does not know is taken to have both hooks: it then waits in FINISHING for an engine that does. */
     private fun hooks(type: String): Hooks = definitions(type)?.hooks ?: Hooks(completed = true, failed = true)
@@ -120,8 +120,8 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
         )
 
     /** Whether running the saga now could do anything: not finished, not stuck, and due. */
-    fun canMoveOn(r: SagaPhase, now: Instant): Boolean =
-        r is Unfinished && r.step !is StepState.Stuck && r.due <= now
+    fun canMoveOn(saga: SagaPhase, now: Instant): Boolean =
+        saga is Unfinished && saga.step !is StepState.Stuck && saga.due <= now
 
     /**
      * False when the call claimed as [claimed] is no longer the one in flight: its lock expired and another instance
@@ -156,7 +156,7 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
         // Counted when the check was claimed. Any outcome but a failed check ends the series of failed checks.
         val checkFailures = claimed.checkFailures
         // The lock released. READY here only to be a valid phase: every outcome below sets what the step becomes.
-        val r = claimed.with(step = StepState.Ready(claimed.due), checkFailures = 0)
+        val released = claimed.with(step = StepState.Ready(claimed.due), checkFailures = 0)
         val effects = mutableListOf<Effect>()
         // A signal step's timeout check: what it found is stored as the signal (one received first wins), and the step
         // is due at once, to consume it in a claim of its own, through onSignal. If it found nothing, cannot tell, or
@@ -164,45 +164,45 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
         // check is not tried again, and does not count towards CHECK_FAILING.
         if (step is SignalStep<*, *>) {
             if (outcome is Outcome.Found) {
-                effects += Effect.SaveSignal(step.signal, checkNotNull(outcome.done.output) { "Saga ${r.id}: a signal has a value" })
-                return Decision(r.with(step = StepState.Ready(now)), effects)
+                effects += Effect.SaveSignal(step.signal, checkNotNull(outcome.done.output) { "Saga ${released.id}: a signal has a value" })
+                return Decision(released.with(step = StepState.Ready(now)), effects)
             }
             val foundNothing = outcome is Outcome.Rejected && outcome.noSignalFound
             val answered = foundNothing || outcome == Outcome.CannotTell || outcome is Outcome.CheckFailed
             if (answered && signalStored(step.signal)) {
-                return Decision(r.with(step = StepState.Ready(now)), effects)
+                return Decision(released.with(step = StepState.Ready(now)), effects)
             }
         }
-        val saga = when (outcome) {
+        val decided = when (outcome) {
             is Outcome.Done -> {
                 effects += Effect.SaveResult(outcome.output)
-                next(r, stepCount, now)
+                next(released, stepCount, now)
             }
             is Outcome.OutputUnstorable -> stuck(
-                r, StuckReason.OUTPUT_UNSTORABLE,
+                released, StuckReason.OUTPUT_UNSTORABLE,
                 "The call was made, but its output could not be stored (${outcome.reason}): " +
                     "record it with markDone, or undo the step with abort",
                 now,
             )
-            is Outcome.Rejected -> refused(r, outcome.error, now)
+            is Outcome.Rejected -> refused(released, outcome.error, now)
             // A replay that never left says nothing of the earlier attempt, which may be applied: still REPLAYING.
             // A first attempt that never left did not use the key: its window has not started (keySince cleared).
             is Outcome.NotSent -> if (replay) {
-                replayLater(r, "${outcome.error} (an earlier attempt may be applied)", now)
+                replayLater(released, "${outcome.error} (an earlier attempt may be applied)", now)
             } else {
-                retryLater(r.with(key = KeyState(since = null, generation = r.key.generation)), outcome.error, now)
+                retryLater(released.with(key = KeyState(since = null, generation = released.key.generation)), outcome.error, now)
             }
             is Outcome.Unknown -> when {
-                step.idempotency == null -> r.with(step = StepState.Checking(now + config.settleDelay), lastError = outcome.error)
-                else -> replayLater(r, outcome.error, now)
+                step.idempotency == null -> released.with(step = StepState.Checking(now + config.settleDelay), lastError = outcome.error)
+                else -> replayLater(released, outcome.error, now)
             }
             // Not applied: safe to execute again, or to stop here if the step keeps failing.
-            Outcome.NotDone -> if (r.attempts >= config.maxAttempts) {
-                stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: ${r.lastError}", now)
+            Outcome.NotDone -> if (released.attempts >= config.maxAttempts) {
+                stuck(released, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: ${released.lastError}", now)
             } else {
-                r.with(step = StepState.Ready(now))
+                released.with(step = StepState.Ready(now))
             }
-            Outcome.CannotTell -> stuck(r, StuckReason.CANNOT_TELL, "Cannot tell whether step '${step.name}' was applied", now)
+            Outcome.CannotTell -> stuck(released, StuckReason.CANNOT_TELL, "Cannot tell whether step '${step.name}' was applied", now)
             // Counted apart from attempts (a lookup outage must not use up the executions), with backoff.
             // Past maxAttempts: STUCK, as when a check cannot tell, so that alerts see it and a human
             // can decide (markDone, abort, or retry once the step is known not to be applied).
@@ -210,11 +210,11 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
                 val failures = checkFailures                   // this check was counted when claimed
                 if (failures >= config.maxAttempts) {
                     stuck(
-                        r.with(checkFailures = failures), StuckReason.CHECK_FAILING,
+                        released.with(checkFailures = failures), StuckReason.CHECK_FAILING,
                         "Check keeps failing, step '${step.name}' may have been applied: ${outcome.error}", now,
                     )
                 } else {
-                    r.with(
+                    released.with(
                         step = StepState.Checking(now + maxOf(config.checkRetryDelay, config.backoff(failures))),
                         lastError = outcome.error, checkFailures = failures,
                     )
@@ -222,10 +222,10 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
             }
             Outcome.Compensated -> {
                 effects += Effect.MarkCompensated
-                previousUndo(r, now)
+                previousUndo(released, now)
             }
-            is Outcome.CompensationFailed -> retryLater(r, outcome.error, now)
-            is Outcome.Found -> error("Saga ${r.id}: a value found is only for a signal step")
+            is Outcome.CompensationFailed -> retryLater(released, outcome.error, now)
+            is Outcome.Found -> error("Saga ${released.id}: a value found is only for a signal step")
             // What the claim changed goes back, due at once: no attempt used, the idempotency key not used.
             // The rest is kept: a cancellation requested meanwhile, for one.
             is Outcome.NotCalled -> {
@@ -233,40 +233,40 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
                     is StepState.Ready -> StepState.Ready(now)
                     is StepState.Checking -> StepState.Checking(now)
                     is StepState.Replaying -> StepState.Replaying(now)
-                    else -> error("Saga ${r.id}: a call is claimed from READY, CHECKING or REPLAYING, not ${unclaimed.step.status}")
+                    else -> error("Saga ${released.id}: a call is claimed from READY, CHECKING or REPLAYING, not ${unclaimed.step.status}")
                 }
-                r.with(step = step, attempts = unclaimed.attempts, checkFailures = unclaimed.checkFailures, key = unclaimed.key)
+                released.with(step = step, attempts = unclaimed.attempts, checkFailures = unclaimed.checkFailures, key = unclaimed.key)
             }
         }
-        return Decision(saga, effects)
+        return Decision(decided, effects)
     }
 
     // ---- Manual actions: each checks the saga can take it (IllegalArgumentException), then decides -----------
 
     /** See [SagaEngine.retry]. [signalStored]: whether a signal of a name was received. */
-    fun retry(r: SagaPhase, newKey: Boolean, now: Instant, signalStored: (signal: String) -> Boolean): Decision {
-        val p = r as? Unfinished
-        val stuck = p?.step as? StepState.Stuck
-        require(p != null && stuck != null) { "Saga ${r.id} is not stuck" }
-        require(!newKey || p !is Finishing) { "Saga ${r.id} is finishing: it has no call, nor a key to renew" }
+    fun retry(saga: SagaPhase, newKey: Boolean, now: Instant, signalStored: (signal: String) -> Boolean): Decision {
+        val unfinished = saga as? Unfinished
+        val stuck = unfinished?.step as? StepState.Stuck
+        require(unfinished != null && stuck != null) { "Saga ${saga.id} is not stuck" }
+        require(!newKey || unfinished !is Finishing) { "Saga ${saga.id} is finishing: it has no call, nor a key to renew" }
         require(newKey || stuck.reason != StuckReason.KEY_EXPIRED) {
-            "The idempotency key of saga ${r.id} may be forgotten by its service: confirm the step was not applied, " +
+            "The idempotency key of saga ${saga.id} may be forgotten by its service: confirm the step was not applied, " +
                 "then retry with newKey = true (or markDone, or abort)"
         }
-        val generation = if (newKey) p.key.generation + 1 else p.key.generation
-        val step = if (p is Running) stepOf(p) else null
+        val generation = if (newKey) unfinished.key.generation + 1 else unfinished.key.generation
+        val step = if (unfinished is Running) stepOf(unfinished) else null
         // An idempotent step whose key was used may be applied: it is replayed, and stays REPLAYING meanwhile.
-        val replay = step?.idempotency != null && !newKey && p.key.since != null
+        val replay = step?.idempotency != null && !newKey && unfinished.key.since != null
         // Stopped by resume failures, not by the step: it resumes as it was.
         val resuming = stuck.reason == StuckReason.RESUME_FAILING
-        val resumed = p.with(
+        val resumed = unfinished.with(
             step = when {
                 replay -> StepState.Replaying(now)
-                resuming && step != null -> resumeAs(p, stuck, step, now, signalStored)
+                resuming && step != null -> resumeAs(unfinished, stuck, step, now, signalStored)
                 else -> StepState.Ready(now)
             },
-            attempts = if (resuming) p.attempts else 0, checkFailures = if (resuming) p.checkFailures else 0,
-            resumeFailures = 0, key = KeyState(since = if (newKey) null else p.key.since, generation = generation), lastError = null,
+            attempts = if (resuming) unfinished.attempts else 0, checkFailures = if (resuming) unfinished.checkFailures else 0,
+            resumeFailures = 0, key = KeyState(since = if (newKey) null else unfinished.key.since, generation = generation), lastError = null,
         )
         return Decision(
             // Forward, a refusal kept by RECORD_FAILED is dropped: the step is called again.
@@ -276,121 +276,121 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
         )
     }
 
-    /** See [SagaEngine.markDone], which then saves the output and moves on with [next]. Returns [r], running. */
-    fun checkMarkDone(r: SagaPhase): Running {
-        require(r is Running && r.step is StepState.Stuck) { "Saga ${r.id} has no stuck forward step" }
+    /** See [SagaEngine.markDone], which then saves the output and moves on with [next]. Returns [saga], running. */
+    fun checkMarkDone(saga: SagaPhase): Running {
+        require(saga is Running && saga.step is StepState.Stuck) { "Saga ${saga.id} has no stuck forward step" }
         // Set on a saga still running only when its step's refusal could not be recorded (RECORD_FAILED).
-        require(r.refusal == null) {
-            "The stuck step of saga ${r.id} was refused (${r.refusal}): it cannot be marked done. " +
+        require(saga.refusal == null) {
+            "The stuck step of saga ${saga.id} was refused (${saga.refusal}): it cannot be marked done. " +
                 "abort(currentStepApplied = false) gives up; retry calls it again"
         }
-        return r
+        return saga
     }
 
     /** markDone on a stuck signal step, whose signal is now stored: due at once, to consume it through onSignal. */
-    fun signalByHand(r: Running, now: Instant): Unfinished =
-        r.with(step = StepState.Ready(now), checkFailures = 0, resumeFailures = 0, lastError = null)
+    fun signalByHand(saga: Running, now: Instant): Unfinished =
+        saga.with(step = StepState.Ready(now), checkFailures = 0, resumeFailures = 0, lastError = null)
 
-    /** See [SagaEngine.abort], which saves the step's output in between, when it was applied. Returns [r], unfinished. */
-    fun checkAbort(r: SagaPhase, currentStepApplied: Boolean): Unfinished {
-        if (r is Finishing) {
+    /** See [SagaEngine.abort], which saves the step's output in between, when it was applied. Returns [saga], unfinished. */
+    fun checkAbort(saga: SagaPhase, currentStepApplied: Boolean): Unfinished {
+        if (saga is Finishing) {
             // Its onCompleted cannot run: every step is done, and all are undone. currentStepApplied changes nothing.
-            require(r.failureReason == null && r.step is StepState.Stuck) {
-                "Saga ${r.id} is finishing: only a stuck onCompleted can be aborted"
+            require(saga.failureReason == null && saga.step is StepState.Stuck) {
+                "Saga ${saga.id} is finishing: only a stuck onCompleted can be aborted"
             }
-            return r
+            return saga
         }
-        require(r is Running) { "Saga ${r.id} is not running forward" }
-        require(r.step is StepState.Ready || r.step is StepState.Waiting || r.step is StepState.Stuck) {
-            "A call of saga ${r.id} may have been applied: wait for its outcome"
+        require(saga is Running) { "Saga ${saga.id} is not running forward" }
+        require(saga.step is StepState.Ready || saga.step is StepState.Waiting || saga.step is StepState.Stuck) {
+            "A call of saga ${saga.id} may have been applied: wait for its outcome"
         }
-        require(!currentStepApplied || r.step is StepState.Stuck) {
-            "The current step of saga ${r.id} is ${r.step.status}: it was not applied"
+        require(!currentStepApplied || saga.step is StepState.Stuck) {
+            "The current step of saga ${saga.id} is ${saga.step.status}: it was not applied"
         }
         // As in markDone: a refused step has nothing to undo, and its compensation must not run.
-        require(!currentStepApplied || r.refusal == null) {
-            "The stuck step of saga ${r.id} was refused (${r.refusal}), nothing applied: abort with currentStepApplied = false"
+        require(!currentStepApplied || saga.refusal == null) {
+            "The stuck step of saga ${saga.id} was refused (${saga.refusal}), nothing applied: abort with currentStepApplied = false"
         }
-        return r
+        return saga
     }
 
-    fun abort(r: Unfinished, currentStepApplied: Boolean, actor: String, now: Instant): SagaPhase =
-        if (r is Finishing) {
-            compensateFrom(r, r.stepIndex, now, failureReason = "Aborted by $actor")          // every step, the last included
+    fun abort(saga: Unfinished, currentStepApplied: Boolean, actor: String, now: Instant): SagaPhase =
+        if (saga is Finishing) {
+            compensateFrom(saga, saga.stepIndex, now, failureReason = "Aborted by $actor")          // every step, the last included
         } else {
-            startCompensation(r, if (currentStepApplied) r.stepIndex else r.stepIndex - 1, "Aborted by $actor", now)
+            startCompensation(saga, if (currentStepApplied) saga.stepIndex else saga.stepIndex - 1, "Aborted by $actor", now)
         }
 
     /** See [SagaEngine.markCompensated]. */
-    fun markCompensated(r: SagaPhase, now: Instant): Decision {
-        require(r is Compensating && r.step is StepState.Stuck) { "Saga ${r.id} has no stuck compensation" }
-        return Decision(previousUndo(r, now), listOf(Effect.MarkCompensated))
+    fun markCompensated(saga: SagaPhase, now: Instant): Decision {
+        require(saga is Compensating && saga.step is StepState.Stuck) { "Saga ${saga.id} has no stuck compensation" }
+        return Decision(previousUndo(saga, now), listOf(Effect.MarkCompensated))
     }
 
     /** See [SagaEngine.cancel]. */
-    fun cancel(r: SagaPhase, reason: String, now: Instant): Decision {
-        require(r !is Finished) { "Saga ${r.id} is finished: undoing it is a new saga" }
-        require(r !is Finishing) { "Saga ${r.id} is finishing, its steps all done or undone: undoing it is a new saga" }
+    fun cancel(saga: SagaPhase, reason: String, now: Instant): Decision {
+        require(saga !is Finished) { "Saga ${saga.id} is finished: undoing it is a new saga" }
+        require(saga !is Finishing) { "Saga ${saga.id} is finishing, its steps all done or undone: undoing it is a new saga" }
         // Already compensating, for another reason: nothing changes, and the history says so.
-        if (r !is Running) return Decision(r, emptyList(), detail = "$reason (already compensating: nothing changed)")
+        if (saga !is Running) return Decision(saga, emptyList(), detail = "$reason (already compensating: nothing changed)")
         // The first cancellation counts: a second one is only logged.
-        val requested = if (r.cancellation != null) r else r.copy(cancellation = Cancellation(now, reason))
+        val requested = if (saga.cancellation != null) saga else saga.copy(cancellation = Cancellation(now, reason))
         return Decision(cancelIfRequested(requested, now), emptyList(), detail = reason)
     }
 
     // ---- Claims -------------------------------------------------------------------------------------------
 
     /**
-     * The next move on the saga [r], before its step's data is read: [Move.Rest], [Move.Act], [Move.Finish] and
+     * The next move on the saga [saga], before its step's data is read: [Move.Rest], [Move.Act], [Move.Finish] and
      * [Move.NoSignal] end the moves; the others are saved, then the next move is asked. The definition is only read
      * once it is needed: a saga at rest, or a compensation whose lock expired, never throws for an unknown type.
      */
-    fun move(r: SagaPhase, now: Instant): Move {
-        if (r !is Unfinished || r.step is StepState.Stuck) return Move.Rest(r)
+    fun move(saga: SagaPhase, now: Instant): Move {
+        if (saga !is Unfinished || saga.step is StepState.Stuck) return Move.Rest(saga)
         // Its steps are done: only its hook is left, in a transaction of its own.
-        if (r is Finishing) return if (r.due <= now) Move.Finish(r) else Move.Rest(r)
-        val inFlight = r.step
+        if (saga is Finishing) return if (saga.due <= now) Move.Finish(saga) else Move.Rest(saga)
+        val inFlight = saga.step
         if (inFlight is StepState.InFlight) {
-            if (inFlight.lockedUntil > now) return Move.Rest(r)                // a call is in flight elsewhere
+            if (inFlight.lockedUntil > now) return Move.Rest(saga)                // a call is in flight elsewhere
             // Saved and logged; then the next move, at the same time: it rests if the saga is stuck or not due yet.
-            return Move.LockExpired(lockExpired(r, now) { stepOf(r).idempotency != null })
+            return Move.LockExpired(lockExpired(saga, now) { stepOf(saga).idempotency != null })
         }
-        if (r.due > now) return Move.Rest(r)
+        if (saga.due > now) return Move.Rest(saga)
         // Every move from here saves the saga: if this transaction commits, the saga could be run, which ends a
         // series of resume failures.
-        val saga = if (r.resumeFailures != 0) r.with(resumeFailures = 0) else r
-        definition(saga.type)                                           // an unknown type throws here, once due
+        val acting = if (saga.resumeFailures != 0) saga.with(resumeFailures = 0) else saga
+        definition(acting.type)                                           // an unknown type throws here, once due
         // A cancellation that waited for a call to end: compensate now that none is in flight. Before the data is
         // decoded: the claim decodes it, in this same transaction.
-        val cancelled = cancelIfRequested(saga, now)
-        if (cancelled !== saga) return Move.Cancelled(cancelled)
-        val step = stepOf(saga)
+        val cancelled = cancelIfRequested(acting, now)
+        if (cancelled !== acting) return Move.Cancelled(cancelled)
+        val step = stepOf(acting)
         // A step with nothing to undo: marked undone at once, no call, and on to the previous one, all in this
         // transaction (usually the one that recorded the refusal or the previous undo).
-        if (saga is Compensating && !step.compensates) {
-            return Move.NothingToUndo(previousUndo(saga, now), listOf(Effect.MarkCompensated))
+        if (acting is Compensating && !step.compensates) {
+            return Move.NothingToUndo(previousUndo(acting, now), listOf(Effect.MarkCompensated))
         }
         // A signal step's timeout passed without its signal, and nothing will check: stuck, no data needed.
-        if (step is SignalStep<*, *> && saga is Running && saga.step is StepState.Waiting && !step.checksOnTimeout) {
-            return Move.NoSignal(stuck(saga, StuckReason.NO_SIGNAL, "No signal '${step.signal}' before the timeout", now))
+        if (step is SignalStep<*, *> && acting is Running && acting.step is StepState.Waiting && !step.checksOnTimeout) {
+            return Move.NoSignal(stuck(acting, StuckReason.NO_SIGNAL, "No signal '${step.signal}' before the timeout", now))
         }
-        return Move.Act(saga)
+        return Move.Act(acting)
     }
 
     /** A signal step whose timeout passed: its check decides. */
-    fun timedOut(r: Unfinished, step: SignalStep<*, *>): Unfinished =
-        r.with(step = StepState.Checking(r.due), lastError = "No signal '${step.signal}' before the timeout")
+    fun timedOut(saga: Unfinished, step: SignalStep<*, *>): Unfinished =
+        saga.with(step = StepState.Checking(saga.due), lastError = "No signal '${step.signal}' before the timeout")
 
-    /** The call of [step] that the saga [r] is due for, claimed: or the step stops, its key possibly forgotten. */
-    fun claim(r: Unfinished, step: SagaStep<*, *>, now: Instant): Claim {
-        val idempotency = step.idempotency.takeIf { r is Running }
+    /** The call of [step] that the saga [saga] is due for, claimed: or the step stops, its key possibly forgotten. */
+    fun claim(saga: Unfinished, step: SagaStep<*, *>, now: Instant): Claim {
+        val idempotency = step.idempotency.takeIf { saga is Running }
         val action = when {
             // An idempotent step's unknown outcome is replayed with the same key, never checked.
-            r.step.outcomeUnknown && idempotency == null -> Action.CHECK
-            r is Running -> Action.EXECUTE
+            saga.step.outcomeUnknown && idempotency == null -> Action.CHECK
+            saga is Running -> Action.EXECUTE
             else -> Action.COMPENSATE
         }
-        var keySince = r.key.since
+        var keySince = saga.key.since
         val replay = idempotency != null && keySince != null
         // The key's window holds for the undo too: an idempotent step's compensation may rely on its key
         // (`/compensate`) to be safe to repeat, so an expired key is not sent again either. Only forward does
@@ -403,7 +403,7 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
                 val call = if (action == Action.COMPENSATE) "undo" else "call"
                 return Claim.KeyExpired(
                     stuck(
-                        r, StuckReason.KEY_EXPIRED,
+                        saga, StuckReason.KEY_EXPIRED,
                         "The idempotency key of the $call of step '${step.name}', first used at $since, may be forgotten " +
                             "by its service (kept ${keyWindow.keyRetention}): sending it again could duplicate the $call",
                         now,
@@ -418,14 +418,14 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
             Action.CHECK -> CallAction.CHECK
             Action.COMPENSATE -> CallAction.COMPENSATE
         }
-        val claimed = r.with(
+        val claimed = saga.with(
             // Due when the lock expires: the recovery job looks again then.
             step = StepState.InFlight(call, lockedUntil, due = lockedUntil),
-            attempts = if (action == Action.CHECK) r.attempts else r.attempts + 1,
+            attempts = if (action == Action.CHECK) saga.attempts else saga.attempts + 1,
             // Counted now, as an attempt is, and reset by any outcome but a failure: a check that ends without
             // recording one (its pod died, the record failed) is limited too.
-            checkFailures = if (action == Action.CHECK) r.checkFailures + 1 else r.checkFailures,
-            key = KeyState(keySince, r.key.generation),
+            checkFailures = if (action == Action.CHECK) saga.checkFailures + 1 else saga.checkFailures,
+            key = KeyState(keySince, saga.key.generation),
         )
         return Claim.Call(claimed, action, replay)
     }
@@ -436,23 +436,23 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
      * After a run threw (resumeDue, or the run after a manual action): the saga postponed, or stopped after too
      * many failures in a row; null to leave it as it is (finished, stuck, or a call in flight).
      */
-    fun postpone(r: SagaPhase, error: String, now: Instant): Unfinished? {
-        if (r !is Unfinished) return null
-        val step = r.step
+    fun postpone(saga: SagaPhase, error: String, now: Instant): Unfinished? {
+        if (saga !is Unfinished) return null
+        val step = saga.step
         if (step is StepState.Stuck || (step is StepState.InFlight && step.lockedUntil > now)) return null
-        val failures = r.resumeFailures + 1
+        val failures = saga.resumeFailures + 1
         return if (failures >= config.maxAttempts) {
             // The step is left as it was (attempts, key): retry resumes it, see there. No definition is
             // read here: an unknown type or a step that no longer exists may be the very cause.
-            r.with(
-                step = StepState.Stuck(StuckReason.RESUME_FAILING, at = now, from = step.status, due = r.due),
+            saga.with(
+                step = StepState.Stuck(StuckReason.RESUME_FAILING, at = now, from = step.status, due = saga.due),
                 resumeFailures = failures,
                 lastError = "Could not run the saga, $failures times in a row: $error. Fix the cause, then retry: " +
                     "the step resumes as it was, checked first if it may have been called",
             )
         } else {
             // lastError keeps the step's own error: the resume failure goes to the log only.
-            r.with(step = step.dueAt(maxOf(r.due, now + config.resumeFailureDelay)), resumeFailures = failures)
+            saga.with(step = step.dueAt(maxOf(saga.due, now + config.resumeFailureDelay)), resumeFailures = failures)
         }
     }
 
@@ -513,97 +513,97 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
     // ---- Signals ----------------------------------------------------------------------------------------------
 
     /** What a signal for the step at [index] does on arrival, before it is stored. */
-    fun arrival(r: SagaPhase, index: Int): Arrival = when {
+    fun arrival(saga: SagaPhase, index: Int): Arrival = when {
         // Past the step (moved on, compensating or finished): the saga never goes back, so nothing would
         // read the signal. Not stored: its value may hold personal data, kept for nothing until the purge.
-        r !is Running || r.stepIndex > index -> Arrival.TOO_LATE
+        saga !is Running || saga.stepIndex > index -> Arrival.TOO_LATE
         // Cancelled while a call is in flight: whatever its outcome, the saga compensates and never waits again.
-        r.cancellation != null -> Arrival.CANCELLED
+        saga.cancellation != null -> Arrival.CANCELLED
         else -> Arrival.STORE
     }
 
     /** What becomes of a signal for the step at [index], once stored. */
-    fun useOfStored(r: SagaPhase, index: Int): Use {
+    fun useOfStored(saga: SagaPhase, index: Int): Use {
         // WAITING, or CHECKING: its timeout passed and a check failed, to be tried again. No call is in flight
         // either way (a check in flight is IN_PROGRESS), so the signal answers now what the check looks up.
-        val step = (r as? Unfinished)?.step
+        val step = (saga as? Unfinished)?.step
         val listening = step is StepState.Waiting || step?.outcomeUnknown == true
         return when {
-            r.stepIndex == index && listening -> Use.WAKE
+            saga.stepIndex == index && listening -> Use.WAKE
             // Not waiting yet (an earlier step runs, or this one is ready, checking or stuck): kept for it.
             else -> Use.KEEP
         }
     }
 
     /** A signal arrived for the step that waits for it ([useOfStored] said WAKE): due at once, to consume it. */
-    fun woken(r: SagaPhase, now: Instant): Unfinished {
-        check(r is Running) { "Saga ${r.id} is ${r.state}: only a running saga waits for a signal" }
-        return r.with(step = StepState.Ready(now))
+    fun woken(saga: SagaPhase, now: Instant): Unfinished {
+        check(saga is Running) { "Saga ${saga.id} is ${saga.state}: only a running saga waits for a signal" }
+        return saga.with(step = StepState.Ready(now))
     }
 
     /** The signal step [step] starts waiting, until its timeout. */
-    fun waiting(r: Unfinished, step: SignalStep<*, *>, now: Instant): Unfinished =
-        r.with(step = StepState.Waiting(now + step.timeout), lastError = null, attempts = 0)
+    fun waiting(saga: Unfinished, step: SignalStep<*, *>, now: Instant): Unfinished =
+        saga.with(step = StepState.Waiting(now + step.timeout), lastError = null, attempts = 0)
 
     /** The step was refused ([error]): the steps before are undone. */
-    fun refused(r: Unfinished, error: String, now: Instant): SagaPhase =
-        startCompensation(r.with(lastError = error), r.stepIndex - 1, error, now)
+    fun refused(saga: Unfinished, error: String, now: Instant): SagaPhase =
+        startCompensation(saga.with(lastError = error), saga.stepIndex - 1, error, now)
 
     /**
-     * A claim of the saga [r], whose current step is a signal step, failed because onSignal threw ([message]) on a
+     * A claim of the saga [saga], whose current step is a signal step, failed because onSignal threw ([message]) on a
      * signal stored earlier: the saga stopped, the signal kept, for retry to use once fixed. Null when it is not
      * waiting for that signal any more, and is left as it is.
      */
-    fun blockedByStoredSignal(r: SagaPhase, message: String?, now: Instant): Unfinished? {
-        if (r !is Running) return null
+    fun blockedByStoredSignal(saga: SagaPhase, message: String?, now: Instant): Unfinished? {
+        if (saga !is Running) return null
         // The claim that threw may first have expired the lock of a timeout check whose process died: that
         // rolled back too, so the row is still IN_PROGRESS. Left as it is, every resume would do the same again.
-        val step = r.step
+        val step = saga.step
         val checkDied = step is StepState.InFlight && step.lockedUntil <= now
         if (step !is StepState.Ready && !step.outcomeUnknown && !checkDied) return null
-        return stuck(r, StuckReason.RECORD_FAILED, "$message. The signal is kept: fix the cause, then retry, which uses it", now)
+        return stuck(saga, StuckReason.RECORD_FAILED, "$message. The signal is kept: fix the cause, then retry, which uses it", now)
     }
 
     // ---- Finishing ---------------------------------------------------------------------------------------------
 
     /** A finishing saga whose hook is about to run: COMPLETED or FAILED, as the hook will see it. */
-    fun finished(p: Finishing): Finished =
+    fun finished(saga: Finishing): Finished =
         Finished(
-            p.identity, p.stepIndex, p.attempts, lastDue = p.due, p.cancellation,
-            lastError = if (p.failureReason == null) null else p.lastError, failureReason = p.failureReason,
+            saga.identity, saga.stepIndex, saga.attempts, lastDue = saga.due, saga.cancellation,
+            lastError = if (saga.failureReason == null) null else saga.lastError, failureReason = saga.failureReason,
         )
 
-    /** The hook of the finishing saga [p] threw [error]: run again after backoff, or stopped after too many failures. */
-    fun hookFailed(p: Finishing, error: String, now: Instant): Unfinished {
-        val hook = if (p.failureReason == null) "onCompleted" else "onFailed"
-        val attempts = p.attempts + 1
+    /** The hook of the finishing saga [saga] threw [error]: run again after backoff, or stopped after too many failures. */
+    fun hookFailed(saga: Finishing, error: String, now: Instant): Unfinished {
+        val hook = if (saga.failureReason == null) "onCompleted" else "onFailed"
+        val attempts = saga.attempts + 1
         return if (attempts >= config.maxAttempts) {
-            p.with(
-                step = StepState.Stuck(StuckReason.HOOK_FAILED, at = now, from = null, due = p.due), attempts = attempts,
+            saga.with(
+                step = StepState.Stuck(StuckReason.HOOK_FAILED, at = now, from = null, due = saga.due), attempts = attempts,
                 lastError = "$hook threw, $attempts times in a row: $error. Every step is " +
-                    (if (p.failureReason == null) "done: fix it, then retry, or abort to undo them" else "undone: fix it, then retry"),
+                    (if (saga.failureReason == null) "done: fix it, then retry, or abort to undo them" else "undone: fix it, then retry"),
             )
         } else {
-            p.with(step = StepState.Ready(now + config.backoff(attempts)), attempts = attempts, lastError = "$hook threw: $error")
+            saga.with(step = StepState.Ready(now + config.backoff(attempts)), attempts = attempts, lastError = "$hook threw: $error")
         }
     }
 
     // ---- Transitions ----------------------------------------------------------------------------------------
 
     /** A saga whose cancellation was requested compensates once no call of it is in flight. */
-    fun cancelIfRequested(r: SagaPhase, now: Instant): SagaPhase =
-        if (r is Running && r.cancellation != null && (r.step is StepState.Ready || r.step is StepState.Waiting)) {
-            startCompensation(r, r.stepIndex - 1, cancelled(r), now)
+    fun cancelIfRequested(saga: SagaPhase, now: Instant): SagaPhase =
+        if (saga is Running && saga.cancellation != null && (saga.step is StepState.Ready || saga.step is StepState.Waiting)) {
+            startCompensation(saga, saga.stepIndex - 1, cancelled(saga), now)
         } else {
-            r
+            saga
         }
 
     /**
-     * What the forward [step] of [r], stopped by [StuckReason.RESUME_FAILING] as [stuck], goes back to, and when it is
+     * What the forward [step] of [saga], stopped by [StuckReason.RESUME_FAILING] as [stuck], goes back to, and when it is
      * due. A compensation needs none of this: it simply runs again.
      */
     private fun resumeAs(
-        r: Unfinished,
+        saga: Unfinished,
         stuck: StepState.Stuck,
         step: SagaStep<*, *>,
         now: Instant,
@@ -620,16 +620,16 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
             // Its timeout still stands, passed or not. Except for what must be acted on at once: a signal received
             // while it was stuck (READY uses it), or a cancellation.
             StepStatus.WAITING ->
-                if (r.cancellation != null || step !is SignalStep<*, *> || signalStored(step.signal)) {
+                if (saga.cancellation != null || step !is SignalStep<*, *> || signalStored(step.signal)) {
                     StepState.Ready(now)
                 } else {
-                    StepState.Waiting(r.due)
+                    StepState.Waiting(saga.due)
                 }
             // Nothing that may have been applied, even if it was attempted (its request never left).
             StepStatus.READY -> StepState.Ready(now)
             // Stopped before stuckFrom was stored: a call that was attempted counts as possibly applied.
             StepStatus.STUCK, null ->
-                if (step !is SignalStep<*, *> && r.attempts > 0) StepState.Checking(now) else StepState.Ready(now)
+                if (step !is SignalStep<*, *> && saga.attempts > 0) StepState.Checking(now) else StepState.Ready(now)
         }
     }
 
@@ -637,17 +637,17 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
      * Step done: move on to the next one, or complete the saga. A saga whose cancellation was requested
      * compensates instead, this step included, even when it was the last one.
      */
-    fun next(r: Unfinished, stepCount: Int, now: Instant): SagaPhase {
-        check(r is Running) { "Saga ${r.id} is ${r.state}: only a running saga moves on" }
-        if (r.cancellation != null) return startCompensation(r, r.stepIndex, cancelled(r), now)
-        val index = r.stepIndex + 1
-        return if (index == stepCount && hooks(r.type).completed) {
-            Finishing(r.identity, r.stepIndex, StepState.Ready(now), attempts = 0, resumeFailures = 0, null, null, failureReason = null)
+    fun next(saga: Unfinished, stepCount: Int, now: Instant): SagaPhase {
+        check(saga is Running) { "Saga ${saga.id} is ${saga.state}: only a running saga moves on" }
+        if (saga.cancellation != null) return startCompensation(saga, saga.stepIndex, cancelled(saga), now)
+        val index = saga.stepIndex + 1
+        return if (index == stepCount && hooks(saga.type).completed) {
+            Finishing(saga.identity, saga.stepIndex, StepState.Ready(now), attempts = 0, resumeFailures = 0, null, null, failureReason = null)
         } else if (index == stepCount) {
-            Finished(r.identity, r.stepIndex, r.attempts, lastDue = r.due, cancellation = null, lastError = null, failureReason = null)
+            Finished(saga.identity, saga.stepIndex, saga.attempts, lastDue = saga.due, cancellation = null, lastError = null, failureReason = null)
         } else {
             Running(
-                r.identity, index, StepState.Ready(now), attempts = 0, checkFailures = 0, resumeFailures = 0,
+                saga.identity, index, StepState.Ready(now), attempts = 0, checkFailures = 0, resumeFailures = 0,
                 key = KeyState(since = null, generation = 0), cancellation = null, lastError = null, refusal = null,
             )
         }
@@ -658,33 +658,36 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
      * saga's failureReason, which nothing changes afterwards: lastError may then be overwritten by a
      * compensation that fails and is retried.
      */
-    fun startCompensation(r: Unfinished, index: Int, reason: String, now: Instant): SagaPhase {
-        check(r is Running) { "Saga ${r.id} is already ${r.state}" }
+    fun startCompensation(saga: Unfinished, index: Int, reason: String, now: Instant): SagaPhase {
+        check(saga is Running) { "Saga ${saga.id} is already ${saga.state}" }
         // A refusal kept by RECORD_FAILED stays the reason, when an operator then aborts.
-        return compensateFrom(r, index, now, failureReason = r.refusal ?: reason)
+        return compensateFrom(saga, index, now, failureReason = saga.refusal ?: reason)
     }
 
-    fun cancelled(r: SagaPhase) = "Cancelled: ${r.cancellation?.reason}"
+    fun cancelled(saga: SagaPhase) = "Cancelled: ${saga.cancellation?.reason}"
 
-    /** The current step of the compensating saga [r] is undone: on to the previous one. */
-    private fun previousUndo(r: Unfinished, now: Instant): SagaPhase {
-        check(r is Compensating) { "Saga ${r.id} is ${r.state}: only a compensating saga undoes its steps" }
-        return compensateFrom(r, r.stepIndex - 1, now, r.failureReason)
+    /** The current step of the compensating saga [saga] is undone: on to the previous one. */
+    private fun previousUndo(saga: Unfinished, now: Instant): SagaPhase {
+        check(saga is Compensating) { "Saga ${saga.id} is ${saga.state}: only a compensating saga undoes its steps" }
+        return compensateFrom(saga, saga.stepIndex - 1, now, saga.failureReason)
     }
 
     /**
      * Undoes the completed steps, from [index] down to the first one, because of [failureReason]. Nothing to undo:
      * FINISHING if the saga has an onFailed hook, else FAILED, keeping what it was doing last and its last error.
      */
-    private fun compensateFrom(p: Unfinished, index: Int, now: Instant, failureReason: String): SagaPhase =
-        if (index < 0 && hooks(p.type).failed) {
-            Finishing(p.identity, p.stepIndex, StepState.Ready(now), attempts = 0, resumeFailures = 0, p.cancellation, p.lastError, failureReason)
+    private fun compensateFrom(saga: Unfinished, index: Int, now: Instant, failureReason: String): SagaPhase =
+        if (index < 0 && hooks(saga.type).failed) {
+            Finishing(
+                saga.identity, saga.stepIndex, StepState.Ready(now), attempts = 0, resumeFailures = 0, saga.cancellation, saga.lastError,
+                failureReason,
+            )
         } else if (index < 0) {
-            Finished(p.identity, p.stepIndex, p.attempts, lastDue = p.due, p.cancellation, p.lastError, failureReason)
+            Finished(saga.identity, saga.stepIndex, saga.attempts, lastDue = saga.due, saga.cancellation, saga.lastError, failureReason)
         } else {
             Compensating(
-                p.identity, index, StepState.Ready(now), attempts = 0, checkFailures = 0, resumeFailures = 0,
-                key = KeyState(since = null, generation = 0), p.cancellation, p.lastError, failureReason,
+                saga.identity, index, StepState.Ready(now), attempts = 0, checkFailures = 0, resumeFailures = 0,
+                key = KeyState(since = null, generation = 0), saga.cancellation, saga.lastError, failureReason,
             )
         }
 
@@ -693,50 +696,50 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
      * replayed with the same key after backoff, until a replay answers. No settle delay: the service answers
      * a replay with the first result.
      */
-    private fun replayLater(r: Unfinished, error: String, now: Instant): Unfinished =
-        if (r.attempts >= config.maxAttempts) {
-            stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
+    private fun replayLater(saga: Unfinished, error: String, now: Instant): Unfinished =
+        if (saga.attempts >= config.maxAttempts) {
+            stuck(saga, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
         } else {
-            r.with(step = StepState.Replaying(now + config.backoff(r.attempts)), lastError = "$error; retrying with the same key")
+            saga.with(step = StepState.Replaying(now + config.backoff(saga.attempts)), lastError = "$error; retrying with the same key")
         }
 
-    private fun retryLater(r: Unfinished, error: String, now: Instant): Unfinished =
-        if (r.attempts >= config.maxAttempts) {
-            stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
+    private fun retryLater(saga: Unfinished, error: String, now: Instant): Unfinished =
+        if (saga.attempts >= config.maxAttempts) {
+            stuck(saga, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: $error", now)
         } else {
-            r.with(step = StepState.Ready(now + config.backoff(r.attempts)), lastError = error)
+            saga.with(step = StepState.Ready(now + config.backoff(saga.attempts)), lastError = error)
         }
 
     /**
-     * The lock of [r]'s call expired. Forward: the call may have left, so the outcome is unknown and will be checked.
+     * The lock of [saga]'s call expired. Forward: the call may have left, so the outcome is unknown and will be checked.
      * A check whose lock expires counts as a failed one, up to [SagaConfig.maxAttempts].
      * Compensation: compensations are safe to repeat, so it simply runs again, up to [SagaConfig.maxAttempts].
      */
-    fun lockExpired(r: Unfinished, now: Instant, idempotent: () -> Boolean): Unfinished {
-        val call = r.step as? StepState.InFlight ?: error("Saga ${r.id} is ${r.step.status}: no call is in flight")
+    fun lockExpired(saga: Unfinished, now: Instant, idempotent: () -> Boolean): Unfinished {
+        val call = saga.step as? StepState.InFlight ?: error("Saga ${saga.id} is ${saga.step.status}: no call is in flight")
         val since = call.lockedUntil
-        return if (r is Running && idempotent()) {
+        return if (saga is Running && idempotent()) {
             // Idempotent: replayed with the same key from the lock's expiry, as after an unknown outcome.
-            if (r.attempts >= config.maxAttempts) {
-                stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the call", now)
+            if (saga.attempts >= config.maxAttempts) {
+                stuck(saga, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the call", now)
             } else {
-                r.with(step = StepState.Replaying(since), lastError = "Lock expired during the call; retrying with the same key")
+                saga.with(step = StepState.Replaying(since), lastError = "Lock expired during the call; retrying with the same key")
             }
-        } else if (call.call == CallAction.CHECK && r.checkFailures >= config.maxAttempts) {
+        } else if (call.call == CallAction.CHECK && saga.checkFailures >= config.maxAttempts) {
             // A check that never recorded an outcome, again and again.
             stuck(
-                r, StuckReason.CHECK_FAILING,
+                saga, StuckReason.CHECK_FAILING,
                 "Check keeps failing, the step may have been applied: lock expired during the check", now,
             )
-        } else if (r is Running) {
-            r.with(
+        } else if (saga is Running) {
+            saga.with(
                 step = StepState.Checking(since + config.settleDelay),
                 lastError = "Lock expired during the ${if (call.call == CallAction.CHECK) "check" else "call"}",
             )
-        } else if (r.attempts >= config.maxAttempts) {
-            stuck(r, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the compensation", now)
+        } else if (saga.attempts >= config.maxAttempts) {
+            stuck(saga, StuckReason.TOO_MANY_ATTEMPTS, "Too many attempts: lock expired during the compensation", now)
         } else {
-            r.with(step = StepState.Ready(since), lastError = "Lock expired during the compensation")
+            saga.with(step = StepState.Ready(since), lastError = "Lock expired during the compensation")
         }
     }
 
@@ -744,12 +747,12 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
      * The idempotency key of a call: `<saga id>/<step>/execute` (a check shares it, so that it may replay), or
      * `/compensate`; `/<generation>` added after `retry(newKey = true)`. Derived, so every pod computes it.
      */
-    fun keyOf(r: Unfinished, stepName: String, action: Action): String {
-        val base = "${r.id}/$stepName/${if (action == Action.COMPENSATE) "compensate" else "execute"}"
-        return if (r.key.generation > 0) "$base/${r.key.generation}" else base
+    fun keyOf(saga: Unfinished, stepName: String, action: Action): String {
+        val base = "${saga.id}/$stepName/${if (action == Action.COMPENSATE) "compensate" else "execute"}"
+        return if (saga.key.generation > 0) "$base/${saga.key.generation}" else base
     }
 
     /** The saga stops for a human, for [reason], its lock released if it had one. Leaving STUCK clears it all (see [next], [compensateFrom], [retry]). */
-    fun stuck(r: Unfinished, reason: StuckReason, error: String?, now: Instant): Unfinished =
-        r.with(step = StepState.Stuck(reason, at = now, from = null, due = r.due), lastError = error)
+    fun stuck(saga: Unfinished, reason: StuckReason, error: String?, now: Instant): Unfinished =
+        saga.with(step = StepState.Stuck(reason, at = now, from = null, due = saga.due), lastError = error)
 }
