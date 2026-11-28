@@ -1,6 +1,7 @@
 package dev.octogene.akta
 
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.reflect.KType
 import kotlin.time.Duration
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
@@ -142,6 +143,28 @@ internal class SagaManualActions(
     }
 
     /**
+     * What markDone and abort (`currentStepApplied = true`) need as output for [step], the current step of a saga
+     * running forward: the rules of [manualOutput] and [signalByHand]. [saved]: an output is saved for the step;
+     * [signalKept]: a signal step's signal was received.
+     */
+    fun outputFor(step: AnyStep, saved: Boolean, signalKept: Boolean): ManualOutput {
+        val forAbort = outputNeed(step.outputType, saved)
+        val signal = (step as? SignalStep<*, *>)?.signal
+        val forMarkDone = when {
+            signal == null -> forAbort
+            signalKept -> OutputNeed.OPTIONAL
+            else -> OutputNeed.REQUIRED                       // no value received: it must be given
+        }
+        return ManualOutput(step.outputType?.displayName(), forMarkDone, forAbort, saved, signal, signalKept)
+    }
+
+    private fun outputNeed(type: KType?, saved: Boolean): OutputNeed = when {
+        type == null -> OutputNeed.NONE
+        saved || type.isMarkedNullable -> OutputNeed.OPTIONAL
+        else -> OutputNeed.REQUIRED
+    }
+
+    /**
      * The output an operator gives for [step], encoded and decoded, after checking it against the step's
      * output type. Null keeps the output already saved for the step, if any.
      */
@@ -156,7 +179,7 @@ internal class SagaManualActions(
             if (step.name in stored) {
                 return stored[step.name] to stored[step.name]?.let { serializer.decodeSaved(it, type) { "the output of step '${step.name}'" } }
             }
-            require(type.isMarkedNullable) { "Step '${step.name}' needs an output of type $type" }
+            require(outputNeed(type, saved = false) != OutputNeed.REQUIRED) { "Step '${step.name}' needs an output of type $type" }
             return null to null
         }
         val size = output.utf8Size()

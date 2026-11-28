@@ -300,13 +300,20 @@ public class SagaEngine(
     /**
      * The steps of the saga [id], in the order of its definition, and where each stands: done, current, pending,
      * undone, or never applied. Each done or undone step carries what its `logAs` says of its output, never the
-     * output itself. Null if there is no such saga. One read of the saga and its results: for a saga's detail,
-     * not for a list.
+     * output itself. The current step of a saga running forward also says what output [markDone] and [abort] need
+     * from an operator ([SagaStepProgress.output]). Null if there is no such saga. One read of the saga and its
+     * results: for a saga's detail, not for a list.
      *
      * @throws IllegalArgumentException if the saga's type is not one this engine knows.
      */
     public suspend fun steps(id: Uuid): List<SagaStepProgress>? {
-        val (saga, results) = store.tx { (repository.find(id) ?: return@tx null) to repository.stepResults(id) } ?: return null
+        val read = store.tx {
+            val saga = repository.find(id) ?: return@tx null
+            val current = definition(saga.type).stepAt(saga.stepIndex) as? SignalStep<*, *>
+            val signalKept = current != null && repository.signal(id, current.signal) != null
+            Triple(saga, repository.stepResults(id), signalKept)
+        } ?: return null
+        val (saga, results, signalKept) = read
         val def = definition(saga.type)
         val phase = saga.phase()
         val byIndex = results.associateBy { it.stepIndex }
@@ -314,9 +321,15 @@ public class SagaEngine(
         return def.steps.indices.map { index ->
             val step = def.stepAt(index)
             val result = byIndex[index]
+            // markDone and abort take an output only on the current step of a saga running forward.
+            val output = if (phase is SagaPhase.Running && progress[index] == StepProgress.CURRENT) {
+                manualActions.outputFor(step, saved = result != null && result.compensatedAt == null, signalKept)
+            } else {
+                null
+            }
             SagaStepProgress(
                 index, step.name, progress[index], ref = result?.let { ref(step, it) }, doneAt = result?.doneAt,
-                compensatedAt = result?.compensatedAt,
+                compensatedAt = result?.compensatedAt, output = output,
             )
         }
     }

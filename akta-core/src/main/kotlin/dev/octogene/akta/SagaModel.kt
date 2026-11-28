@@ -310,6 +310,39 @@ public data class SagaStepProgress(
     val ref: String?,
     val doneAt: Instant?,
     val compensatedAt: Instant?,
+    /** On the current step of a saga running forward: the output markDone and abort may need. Null elsewhere. */
+    val output: ManualOutput? = null,
+)
+
+/** Whether an action needs an output from the operator: see [ManualOutput]. */
+public enum class OutputNeed {
+    /** The step has no output: give none, it would be refused. */
+    NONE,
+
+    /** Left out, the action uses what it has: the output or signal already saved, or null for a nullable type. */
+    OPTIONAL,
+
+    /** Left out, the action is refused. */
+    REQUIRED,
+}
+
+/**
+ * The output an operator gives [SagaEngine.markDone] or [SagaEngine.abort] (`currentStepApplied = true`) for the
+ * current step, so that a screen asks for it only where it is needed. The same rules the actions apply.
+ */
+public data class ManualOutput(
+    /** The step's output type, as the actions check the output against it: `String`, `Payment?`, `List<Payment>`. */
+    val type: String?,
+    /** What markDone needs. For a signal step, the output is the signal's value, which onSignal accepts or refuses. */
+    val markDone: OutputNeed,
+    /** What abort with `currentStepApplied = true` needs: the output the step's compensation receives. */
+    val abort: OutputNeed,
+    /** An output is saved for the step already (after RECORD_FAILED): left out, it is used. */
+    val saved: Boolean,
+    /** For a signal step, its signal's name. */
+    val signal: String?,
+    /** The signal was received and is kept: markDone without an output uses it, and refuses another value. */
+    val signalKept: Boolean,
 )
 
 /** The manual actions on a saga, as [SagaEngine.actions] reports them. */

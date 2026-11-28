@@ -1,5 +1,6 @@
 package dev.octogene.akta
 
+import kotlin.reflect.KClass
 import kotlin.reflect.KType
 
 /*
@@ -35,6 +36,16 @@ internal fun describe(step: AnyStep, output: Any?): String? =
     }
 
 internal fun String.utf8Size(): Int = encodeToByteArray().size
+
+/**
+ * The type as an operator reads it: `String`, `Payment?`, `List<Payment>`. Built from its classes' simple names:
+ * [KType.toString] needs kotlin-reflect for that, and says so instead.
+ */
+internal fun KType.displayName(): String {
+    val name = (classifier as? KClass<*>)?.simpleName ?: classifier.toString()
+    val arguments = if (arguments.isEmpty()) "" else arguments.joinToString(", ", "<", ">") { it.type?.displayName() ?: "*" }
+    return name + arguments + if (isMarkedNullable) "?" else ""
+}
 
 /** Errors the JVM cannot recover from (out of memory, stack overflow): never caught. */
 internal fun Throwable.isFatal(): Boolean = this is VirtualMachineError

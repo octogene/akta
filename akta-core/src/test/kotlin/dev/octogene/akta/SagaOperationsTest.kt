@@ -9,6 +9,7 @@ import java.io.IOException
 import java.sql.SQLException
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Clock
@@ -215,6 +216,69 @@ class SagaOperationsTest {
         assertEquals(clock.now, steps[1].compensatedAt)
         assertNull(steps[0].compensatedAt)                                       // its undo is the one stuck
         assertNull(runBlocking { engine.steps(Uuid.random()) })
+    }
+
+    @Test
+    fun `the output a stuck step needs is exactly what markDone and abort accept`() {
+        val definitions = arrayOf(
+            saga("NO_OUTPUT") { step("call") { execute { throw StepNotSent("down") } } },
+            saga("REQUIRED") { step<String>("call") { execute { throw StepNotSent("down") } } },
+            saga("NULLABLE") { step<String?>("call") { execute { throw StepNotSent("down") } } },
+            saga("SAVED") { step<String>("call") { execute { throw StepNotSent("down") } } },
+            saga("SIGNAL") { awaitSignal<String>("wait", signal = "payment", timeout = 1.minutes) },
+            saga("SIGNAL_KEPT") {
+                awaitSignal<String>("wait", signal = "payment", timeout = 1.hours) { onSignal { error("onSignal bug") } }
+            },
+        )
+        val engine = engine(*definitions, config = once)
+        val ids = definitions.associate { it.type to engine.create(it, "K-${it.type}") }
+        ids.values.forEach { engine.run(it) }
+        runBlocking { engine.signal(ids.getValue("SIGNAL_KEPT"), "payment", "paid") }
+        engine.resumeAfter(2.minutes)                                           // the signal's timeout, the bug
+        // An output saved for the stuck step, as after RECORD_FAILED.
+        runBlocking { transactions.inTransaction { repository.saveResult(ids.getValue("SAVED"), 0, "call", "\"found\"", clock.now) } }
+
+        fun accepted(action: suspend () -> Any?): Boolean {
+            val before = repository.snapshot()
+            return try {
+                runBlocking { action() }
+                true
+            } catch (_: IllegalArgumentException) {
+                false
+            } finally {
+                repository.restore(before)
+            }
+        }
+        val reported = ids.mapValues { (type, id) ->
+            val output = runBlocking { engine.steps(id) }!!.single { it.progress == StepProgress.CURRENT }.output
+            assertNotNull(output, type)
+            val value = "\"given\""
+            fun markDone(output: String?) = accepted { engine.markDone(id, output, "op", runFor = Duration.ZERO) }
+            fun abort(output: String?) = accepted { engine.abort(id, "op", currentStepApplied = true, output = output, runFor = Duration.ZERO) }
+            assertEquals(output.markDone != OutputNeed.REQUIRED, markDone(null), "$type: markDone without an output")
+            assertEquals(output.abort != OutputNeed.REQUIRED, abort(null), "$type: abort without an output")
+            assertEquals(output.abort != OutputNeed.NONE, abort(value), "$type: abort with an output")
+            if (output.signal == null) assertEquals(output.markDone != OutputNeed.NONE, markDone(value), "$type: markDone with an output")
+            output.markDone to output.abort
+        }
+        assertEquals(
+            mapOf(
+                "NO_OUTPUT" to (OutputNeed.NONE to OutputNeed.NONE),
+                "REQUIRED" to (OutputNeed.REQUIRED to OutputNeed.REQUIRED),
+                "NULLABLE" to (OutputNeed.OPTIONAL to OutputNeed.OPTIONAL),
+                "SAVED" to (OutputNeed.OPTIONAL to OutputNeed.OPTIONAL),
+                "SIGNAL" to (OutputNeed.REQUIRED to OutputNeed.REQUIRED),         // no value received: give it
+                "SIGNAL_KEPT" to (OutputNeed.OPTIONAL to OutputNeed.REQUIRED),    // markDone uses the signal kept
+            ),
+            reported,
+        )
+        val kept = runBlocking { engine.steps(ids.getValue("SIGNAL_KEPT")) }!!.single().output!!
+        assertEquals("payment" to true, kept.signal to kept.signalKept)
+        assertEquals("String", kept.type)
+        val nullable = runBlocking { engine.steps(ids.getValue("NULLABLE")) }!!.single().output!!
+        assertEquals("String?", nullable.type)
+        // A step that is not the current one, or a saga not running forward, has none to give.
+        assertNull(runBlocking { engine.steps(ids.getValue("NO_OUTPUT")) }!!.single().output?.type)
     }
 
     @Test
