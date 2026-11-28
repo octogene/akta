@@ -92,7 +92,7 @@ internal fun page(base: String, title: String, content: MAIN.() -> Unit): String
     body {
         header {
             nav {
-                a(href = "$base/") { +"Sagas" }
+                a(href = base) { +"Sagas" }
                 a(href = "$base/queue") { +"Stuck" }
             }
             form(action = "$base/search", method = FormMethod.get, classes = "search") {
@@ -370,7 +370,8 @@ private fun FlowContent.outputField(need: OutputNeed?, type: String?, saved: Boo
         textArea(rows = "3") {
             name = "output"
             if (need == OutputNeed.REQUIRED) required = true
-            placeholder = if (type?.removeSuffix("?") == "String") "\"STK-1\"" else "{ … }"
+            // The shape, never a value: an example would be taken for one, and sent as is.
+            placeholder = if (type?.removeSuffix("?") == "String") "\"…\"" else "{ … }"
         }
     }
     if (need == OutputNeed.OPTIONAL) {

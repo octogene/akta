@@ -5,6 +5,7 @@ import dev.octogene.akta.SagaConfig
 import dev.octogene.akta.SagaEngine
 import dev.octogene.akta.SagaState
 import dev.octogene.akta.StepNotSent
+import dev.octogene.akta.StepRejected
 import dev.octogene.akta.memory.InMemorySagaRepository
 import dev.octogene.akta.memory.InMemorySagaTransactions
 import dev.octogene.akta.saga
@@ -23,12 +24,14 @@ import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.time.Clock
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
@@ -49,8 +52,16 @@ class SagaConsoleTest {
         step("confirm") { execute { } }
     }
 
+    /** An approval whose timeout passes at once, and has no check: stuck, for a human to deliver the answer. */
+    private val approval = saga("APPROVAL") {
+        step<String>("request") { execute { "REQ-7" }; compensate { } }
+        awaitSignal<String>("await-approval", signal = "approval", timeout = 1.milliseconds) {
+            onSignal { if (it != "yes") throw StepRejected("not approved: $it") }
+        }
+    }
+
     private val engine = SagaEngine(
-        InMemorySagaTransactions(repository), repository, listOf(stock), KotlinxJsonSagaSerializer(), SagaConfig(maxAttempts = 1),
+        InMemorySagaTransactions(repository), repository, listOf(stock, approval), KotlinxJsonSagaSerializer(), SagaConfig(maxAttempts = 1),
     )
 
     private fun stuck(key: String): Uuid = runBlocking {
@@ -92,6 +103,9 @@ class SagaConsoleTest {
         val csp = response.headers["Content-Security-Policy"].orEmpty()
         assertTrue("script-src 'self'" in csp && "frame-ancestors 'none'" in csp, csp)
         assertEquals("no-store", response.headers[HttpHeaders.CacheControl])
+        // With a trailing slash too, and its links still point inside the console.
+        val slash = page("/")
+        assertTrue("""href="/admin/console/queue"""" in slash, slash)
     }
 
     @Test
@@ -120,6 +134,26 @@ class SagaConsoleTest {
         // Refused ones are listed with why, not offered.
         assertFalse("""hx-post="/admin/console/saga/$id/retry-new-key"""" in text, text)
         assertTrue("sends no idempotency key" in text, text)
+    }
+
+    @Test
+    fun `on a signal step, mark done says onSignal decides, and that a refusal undoes the steps before`() = console {
+        val id = runBlocking {
+            val id = InMemorySagaTransactions(repository).inTransaction { engine.create(approval, "approval-1") }
+            engine.run(id, Clock.System.now() + 10.seconds)
+            delay(5)                                                                         // past its timeout
+            engine.resumeDue()
+            id
+        }
+        val text = page("/saga/$id")
+        assertTrue("Delivers the value as the 'approval' signal" in text, text)
+        assertTrue("if it refuses it, the saga gives up and undoes request" in text, text)
+        assertTrue("Waits for the 'approval' signal again" in text, text)
+        assertFalse("STK-1" in text, text)                                                  // no example to take for a value
+
+        // A value onSignal refuses: the saga compensates, as the page said.
+        act("/saga/$id/mark-done", mapOf("output" to "\"no\""))
+        assertEquals(SagaState.FAILED, runBlocking { engine.find(id)!!.state })
     }
 
     @Test

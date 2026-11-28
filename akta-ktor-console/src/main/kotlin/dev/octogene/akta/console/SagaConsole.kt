@@ -52,11 +52,14 @@ private const val QUEUE_PAGE = 50
  */
 @OptIn(ExperimentalUuidApi::class)
 public fun Route.sagaConsole(engine: SagaEngine, actor: ((ApplicationCall) -> String?)? = null) {
-    get {
+    // The overview, with or without a trailing slash: Ktor tells the two apart.
+    val overview: suspend io.ktor.server.routing.RoutingContext.() -> Unit = {
         val base = call.base(depth = 0)
         val stats = engine.stats()
         call.html(page(base, "Sagas") { overview(base, stats, now()) })
     }
+    get(overview)
+    get("/", overview)
     get("queue") {
         val base = call.base(depth = 1)
         val after = call.request.queryParameters["after"]?.let { parseCursor(it) ?: return@get call.badRequest(base, "Not a page cursor: $it") }
@@ -67,7 +70,7 @@ public fun Route.sagaConsole(engine: SagaEngine, actor: ((ApplicationCall) -> St
     get("search") {
         val base = call.base(depth = 1)
         val query = call.request.queryParameters["q"]?.trim().orEmpty()
-        if (query.isEmpty()) return@get call.respondRedirect("$base/")
+        if (query.isEmpty()) return@get call.respondRedirect(base)
         val id = try {
             Uuid.parse(query)
         } catch (_: IllegalArgumentException) {

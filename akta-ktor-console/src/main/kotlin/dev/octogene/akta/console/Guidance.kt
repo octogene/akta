@@ -70,7 +70,10 @@ internal val ManualAction.label: String
 
 /** What [action] does to [saga], said before it is done: the line under its button, and its confirmation. */
 internal fun consequence(action: ManualAction, saga: SagaRecord, steps: List<SagaStepProgress>?): String {
-    val current = steps?.firstOrNull { it.progress == StepProgress.CURRENT }?.name ?: "the current step"
+    val currentStep = steps?.firstOrNull { it.progress == StepProgress.CURRENT }
+    val current = currentStep?.name ?: "the current step"
+    // A signal step's: markDone delivers the value as its signal, and onSignal decides on it.
+    val signal = currentStep?.output?.signal
     val done = steps.orEmpty().filter { it.progress == StepProgress.DONE }.map { it.name }.reversed()
     fun undoes(vararg first: String) = (first.toList() + done).let { if (it.isEmpty()) "nothing to undo" else "undoes ${it.joinToString(", ")}" }
     val unknown = saga.stuckReason == StuckReason.CANNOT_TELL || saga.stuckReason == StuckReason.CHECK_FAILING
@@ -78,11 +81,17 @@ internal fun consequence(action: ManualAction, saga: SagaRecord, steps: List<Sag
         ManualAction.RETRY -> when {
             saga.state == SagaState.FINISHING -> "Runs the hook again, alone."
             saga.state == SagaState.COMPENSATING -> "Runs the undo of '$current' again."
+            signal != null -> "Waits for the '$signal' signal again, until the step's timeout: one received meanwhile is used at once."
             unknown -> "Calls '$current' again WITHOUT checking: only if you confirmed it was not applied."
             else -> "Runs '$current' again, as it was (replayed with its key if it has one)."
         }
         ManualAction.RETRY_WITH_NEW_KEY -> "Calls '$current' with a fresh key, as a new request: only if you confirmed it was not applied."
-        ManualAction.MARK_DONE -> "The saga goes on as if '$current' had succeeded: only if you confirmed it was applied."
+        ManualAction.MARK_DONE -> if (signal != null) {
+            "Delivers the value as the '$signal' signal. onSignal decides: if it accepts it, the saga goes on; if it refuses it, " +
+                "the saga gives up and ${undoes()}."
+        } else {
+            "The saga goes on as if '$current' had succeeded: only if you confirmed it was applied."
+        }
         ManualAction.ABORT -> if (saga.state == SagaState.FINISHING) {
             "Gives up: ${undoes()}."
         } else {
