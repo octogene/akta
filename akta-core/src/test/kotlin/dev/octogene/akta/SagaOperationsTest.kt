@@ -126,10 +126,10 @@ class SagaOperationsTest {
         val afterRetry = runBlocking { engine.retry(retried, "operator") }
         val afterMarkDone = runBlocking { engine.markDone(marked, null, "operator") }
 
-        for (r in listOf(afterRetry, afterMarkDone)) {
-            assertEquals(SagaState.COMPLETED, r.state)
-            assertNull(r.stuckReason)
-            assertNull(r.stuckAt)
+        for (saga in listOf(afterRetry, afterMarkDone)) {
+            assertEquals(SagaState.COMPLETED, saga.state)
+            assertNull(saga.stuckReason)
+            assertNull(saga.stuckAt)
         }
     }
 

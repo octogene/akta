@@ -54,10 +54,10 @@ class SagaMachineTest {
     /** The row a decision writes. */
     private val Decision.record get() = saga.record()
 
-    private fun decide(outcome: Outcome, r: SagaRecord = saga(), machine: SagaMachine = this.machine, replay: Boolean = false) =
-        r.typed().let { machine.decide(it, outcome, replay, unclaimed = it, now) }
+    private fun decide(outcome: Outcome, row: SagaRecord = saga(), machine: SagaMachine = this.machine, replay: Boolean = false) =
+        row.typed().let { machine.decide(it, outcome, replay, unclaimed = it, now) }
 
-    private fun stuck(r: SagaRecord, reason: StuckReason, error: String) = machine.stuck(r.typed(), reason, error, now).record()
+    private fun stuck(row: SagaRecord, reason: StuckReason, error: String) = machine.stuck(row.typed(), reason, error, now).record()
 
     @Test
     fun `a step done saves its output and moves on, or completes the saga at the last step`() {
@@ -72,8 +72,8 @@ class SagaMachineTest {
 
     @Test
     fun `a step done after a cancellation was requested is undone too`() {
-        val r = saga(stepIndex = 1).copy(cancelRequestedAt = now, cancelReason = "changed my mind")
-        val undoing = decide(Outcome.Done(null, null), r).record
+        val row = saga(stepIndex = 1).copy(cancelRequestedAt = now, cancelReason = "changed my mind")
+        val undoing = decide(Outcome.Done(null, null), row).record
         assertEquals(SagaState.COMPENSATING, undoing.state)
         assertEquals(1, undoing.stepIndex)                              // this step included
         assertEquals("Cancelled: changed my mind", undoing.failureReason)
@@ -92,12 +92,12 @@ class SagaMachineTest {
 
     @Test
     fun `a request not sent is retried, unless an earlier attempt may have been applied`() {
-        val r = saga().copy(keySince = now)
-        val first = decide(Outcome.NotSent("refused"), r, idempotentFirst).record
+        val row = saga().copy(keySince = now)
+        val first = decide(Outcome.NotSent("refused"), row, idempotentFirst).record
         assertEquals(StepStatus.READY, first.stepStatus)
         assertNull(first.keySince)                                      // the key was not used
 
-        val replay = decide(Outcome.NotSent("refused"), r, idempotentFirst, replay = true).record
+        val replay = decide(Outcome.NotSent("refused"), row, idempotentFirst, replay = true).record
         assertEquals(StepStatus.REPLAYING, replay.stepStatus)
         assertEquals(now, replay.keySince)
     }
@@ -122,9 +122,9 @@ class SagaMachineTest {
     @Test
     fun `an expired lock is checked, replayed, run again, or stopped after too many checks`() {
         val since = now - 1.minutes
-        fun expired(r: SagaRecord, idempotent: Boolean = false) =
+        fun expired(row: SagaRecord, idempotent: Boolean = false) =
             machine.lockExpired(
-                r.copy(stepStatus = StepStatus.IN_PROGRESS, lockedUntil = since, callAction = r.callAction ?: CallAction.EXECUTE).typed(), now,
+                row.copy(stepStatus = StepStatus.IN_PROGRESS, lockedUntil = since, callAction = row.callAction ?: CallAction.EXECUTE).typed(), now,
             ) { idempotent }.record()
 
         assertEquals(since + config.settleDelay, expired(saga()).nextAttemptAt)
