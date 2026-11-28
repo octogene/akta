@@ -1,0 +1,28 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{kt,kts}]
+indent_style = space
+indent_size = 4
+ktlint_code_style = intellij_idea
+max_line_length = 160
+
+# Rules turned off: they go against choices this code makes on purpose.
+# Comments aligned at the end of lines.
+ktlint_standard_no-multi-spaces = disabled
+# Short statements kept on one line: `for (e in effects) when (e) {`, `{ a; b }`.
+ktlint_standard_statement-wrapping = disabled
+# Long argument and parameter lists packed on a few lines, rather than one per line.
+ktlint_standard_argument-list-wrapping = disabled
+ktlint_standard_parameter-list-wrapping = disabled
+# Dense `when` and sealed hierarchies: no blank line forced between branches or commented members.
+ktlint_standard_blank-line-between-when-conditions = disabled
+ktlint_standard_spacing-between-declarations-with-comments = disabled
+# Signatures wrapped where they read best, not joined up to max_line_length.
+ktlint_standard_function-signature = disabled
+ktlint_standard_class-signature = disabled
