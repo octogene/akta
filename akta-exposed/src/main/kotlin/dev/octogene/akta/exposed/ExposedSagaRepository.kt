@@ -207,26 +207,26 @@ public class ExposedSagaRepository : SagaRepository {
         }
     }
 
-    private fun write(s: UpdateBuilder<*>, r: SagaRecord, now: Instant) {
-        s[SagaTable.state] = r.state.name
-        s[SagaTable.stepIndex] = r.stepIndex
-        s[SagaTable.stepStatus] = r.stepStatus.name
-        s[SagaTable.attempts] = r.attempts
-        s[SagaTable.checkFailures] = r.checkFailures
-        s[SagaTable.cancelRequestedAt] = r.cancelRequestedAt?.utc()
-        s[SagaTable.cancelReason] = r.cancelReason
-        s[SagaTable.failureReason] = r.failureReason?.take(SagaRepository.MAX_TEXT)
-        s[SagaTable.stuckReason] = r.stuckReason?.name
-        s[SagaTable.stuckAt] = r.stuckAt?.utc()
-        s[SagaTable.keySince] = r.keySince?.utc()
-        s[SagaTable.keyGeneration] = r.keyGeneration
-        s[SagaTable.resumeFailures] = r.resumeFailures
-        s[SagaTable.stuckFrom] = r.stuckFrom?.name
-        s[SagaTable.callAction] = r.callAction?.name
-        s[SagaTable.nextAttemptAt] = r.nextAttemptAt.utc()
-        s[SagaTable.lockedUntil] = r.lockedUntil?.utc()
-        s[SagaTable.lastError] = r.lastError?.take(SagaRepository.MAX_TEXT)
-        s[SagaTable.traceparent] = r.traceparent
+    private fun write(s: UpdateBuilder<*>, row: SagaRecord, now: Instant) {
+        s[SagaTable.state] = row.state.name
+        s[SagaTable.stepIndex] = row.stepIndex
+        s[SagaTable.stepStatus] = row.stepStatus.name
+        s[SagaTable.attempts] = row.attempts
+        s[SagaTable.checkFailures] = row.checkFailures
+        s[SagaTable.cancelRequestedAt] = row.cancelRequestedAt?.utc()
+        s[SagaTable.cancelReason] = row.cancelReason
+        s[SagaTable.failureReason] = row.failureReason?.take(SagaRepository.MAX_TEXT)
+        s[SagaTable.stuckReason] = row.stuckReason?.name
+        s[SagaTable.stuckAt] = row.stuckAt?.utc()
+        s[SagaTable.keySince] = row.keySince?.utc()
+        s[SagaTable.keyGeneration] = row.keyGeneration
+        s[SagaTable.resumeFailures] = row.resumeFailures
+        s[SagaTable.stuckFrom] = row.stuckFrom?.name
+        s[SagaTable.callAction] = row.callAction?.name
+        s[SagaTable.nextAttemptAt] = row.nextAttemptAt.utc()
+        s[SagaTable.lockedUntil] = row.lockedUntil?.utc()
+        s[SagaTable.lastError] = row.lastError?.take(SagaRepository.MAX_TEXT)
+        s[SagaTable.traceparent] = row.traceparent
         s[SagaTable.updatedAt] = now.utc()
     }
 

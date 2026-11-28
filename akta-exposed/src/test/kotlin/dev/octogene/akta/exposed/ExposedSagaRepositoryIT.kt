@@ -222,8 +222,8 @@ class ExposedSagaRepositoryIT {
         val locked = CountDownLatch(1)
         val other = Thread {
             transaction(database) {
-                val r = repository.lock(id)!!
-                repository.save(r, Clock.System.now())
+                val row = repository.lock(id)!!
+                repository.save(row, Clock.System.now())
                 locked.countDown()
                 Thread.sleep(300)
             }

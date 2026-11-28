@@ -140,7 +140,7 @@ class SagaEngineTest {
         return result.sagas
     }
 
-    private fun SagaEngine.state(r: SagaRecord) = runBlocking { find(r.id)!! }
+    private fun SagaEngine.state(row: SagaRecord) = runBlocking { find(row.id)!! }
 
     // ---- Tests ------------------------------------------------------------------------------
 
