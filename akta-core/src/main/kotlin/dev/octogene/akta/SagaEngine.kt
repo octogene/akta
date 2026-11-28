@@ -362,6 +362,22 @@ public class SagaEngine(
     // SagaManualActions, which does the work, for what happens when the saga cannot move on, or fails to.
 
     /**
+     * What an operator can do with [saga] now: each manual action, and why it is refused if it is. The same
+     * checks the actions make, so a screen offers exactly what they accept. Reads nothing: pass a saga as read
+     * by [find], [findStuck] or [findByKey]. Two things can still refuse an action reported allowed: the saga
+     * moved on since it was read, or the output given to [markDone] or [abort] does not fit the step.
+     * A row the engine must never have written refuses every action, saying why, rather than throwing.
+     */
+    public fun actions(saga: SagaRecord): List<ManualActionCheck> {
+        val phase = try {
+            saga.phase()
+        } catch (e: IllegalStateException) {
+            return ManualAction.entries.map { ManualActionCheck(it, e.message ?: e.toString()) }
+        }
+        return machine.actions(phase, store.now())
+    }
+
+    /**
      * Retries the stuck step. Forward, this EXECUTES the step again without checking first:
      * when the saga is stuck because a check could not tell, only use it once you have confirmed
      * by hand that the step was not applied (otherwise use [markDone] or [abort]).

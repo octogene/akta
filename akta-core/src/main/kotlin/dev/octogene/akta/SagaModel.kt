@@ -271,6 +271,38 @@ public object SagaEvents {
      */
 }
 
+/** The manual actions on a saga, as [SagaEngine.actions] reports them. */
+public enum class ManualAction {
+    /** [SagaEngine.retry]. */
+    RETRY,
+
+    /** [SagaEngine.retry] with `newKey = true`. */
+    RETRY_WITH_NEW_KEY,
+
+    /** [SagaEngine.markDone]. */
+    MARK_DONE,
+
+    /** [SagaEngine.abort] with `currentStepApplied = false`. */
+    ABORT,
+
+    /** [SagaEngine.abort] with `currentStepApplied = true`. */
+    ABORT_CURRENT_STEP_APPLIED,
+
+    /** [SagaEngine.markCompensated]. */
+    MARK_COMPENSATED,
+
+    /** [SagaEngine.cancel]. */
+    CANCEL,
+}
+
+/**
+ * Whether a saga takes [action] in its current state: [refusal] is null if it does, else why not, in the words the
+ * action itself would refuse with.
+ */
+public data class ManualActionCheck(val action: ManualAction, val refusal: String?) {
+    public val allowed: Boolean get() = refusal == null
+}
+
 public data class SagaConfig(
     /** How long a call may take before it is considered interrupted: HTTP timeout + margin. */
     val callLock: Duration = 35.seconds,
