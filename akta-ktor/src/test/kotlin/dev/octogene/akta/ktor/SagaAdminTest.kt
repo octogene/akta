@@ -116,6 +116,9 @@ class SagaAdminTest {
         val saga = client.get("/admin/sagas/$id").read<SagaView>()
         val allowed = saga.actions.filter { it.allowed }.map { it.action }
         assertEquals(listOf("RETRY", "MARK_DONE", "ABORT", "ABORT_CURRENT_STEP_APPLIED", "CANCEL"), allowed)
+        // What mark-done needs: hold returns a String, and none is saved.
+        val output = client.get("/admin/sagas/$id").read<SagaView>().steps!!.single().output!!
+        assertEquals(OutputView("String", "REQUIRED", "REQUIRED", saved = false, signal = null, signalKept = false), output)
         val newKey = saga.actions.single { it.action == "RETRY_WITH_NEW_KEY" }
         assertTrue(newKey.refusal!!.contains("sends no idempotency key"), newKey.refusal)
 
@@ -132,6 +135,7 @@ class SagaAdminTest {
         val id = start(booking, "item-steps", Unit)                       // hold's undo stuck, book refused
         val saga = client.get("/admin/sagas/$id").read<SagaView>()
         assertEquals(listOf("hold" to "CURRENT", "book" to "NOT_APPLIED"), saga.steps!!.map { it.name to it.progress })
+        assertTrue(saga.steps!!.all { it.output == null })                 // compensating: no output to give
 
         val stuck = client.get("/admin/sagas/stuck").read<StuckPage>()
         assertTrue(stuck.sagas.isNotEmpty() && stuck.sagas.all { it.steps == null })
