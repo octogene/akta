@@ -64,6 +64,26 @@ Every saga in a response (`/{id}`, `/stuck`, `/by-key`, and the answer to an act
 
 They come from the checks the actions themselves make, so a screen that offers only the allowed ones never offers what the engine would refuse. An action that would change nothing (`cancel` on a saga already compensating) is reported refused, saying so. Two things can still make an allowed action answer `409`: the saga moved on since it was read, or the `output` given does not fit the step.
 
+A single saga (`/{id}`, and the answer to an action) also carries its **`steps`**, in the order of its definition, which is what a screen draws as a line. Lists leave them out (`null`), since they cost a read per saga:
+
+```json
+"steps": [
+  {"index": 0, "name": "hold-items",     "progress": "DONE",    "ref": "H-881", "doneAt": "…", "compensatedAt": null},
+  {"index": 1, "name": "create-payment", "progress": "CURRENT", "ref": null,    "doneAt": null, "compensatedAt": null},
+  {"index": 2, "name": "await-payment",  "progress": "PENDING", "ref": null,    "doneAt": null, "compensatedAt": null}
+]
+```
+
+| `progress` | Meaning |
+|---|---|
+| `DONE` | Applied, and not undone: an `abort` would undo it |
+| `CURRENT` | The step the saga is on: running, waiting, checked, being undone, or stuck |
+| `PENDING` | Not reached yet |
+| `UNDONE` | Applied, then undone (or found with nothing to undo) |
+| `NOT_APPLIED` | Never applied and never will be: the step that refused, or one the saga gave up before reaching |
+
+`ref` is what the step's `logAs` says of its output, the identifier to look up in the external system. It is never the output itself.
+
 A saga's **input is never in a response**, nor any step output: they may hold personal data. The history shows what `logAs` returns, an identifier, as it does everywhere else.
 
 ## Acting

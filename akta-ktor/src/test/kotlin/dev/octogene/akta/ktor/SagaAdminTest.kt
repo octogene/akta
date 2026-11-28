@@ -128,6 +128,20 @@ class SagaAdminTest {
     }
 
     @Test
+    fun `one saga comes with its steps, a list without`() = api {
+        val id = start(booking, "item-steps", Unit)                       // hold's undo stuck, book refused
+        val saga = client.get("/admin/sagas/$id").read<SagaView>()
+        assertEquals(listOf("hold" to "CURRENT", "book" to "NOT_APPLIED"), saga.steps!!.map { it.name to it.progress })
+
+        val stuck = client.get("/admin/sagas/stuck").read<StuckPage>()
+        assertTrue(stuck.sagas.isNotEmpty() && stuck.sagas.all { it.steps == null })
+        // The answer to an action carries them: the compensation done by hand, the step is undone.
+        down = false
+        val after = post("/$id/mark-compensated").read<SagaView>()
+        assertEquals(listOf("hold" to "UNDONE", "book" to "NOT_APPLIED"), after.steps!!.map { it.name to it.progress })
+    }
+
+    @Test
     fun `stats count the unfinished sagas, for all types or some`() = api {
         stuckStock("item-1")
         stuckStock("item-2")
