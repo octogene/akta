@@ -162,6 +162,12 @@ class SagaMachineTest {
     }
 
     @Test
+    fun `a type reads as an operator would write it, without kotlin-reflect`() {
+        assertEquals("String", typeOf<String>().displayName())
+        assertEquals("List<Map<String, Int?>>?", typeOf<List<Map<String, Int?>>?>().displayName())
+    }
+
+    @Test
     fun `a manual action refused leaves the decision unmade`() {
         assertFailsWith<IllegalArgumentException> { machine.retry(saga().phase(), newKey = false, now) { false } }
         val expired = stuck(saga(stepIndex = 1), StuckReason.KEY_EXPIRED, "forgotten").phase()   // the idempotent step
