@@ -269,11 +269,11 @@ public class SagaEngine(
     private suspend fun postpone(id: Uuid, error: Throwable, trace: String?) {
         try {
             store.tx {
-                val r = store.lock(id, skipLocked = true) ?: return@tx
+                val saga = store.lock(id, skipLocked = true) ?: return@tx
                 val now = store.now()
-                val postponed = machine.postpone(r, error.toString(), now) ?: return@tx
+                val postponed = machine.postpone(saga, error.toString(), now) ?: return@tx
                 store.save(postponed, now)
-                store.log(r.id, r.stepIndex, null, SagaEvents.RESUME_FAILED, error.toString(), now, trace)
+                store.log(saga.id, saga.stepIndex, null, SagaEvents.RESUME_FAILED, error.toString(), now, trace)
             }
         } catch (e: Throwable) {
             // The database is probably down: nothing more to do. Swallow any non-fatal error, as resumeDue does:
@@ -492,8 +492,8 @@ public class SagaEngine(
 
     /** Transaction 1: claims the current step, if there is something to do now. */
     private fun claim(id: Uuid, skipLocked: Boolean, trace: String?): Cycle {
-        val r = store.lock(id, skipLocked) ?: return Cycle.Rest(saga = null)
-        return claimLocked(r, trace)
+        val saga = store.lock(id, skipLocked) ?: return Cycle.Rest(saga = null)
+        return claimLocked(saga, trace)
     }
 
     /**
@@ -750,13 +750,13 @@ public class SagaEngine(
         }
 
     private fun finishLocked(id: Uuid, trace: String?): Cycle {
-        val r = store.lock(id) ?: return Cycle.Rest(saga = null)
+        val saga = store.lock(id) ?: return Cycle.Rest(saga = null)
         val now = store.now()
-        if (r !is SagaPhase.Finishing || r.step !is StepState.Ready || r.due > now) return Cycle.Rest(r)
-        val def = definition(r.type)
-        val ended = machine.finished(r)
+        if (saga !is SagaPhase.Finishing || saga.step !is StepState.Ready || saga.due > now) return Cycle.Rest(saga)
+        val def = definition(saga.type)
+        val ended = machine.finished(saga)
         store.save(ended, now)
-        store.log(r.id, r.stepIndex, null, SagaEvents.FINISHED, ended.state.name, now, trace)
+        store.log(saga.id, saga.stepIndex, null, SagaEvents.FINISHED, ended.state.name, now, trace)
         // Write the row now, before the hook, not at commit. The hook may read the saga table, or create the next saga
         // for the same key, which the unique index on unfinished sagas refuses while this row still says FINISHING.
         store.flush()
@@ -766,39 +766,39 @@ public class SagaEngine(
     }
 
     private fun hookFailedLocked(id: Uuid, error: Throwable, trace: String?): SagaPhase? {
-        val r = store.lock(id) ?: return null
+        val saga = store.lock(id) ?: return null
         // The transaction committed after all (it failed after the commit), or another instance finished the saga:
         // nothing to count.
-        if (r !is SagaPhase.Finishing || r.step !is StepState.Ready) return r
+        if (saga !is SagaPhase.Finishing || saga.step !is StepState.Ready) return saga
         val now = store.now()
-        val failed = machine.hookFailed(r, error.toString(), now)
+        val failed = machine.hookFailed(saga, error.toString(), now)
         store.save(failed, now)
-        store.log(r.id, r.stepIndex, null, SagaEvents.HOOK_FAILED, failed.lastError, now, trace)
+        store.log(saga.id, saga.stepIndex, null, SagaEvents.HOOK_FAILED, failed.lastError, now, trace)
         return failed
     }
 
     // ---- Saga data --------------------------------------------------------------------------
 
     /** The saga's input and the outputs of its completed steps, decoded. Throws [SagaDataException]. */
-    private fun context(r: SagaPhase, def: AnyDefinition): SagaContext<Any?> {
+    private fun context(saga: SagaPhase, def: AnyDefinition): SagaContext<Any?> {
         val inputType = def.inputType
         val input = if (inputType == null) {
             Unit
         } else {
-            val text = r.identity.input ?: throw SagaDataException("Saga ${r.id} has no stored input")
-            serializer.decodeSaved(text, inputType) { "the input of saga ${r.id}" }
+            val text = saga.identity.input ?: throw SagaDataException("Saga ${saga.id} has no stored input")
+            serializer.decodeSaved(text, inputType) { "the input of saga ${saga.id}" }
         }
-        val stored = repository.results(r.id)
+        val stored = repository.results(saga.id)
         val outputs = def.steps.filter { it.name in stored }.associate { step ->
             val type = step.outputType
             val text = stored[step.name]
             step.name to when {
                 type == null -> Unit
                 text == null -> null
-                else -> serializer.decodeSaved(text, type) { "the output of step '${step.name}' of saga ${r.id}" }
+                else -> serializer.decodeSaved(text, type) { "the output of step '${step.name}' of saga ${saga.id}" }
             }
         }
-        return SagaContext(r.id, r.identity.key, input, outputs)
+        return SagaContext(saga.id, saga.identity.key, input, outputs)
     }
 
     /** Logs an event on the step that [work] ran. */
