@@ -5,7 +5,7 @@ Running sagas in production comes down to four jobs:
 | Job | How | Page |
 |---|---|---|
 | Keep sagas moving | Call `resumeDue` every 30 s from the job runner | [Recovery and concurrency](../how-it-works/recovery.md) |
-| Resolve stuck sagas | An admin screen on `findStuck`, `history` and the manual actions, or the HTTP API of `akta-ktor` | [Stuck sagas](stuck-sagas.md), [Admin API](admin-api.md) |
+| Resolve stuck sagas | The console of `akta-ktor-console`, the HTTP API of `akta-ktor`, or your own screen on `findStuck`, `actions`, `steps` and the manual actions | [Stuck sagas](stuck-sagas.md), [Console](console.md), [Admin API](admin-api.md) |
 | Know when something is wrong | Gauges from `stats()`, counters from a listener, alerts | [Observability](observability.md) |
 | Keep the tables small | Call `purgeFinished` once a day | [Observability](observability.md#retention) |
 

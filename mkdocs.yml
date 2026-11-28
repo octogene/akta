@@ -105,6 +105,7 @@ nav:
       - Configuration: operations/configuration.md
       - Timing and budgets: operations/timing.md
       - Admin API for Ktor: operations/admin-api.md
+      - Operators' console: operations/console.md
   - Reference:
       - reference/index.md
       - Events: reference/events.md

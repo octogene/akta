@@ -309,12 +309,52 @@ public class SagaEngine(
     public suspend fun steps(id: Uuid): List<SagaStepProgress>? {
         val read = store.tx {
             val saga = repository.find(id) ?: return@tx null
-            val current = definition(saga.type).stepAt(saga.stepIndex) as? SignalStep<*, *>
-            val signalKept = current != null && repository.signal(id, current.signal) != null
-            Triple(saga, repository.stepResults(id), signalKept)
+            definition(saga.type)
+            saga to readSteps(saga)
         } ?: return null
-        val (saga, results, signalKept) = read
-        val def = definition(saga.type)
+        return progressOf(read.first, definition(read.first.type), read.second)
+    }
+
+    /**
+     * The saga [id] and what its detail page shows, in one transaction: its [steps], its [actions], and the latest
+     * [historyLimit] entries of its history. Null if there is no such saga. For a type this engine does not know, or a
+     * row it cannot read, its steps are null rather than thrown.
+     */
+    public suspend fun detail(id: Uuid, historyLimit: Int = 200): SagaDetail? {
+        require(historyLimit >= 1) { "historyLimit must be at least 1" }
+        val read = store.tx {
+            val saga = repository.find(id) ?: return@tx null
+            val steps = if (saga.type in definitions) readSteps(saga) else null
+            Triple(saga, steps, repository.recentHistory(id, historyLimit + 1))
+        } ?: return null
+        val (saga, stepsRead, history) = read
+        val def = definitions[saga.type]
+        val steps = if (def == null || stepsRead == null) {
+            null
+        } else {
+            try {
+                progressOf(saga, def, stepsRead)
+            } catch (_: IllegalStateException) {
+                null                                                    // a row the engine must never have written
+            } catch (_: IndexOutOfBoundsException) {
+                null                                                    // a step its definition no longer has
+            }
+        }
+        return SagaDetail(saga, steps, actions(saga), history.takeLast(historyLimit), earlierHistory = history.size > historyLimit)
+    }
+
+    /** What [progressOf] needs, read in the caller's transaction: the saga's step results, and whether its signal is kept. */
+    private class StepsRead(val results: List<StepResultRecord>, val signalKept: Boolean)
+
+    private fun readSteps(saga: SagaRecord): StepsRead {
+        val current = definitions[saga.type]?.steps?.getOrNull(saga.stepIndex) as? SignalStep<*, *>
+        val signalKept = current != null && repository.signal(saga.id, current.signal) != null
+        return StepsRead(repository.stepResults(saga.id), signalKept)
+    }
+
+    private fun progressOf(saga: SagaRecord, def: AnyDefinition, read: StepsRead): List<SagaStepProgress> {
+        val results = read.results
+        val signalKept = read.signalKept
         val phase = saga.phase()
         val byIndex = results.associateBy { it.stepIndex }
         val progress = machine.progress(phase, def.steps.size, byIndex.mapValues { it.value.compensatedAt != null })
@@ -368,6 +408,16 @@ public class SagaEngine(
 
     /** Everything that happened to a saga, oldest first. */
     public suspend fun history(sagaId: Uuid): List<SagaLogEntry> = store.tx { repository.history(sagaId) }
+
+    /** The latest [limit] entries of a saga's history, oldest first. */
+    public suspend fun history(sagaId: Uuid, limit: Int): List<SagaLogEntry> {
+        require(limit >= 1) { "limit must be at least 1" }
+        return store.tx { repository.recentHistory(sagaId, limit) }
+    }
+
+    /** The sagas [ids], those that exist, in the order given: in one transaction, not one each. */
+    public suspend fun findAll(ids: Collection<Uuid>): List<SagaRecord> =
+        if (ids.isEmpty()) emptyList() else store.tx { ids.mapNotNull { repository.find(it) } }
 
     /** What the request with this trace id did to sagas, oldest first. */
     public suspend fun historyByTrace(traceId: String, limit: Int = 200): List<SagaLogEntry> {

@@ -70,6 +70,12 @@ public interface SagaRepository {
     /** The log of a saga, oldest first; entries of the same instant in the order they were written. */
     public fun history(sagaId: Uuid): List<SagaLogEntry>
 
+    /**
+     * The latest [limit] entries of a saga's log, oldest first, as [history] orders them. The default reads the whole
+     * log: a database implementation should read only those entries.
+     */
+    public fun recentHistory(sagaId: Uuid, limit: Int): List<SagaLogEntry> = history(sagaId).takeLast(limit)
+
     /** The log entries of a trace, oldest first; entries of the same instant in the order they were written. */
     public fun historyByTrace(traceId: String, limit: Int): List<SagaLogEntry>
 

@@ -11,6 +11,7 @@ public final class dev/octogene/akta/exposed/ExposedSagaRepository : dev/octogen
 	public fun log (Ldev/octogene/akta/SagaLogEntry;)V
 	public fun markCompensated (Lkotlin/uuid/Uuid;ILkotlin/time/Instant;)V
 	public fun purgeFinished (Lkotlin/time/Instant;I)I
+	public fun recentHistory (Lkotlin/uuid/Uuid;I)Ljava/util/List;
 	public fun results (Lkotlin/uuid/Uuid;)Ljava/util/Map;
 	public fun save (Ldev/octogene/akta/SagaRecord;Lkotlin/time/Instant;)V
 	public fun saveResult (Lkotlin/uuid/Uuid;ILjava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;)V

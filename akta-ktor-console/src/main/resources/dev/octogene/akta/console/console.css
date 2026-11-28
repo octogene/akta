@@ -1,0 +1,68 @@
+/* The akta console. Light and dark follow the system. */
+:root {
+  --bg: #fbfbfa; --fg: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc; --panel: #ffffff;
+  --accent: #2f5bd3; --ok-bg: #e7f4ea; --ok-fg: #1f6b34; --bad-bg: #fbeaea; --bad-fg: #9b2121;
+  --done: #1f6b34; --current: #2f5bd3; --undone: #8a5a00; --none: #8c8c86;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --fg: #e9e8e3; --muted: #9c9b95; --line: #2e2e2b; --panel: #1e1e1c;
+    --accent: #87a5ff; --ok-bg: #173322; --ok-fg: #9fdcb0; --bad-bg: #3a1919; --bad-fg: #f1a7a7;
+    --done: #8fd3a2; --current: #87a5ff; --undone: #e2b768; --none: #7b7a75;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; padding: 12px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+nav { display: flex; gap: 16px; }
+nav a { font-weight: 600; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.search { display: flex; gap: 8px; flex: 1; min-width: 240px; max-width: 520px; }
+.search input { flex: 1; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px 24px 48px; }
+h1 { font-size: 22px; margin: 8px 0 4px; }
+h2 { font-size: 16px; margin: 24px 0 8px; }
+section { margin-top: 8px; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+td.number, th.number { text-align: right; font-variant-numeric: tabular-nums; }
+td.error { color: var(--muted); font-size: 13px; }
+code, pre { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0; }
+dt { color: var(--muted); }
+dd { margin: 0; }
+.quiet { color: var(--muted); }
+.badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 8px; }
+.badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); }
+.badge.stuck { background: var(--bad-bg); color: var(--bad-fg); border-color: transparent; }
+.flash { padding: 8px 12px; border-radius: 6px; }
+.flash.ok { background: var(--ok-bg); color: var(--ok-fg); }
+.flash.refused { background: var(--bad-bg); color: var(--bad-fg); }
+.check { font-weight: 600; }
+.steps { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.step { display: flex; gap: 6px; align-items: baseline; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.step .mark { font-weight: 700; }
+.step .ref, .step .progress { color: var(--muted); font-size: 13px; }
+.step.done .mark { color: var(--done); }
+.step.current { border-color: var(--current); }
+.step.current .mark { color: var(--current); }
+.step.undone .mark { color: var(--undone); }
+.step.pending .mark, .step.not_applied .mark { color: var(--none); }
+.action { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.action .consequence { margin: 4px 0 0; color: var(--muted); }
+.action label, .action > p.quiet { grid-column: 2; }
+.action label { display: grid; gap: 4px; }
+textarea, input[type=text], input[type=search] { width: 100%; font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+button { font: inherit; font-weight: 600; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+button[disabled] { opacity: .5; cursor: progress; }
+details { margin-top: 12px; }
+details li .name { font-weight: 600; }
+@media (max-width: 640px) {
+  header, main { padding-left: 16px; padding-right: 16px; }
+  .action { grid-template-columns: 1fr; }
+  .action label, .action > p.quiet { grid-column: 1; }
+  table { display: block; overflow-x: auto; }
+}

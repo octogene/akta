@@ -345,6 +345,18 @@ public data class ManualOutput(
     val signalKept: Boolean,
 )
 
+/** A saga and what its detail page shows, read by [SagaEngine.detail] in one transaction. */
+public data class SagaDetail(
+    val saga: SagaRecord,
+    /** Its steps, as [SagaEngine.steps] gives them; null for a type this engine does not know. */
+    val steps: List<SagaStepProgress>?,
+    val actions: List<ManualActionCheck>,
+    /** The latest entries of its log, oldest first. */
+    val history: List<SagaLogEntry>,
+    /** Its log has entries before [history], not read. */
+    val earlierHistory: Boolean,
+)
+
 /** The manual actions on a saga, as [SagaEngine.actions] reports them. */
 public enum class ManualAction {
     /** [SagaEngine.retry]. */

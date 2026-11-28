@@ -282,6 +282,43 @@ class SagaOperationsTest {
     }
 
     @Test
+    fun `a saga's detail is read in one transaction, its history cut to the latest entries`() {
+        var count = 0
+        val counting = object : SagaTransactions {
+            override suspend fun <T> inTransaction(block: () -> T): T = transactions.inTransaction { count++; block() }
+        }
+        val definition = notSent()
+        val engine = SagaEngine(counting, repository, listOf(definition), KotlinxJsonSagaSerializer(), once, clock)
+        val id = engine.create(definition, "K-1")
+        engine.run(id)
+        repeat(10) { runBlocking { counting.inTransaction { repository.log(SagaLogEntry(id, clock.now, 0, "call", SagaEvents.RESUME_FAILED, "n=$it")) } } }
+        val all = runBlocking { engine.history(id) }
+
+        count = 0
+        val detail = runBlocking { engine.detail(id, historyLimit = 5) }!!
+        assertEquals(1, count)
+        assertEquals(all.takeLast(5), detail.history)                           // the latest, oldest first
+        assertTrue(detail.earlierHistory)
+        assertEquals(StuckReason.TOO_MANY_ATTEMPTS, detail.saga.stuckReason)
+        assertEquals(listOf(StepProgress.CURRENT), detail.steps!!.map { it.progress })
+        assertTrue(detail.actions.any { it.action == ManualAction.RETRY && it.allowed })
+        val whole = runBlocking { engine.detail(id, historyLimit = 500) }!!
+        assertEquals(all, whole.history)
+        assertEquals(false, whole.earlierHistory)
+        assertEquals(all.takeLast(3), runBlocking { engine.history(id, limit = 3) })
+
+        // Several sagas, one transaction: those that exist, in the order asked.
+        val other = engine.create(definition, "K-2")
+        count = 0
+        assertEquals(listOf(other, id), runBlocking { engine.findAll(listOf(other, Uuid.random(), id)) }.map { it.id })
+        assertEquals(1, count)
+        assertNull(runBlocking { engine.detail(Uuid.random()) })
+        // A type this engine does not know: no steps, rather than an error.
+        val stranger = SagaEngine(transactions, repository, listOf(saga("OTHER") { step("s") { execute { } } }), KotlinxJsonSagaSerializer())
+        assertNull(runBlocking { stranger.detail(id) }!!.steps)
+    }
+
+    @Test
     fun `leaving STUCK clears the reason, by retry or by markDone`() {
         var fail = true
         val definition = saga("T") {
