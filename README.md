@@ -51,6 +51,7 @@ A recovery job calls `engine.resumeDue()` every 30 seconds to take on whatever i
 | `akta-core` | The engine, the DSL, the model, and an in-memory store for tests | kotlinx.coroutines, kotlinx.serialization |
 | `akta-exposed` | The PostgreSQL store (`ExposedSagaRepository`, `ExposedSagaTransactions`) and its schema | `akta-core`, Exposed |
 | `akta-ktor` | An admin API for operators (`sagaAdminRead`, `sagaAdminActions`), mounted in your Ktor application | `akta-core`, Ktor server |
+| `akta-ktor-console` | An operators' console (`sagaConsole`): web pages, rendered by your Ktor application, with htmx | `akta-core`, Ktor server |
 
 It targets Kotlin 2.x on JVM 17+, Exposed 1.x and PostgreSQL 12+. There is no published release yet: `./gradlew publishToMavenLocal`, then depend on `dev.octogene:akta-exposed:0.1.0`, and copy [`schema.sql`](akta-exposed/src/main/resources/dev/octogene/akta/schema.sql) into a Flyway migration. [Installation](https://octogene.github.io/akta/getting-started/) has the details.
 
@@ -65,6 +66,7 @@ It targets Kotlin 2.x on JVM 17+, Exposed 1.x and PostgreSQL 12+. There is no pu
 | Know exactly what is guaranteed, and the limits to design around | [Guarantees and limits](https://octogene.github.io/akta/how-it-works/guarantees/) |
 | Run it in production: stuck sagas, metrics, alerts, settings | [Operations](https://octogene.github.io/akta/operations/) |
 | Give operators an HTTP API to find and resolve sagas | [Admin API for Ktor](https://octogene.github.io/akta/operations/admin-api/) |
+| Give operators web pages to find and resolve sagas | [Operators' console](https://octogene.github.io/akta/operations/console/) |
 | Look up an event, a table or an index | [Reference](https://octogene.github.io/akta/reference/) |
 
 ## Building
