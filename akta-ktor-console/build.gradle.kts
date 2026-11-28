@@ -29,10 +29,20 @@ dependencies {
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
     testImplementation(libs.ktor.server.test.host)
+    // The demo (./gradlew :akta-ktor-console:runDemo): a real server, for a browser.
+    testImplementation(libs.ktor.server.cio)
 }
 
 tasks.test {
     useJUnitPlatform()
+}
+
+// A console on an in-memory engine with sagas in every state, at http://127.0.0.1:8089/admin/console/
+tasks.register<JavaExec>("runDemo") {
+    group = "application"
+    description = "Runs the console on demo sagas, at http://127.0.0.1:8089/admin/console/"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("dev.octogene.akta.console.DemoKt")
 }
 
 publishing {
