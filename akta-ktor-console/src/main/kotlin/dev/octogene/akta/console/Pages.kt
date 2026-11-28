@@ -3,6 +3,7 @@ package dev.octogene.akta.console
 import dev.octogene.akta.ManualAction
 import dev.octogene.akta.ManualActionCheck
 import dev.octogene.akta.OutputNeed
+import dev.octogene.akta.SagaDetail
 import dev.octogene.akta.SagaLogEntry
 import dev.octogene.akta.SagaRecord
 import dev.octogene.akta.SagaStats
@@ -76,7 +77,11 @@ internal class SagaPanel(
     val steps: List<SagaStepProgress>?,
     val actions: List<ManualActionCheck>,
     val history: List<SagaLogEntry>,
-)
+    /** The history has older entries, not shown. */
+    val earlierHistory: Boolean,
+) {
+    constructor(detail: SagaDetail) : this(detail.saga, detail.steps, detail.actions, detail.history, detail.earlierHistory)
+}
 
 internal fun page(base: String, title: String, content: MAIN.() -> Unit): String = "<!doctype html>\n" + createHTML().html {
     lang = "en"
@@ -108,8 +113,9 @@ internal fun page(base: String, title: String, content: MAIN.() -> Unit): String
     }
 }
 
-internal fun MAIN.overview(base: String, stats: SagaStats, now: Instant) {
+internal fun MAIN.overview(base: String, stats: SagaStats, age: Duration, now: Instant) {
     h1 { +"Sagas" }
+    p(classes = "quiet") { +(if (age < 1.seconds) "Counted just now." else "Counted ${shortly(age)} ago: counts are kept 15 s.") }
     section {
         h2 { +"Stuck" }
         if (stats.stuckByReason.isEmpty()) {
@@ -240,7 +246,7 @@ private fun DIV.sagaBlock(base: String, panel: SagaPanel, canAct: Boolean, flash
         steps(panel.steps, saga)
         happened(saga, panel.steps, now)
         if (canAct) actions(base, panel, now)
-        history(panel.history, now)
+        history(panel.history, panel.earlierHistory, now)
     }
 }
 
@@ -385,9 +391,10 @@ private fun FlowContent.outputField(need: OutputNeed?, type: String?, saved: Boo
     }
 }
 
-private fun FlowContent.history(entries: List<SagaLogEntry>, now: Instant) {
+private fun FlowContent.history(entries: List<SagaLogEntry>, earlier: Boolean, now: Instant) {
     section {
         h2 { +"History" }
+        if (earlier) p(classes = "quiet") { +"The latest ${entries.size} entries: earlier ones are not shown." }
         table {
             thead { tr { th { +"At" }; th { +"Step" }; th { +"Event" }; th { +"Detail" }; th { +"By" } } }
             tbody {

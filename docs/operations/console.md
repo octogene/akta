@@ -50,6 +50,21 @@ After an action, the saga's block is redrawn in place with its new state, and a 
 - **Everything is escaped.** The pages are built with kotlinx.html, which escapes every text and attribute. An error message holding markup is shown as text.
 - **No personal data.** A saga's input and its step outputs are never shown, only what the history already shows: the references `logAs` returns, errors and reasons.
 
+## What it costs the engine
+
+The console only reads, apart from the actions operators take. Its reads are plain `SELECT`s: they take no lock, never wait for a saga's row, and a saga never waits for them, even while a call is in flight. They write nothing either, so they add no history entries and send no events to listeners.
+
+Each read does borrow a database connection, and those connections come from the **same pool as the engine** if you give both the same `SagaTransactions`. The engine needs a connection to record each call's outcome before the call's lock expires. If the pool ran dry, a record could wait past that point, and the saga would then take a detour through a check. The console keeps its reads small:
+
+| Page | What it reads |
+|---|---|
+| `/` | `stats()`, at most once every 15 seconds whoever loads it: it reads every unfinished saga |
+| `/queue` | one page of 50 stuck sagas |
+| `/search` | a key's sagas, and at most 20 sagas from a trace, read in one transaction |
+| `/saga/{id}` | the saga, its steps and its latest 200 history entries, in one transaction (`engine.detail`) |
+
+To rule out any effect on the engine, give the console **its own small pool**: an `SagaEngine` built on a second `Database` (and its `ExposedSagaTransactions`), with the same definitions and repository, used only by the console. Two or three connections are plenty.
+
 ## The JSON API
 
 The console and the [admin API](admin-api.md) rely on the same engine calls (`actions`, `steps`, `history`), so both offer the same actions. Use the API to build your own screen, or to script operations.

@@ -3,6 +3,7 @@ package dev.octogene.akta.console
 import dev.octogene.akta.KotlinxJsonSagaSerializer
 import dev.octogene.akta.SagaConfig
 import dev.octogene.akta.SagaEngine
+import dev.octogene.akta.SagaLogEntry
 import dev.octogene.akta.SagaState
 import dev.octogene.akta.StepNotSent
 import dev.octogene.akta.StepRejected
@@ -100,6 +101,7 @@ class SagaConsoleTest {
         val response = client.get("/admin/console")
         val text = response.bodyAsText()
         assertTrue("TOO_MANY_ATTEMPTS" in text && "/admin/console/queue#TOO_MANY_ATTEMPTS" in text, text)
+        assertTrue("Counted just now." in text, text)
         val csp = response.headers["Content-Security-Policy"].orEmpty()
         assertTrue("script-src 'self'" in csp && "frame-ancestors 'none'" in csp, csp)
         assertEquals("no-store", response.headers[HttpHeaders.CacheControl])
@@ -154,6 +156,20 @@ class SagaConsoleTest {
         // A value onSignal refuses: the saga compensates, as the page said.
         act("/saga/$id/mark-done", mapOf("output" to "\"no\""))
         assertEquals(SagaState.FAILED, runBlocking { engine.find(id)!!.state })
+    }
+
+    @Test
+    fun `a long history shows its latest entries, and says the earlier ones are not shown`() = console {
+        val id = stuck("item-long")
+        runBlocking {
+            InMemorySagaTransactions(repository).inTransaction {
+                repeat(HISTORY_SHOWN + 10) { repository.log(SagaLogEntry(id, Clock.System.now(), 0, "hold", "RESUME_FAILED", "try $it")) }
+            }
+        }
+        val text = page("/saga/$id")
+        assertTrue("The latest $HISTORY_SHOWN entries: earlier ones are not shown." in text, text.take(500))
+        assertTrue("try ${HISTORY_SHOWN + 9}" in text)                                      // the latest is there
+        assertFalse(">CREATED<" in text)                                                  // the first one is not
     }
 
     @Test

@@ -2,8 +2,7 @@ package dev.octogene.akta.console
 
 import dev.octogene.akta.ManualAction
 import dev.octogene.akta.SagaEngine
-import dev.octogene.akta.SagaRecord
-import dev.octogene.akta.SagaStepProgress
+import dev.octogene.akta.SagaStats
 import dev.octogene.akta.StuckCursor
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -17,7 +16,13 @@ import io.ktor.server.response.respondText
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
@@ -46,17 +51,44 @@ private const val CSP = "default-src 'none'; script-src 'self'; style-src 'self'
 
 private const val QUEUE_PAGE = 50
 
+/** The history a saga's page shows: its latest entries. A saga retried for long can have thousands. */
+internal const val HISTORY_SHOWN = 200
+
+/** Sagas a trace id finds, at most: read in one transaction. */
+private const val TRACED_SAGAS = 20
+
+/** How long the overview's counts are kept: stats() reads every unfinished saga, and is not for every page load. */
+private val STATS_KEPT = 15.seconds
+
+/** [SagaEngine.stats], computed at most once per [STATS_KEPT], whoever loads the overview. */
+private class CachedStats(private val engine: SagaEngine) {
+    private class Taken(val at: TimeMark, val stats: SagaStats)
+
+    @Volatile private var last: Taken? = null
+    private val computing = Mutex()
+
+    suspend fun get(): Pair<SagaStats, Duration> {
+        fresh()?.let { return it }
+        return computing.withLock {
+            fresh() ?: Taken(TimeSource.Monotonic.markNow(), engine.stats()).also { last = it }.let { it.stats to Duration.ZERO }
+        }
+    }
+
+    private fun fresh() = last?.takeIf { it.at.elapsedNow() < STATS_KEPT }?.let { it.stats to it.at.elapsedNow() }
+}
+
 /**
  * The console's routes. With [actor] null, it is read-only: no action is offered, and none can be posted. Otherwise
  * [actor] names the operator of each action, from your authentication's principal: null answers 401.
  */
 @OptIn(ExperimentalUuidApi::class)
 public fun Route.sagaConsole(engine: SagaEngine, actor: ((ApplicationCall) -> String?)? = null) {
+    val stats = CachedStats(engine)
     // The overview, with or without a trailing slash: Ktor tells the two apart.
     val overview: suspend io.ktor.server.routing.RoutingContext.() -> Unit = {
         val base = call.base(depth = 0)
-        val stats = engine.stats()
-        call.html(page(base, "Sagas") { overview(base, stats, now()) })
+        val (counts, age) = stats.get()
+        call.html(page(base, "Sagas") { overview(base, counts, age, now()) })
     }
     get(overview)
     get("/", overview)
@@ -78,8 +110,9 @@ public fun Route.sagaConsole(engine: SagaEngine, actor: ((ApplicationCall) -> St
         }
         if (id != null && engine.find(id) != null) return@get call.respondRedirect("$base/saga/$id")
         val byKey = engine.findByKey(query, limit = 50)
-        val byTrace = engine.historyByTrace(query, limit = 200).map { it.sagaId }.distinct()
-            .filter { traced -> byKey.none { it.id == traced } }.mapNotNull { engine.find(it) }
+        val traced = engine.historyByTrace(query, limit = 200).map { it.sagaId }.distinct()
+            .filter { traced -> byKey.none { it.id == traced } }.take(TRACED_SAGAS)
+        val byTrace = engine.findAll(traced)
         call.html(page(base, "Search") { searchResults(base, query, byKey + byTrace, now()) })
     }
     get("saga/{id}") {
@@ -133,17 +166,9 @@ public fun Route.sagaConsole(engine: SagaEngine, actor: ((ApplicationCall) -> St
     }
 }
 
-/** Everything a saga's page shows, or null if there is no such saga. */
+/** Everything a saga's page shows, read in one transaction, or null if there is no such saga. */
 @OptIn(ExperimentalUuidApi::class)
-private suspend fun SagaEngine.panel(id: Uuid): SagaPanel? {
-    val saga: SagaRecord = find(id) ?: return null
-    val steps: List<SagaStepProgress>? = try {
-        steps(id)
-    } catch (_: IllegalArgumentException) {
-        null                                                            // a type this engine does not know
-    }
-    return SagaPanel(saga, steps, actions(saga), history(id))
-}
+private suspend fun SagaEngine.panel(id: Uuid): SagaPanel? = detail(id, HISTORY_SHOWN)?.let(::SagaPanel)
 
 /** The console's root path: this request's path without its last [depth] segments, the console's own. */
 private fun ApplicationCall.base(depth: Int): String {
