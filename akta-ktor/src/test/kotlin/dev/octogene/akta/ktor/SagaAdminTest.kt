@@ -111,6 +111,23 @@ class SagaAdminTest {
     // ---- Reads ------------------------------------------------------------------------------
 
     @Test
+    fun `a saga says which actions it takes now, and why it refuses the others`() = api {
+        val id = stuckStock("item-actions")
+        val saga = client.get("/admin/sagas/$id").read<SagaView>()
+        val allowed = saga.actions.filter { it.allowed }.map { it.action }
+        assertEquals(listOf("RETRY", "MARK_DONE", "ABORT", "ABORT_CURRENT_STEP_APPLIED", "CANCEL"), allowed)
+        val newKey = saga.actions.single { it.action == "RETRY_WITH_NEW_KEY" }
+        assertTrue(newKey.refusal!!.contains("sends no idempotency key"), newKey.refusal)
+
+        // The answer to an action carries them too: once aborted, nothing is left to do.
+        val aborted = post("/$id/abort", """{"currentStepApplied": false}""").read<SagaView>()
+        assertTrue(aborted.actions.none { it.allowed }, aborted.actions.toString())
+        // And so do the lists: the queue, a key's sagas.
+        val stuck = client.get("/admin/sagas/stuck").read<StuckPage>()
+        assertTrue(stuck.sagas.all { it.actions.any { action -> action.allowed } })
+    }
+
+    @Test
     fun `stats count the unfinished sagas, for all types or some`() = api {
         stuckStock("item-1")
         stuckStock("item-2")

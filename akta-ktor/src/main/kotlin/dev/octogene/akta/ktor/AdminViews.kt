@@ -1,5 +1,6 @@
 package dev.octogene.akta.ktor
 
+import dev.octogene.akta.SagaEngine
 import dev.octogene.akta.SagaLogEntry
 import dev.octogene.akta.SagaRecord
 import dev.octogene.akta.SagaStats
@@ -43,7 +44,19 @@ public data class SagaView(
     val keyGeneration: Int,
     val traceparent: String?,
     val createdAt: String,
+    /**
+     * Every manual action, and whether the saga takes it now: what a screen offers. Computed by the checks the
+     * actions make, as the saga was read: it may have moved on since, and an output may still not fit the step.
+     */
+    val actions: List<ActionView>,
 )
+
+/**
+ * A manual action ([action]: RETRY, RETRY_WITH_NEW_KEY, MARK_DONE, ABORT, ABORT_CURRENT_STEP_APPLIED,
+ * MARK_COMPENSATED or CANCEL) and, when it is refused, why, in the words the action would answer 409 with.
+ */
+@Serializable
+public data class ActionView(val action: String, val allowed: Boolean, val refusal: String?)
 
 /** One page of stuck sagas, stuck longest first. Pass [next] as `after` for the following page. */
 @Serializable
@@ -110,7 +123,7 @@ public data class CancelRequest(val reason: String)
 
 // ---- Mapping -----------------------------------------------------------------------------
 
-internal fun SagaRecord.toView() = SagaView(
+internal fun SagaRecord.toView(engine: SagaEngine) = SagaView(
     id = id.toString(), type = type, key = key, state = state.name, stepIndex = stepIndex,
     stepStatus = stepStatus.name, callAction = callAction?.name, attempts = attempts, checkFailures = checkFailures,
     resumeFailures = resumeFailures, nextAttemptAt = nextAttemptAt.toString(), lockedUntil = lockedUntil?.toString(),
@@ -118,6 +131,7 @@ internal fun SagaRecord.toView() = SagaView(
     stuckAt = stuckAt?.toString(), stuckFrom = stuckFrom?.name, cancelRequestedAt = cancelRequestedAt?.toString(),
     cancelReason = cancelReason, keySince = keySince?.toString(), keyGeneration = keyGeneration,
     traceparent = traceparent, createdAt = createdAt.toString(),
+    actions = engine.actions(this).map { ActionView(it.action.name, it.allowed, it.refusal) },
 )
 
 internal fun SagaStats.toView() = StatsView(
