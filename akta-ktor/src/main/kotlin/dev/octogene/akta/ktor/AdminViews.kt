@@ -70,6 +70,26 @@ public data class StepView(
     val ref: String?,
     val doneAt: String?,
     val compensatedAt: String?,
+    /** On the current step of a saga running forward: the output mark-done and abort need. Null elsewhere. */
+    val output: OutputView?,
+)
+
+/**
+ * The output an operator gives `mark-done` or `abort` (`currentStepApplied: true`) for the current step.
+ * [markDone] and [abort] are NONE (give none: it would be refused), OPTIONAL (left out, what is saved is used, or
+ * null) or REQUIRED. [type] is what the output is checked against: `String`, `Payment?`; null when there is none.
+ */
+@Serializable
+public data class OutputView(
+    val type: String?,
+    val markDone: String,
+    val abort: String,
+    /** An output is saved for the step already (after RECORD_FAILED): left out, it is used. */
+    val saved: Boolean,
+    /** For a signal step, its signal: mark-done's output is the signal's value, which onSignal accepts or refuses. */
+    val signal: String?,
+    /** The signal was received and is kept: mark-done without an output uses it, and refuses another value. */
+    val signalKept: Boolean,
 )
 
 /**
@@ -153,7 +173,10 @@ internal fun SagaRecord.toView(engine: SagaEngine, steps: List<SagaStepProgress>
     cancelReason = cancelReason, keySince = keySince?.toString(), keyGeneration = keyGeneration,
     traceparent = traceparent, createdAt = createdAt.toString(),
     actions = engine.actions(this).map { ActionView(it.action.name, it.allowed, it.refusal) },
-    steps = steps?.map { StepView(it.index, it.name, it.progress.name, it.ref, it.doneAt?.toString(), it.compensatedAt?.toString()) },
+    steps = steps?.map { step ->
+        val output = step.output?.let { OutputView(it.type, it.markDone.name, it.abort.name, it.saved, it.signal, it.signalKept) }
+        StepView(step.index, step.name, step.progress.name, step.ref, step.doneAt?.toString(), step.compensatedAt?.toString(), output)
+    },
 )
 
 internal fun SagaStats.toView() = StatsView(

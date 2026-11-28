@@ -84,6 +84,17 @@ A single saga (`/{id}`, and the answer to an action) also carries its **`steps`*
 
 `ref` is what the step's `logAs` says of its output, the identifier to look up in the external system. It is never the output itself.
 
+The **current step of a saga running forward** also carries `output`: what `mark-done` and `abort` (with `currentStepApplied: true`) need, so that a screen asks for an output only where one is needed:
+
+```json
+"output": {"type": "Payment", "markDone": "REQUIRED", "abort": "REQUIRED", "saved": false, "signal": null, "signalKept": false}
+```
+
+- `markDone` and `abort` are `NONE` (the step has no output: give none, it would be refused), `OPTIONAL` (left out, the action uses what is saved, or null for a nullable type) or `REQUIRED`.
+- `saved`: an output is saved for the step already (after `RECORD_FAILED`), and is used when none is given.
+- `signal` and `signalKept`: on a signal step, `mark-done`'s output is the signal's value, which `onSignal` accepts or refuses. When the signal was received and kept, `mark-done` without an output uses it, and refuses another value.
+- `type` is what the output is checked against. Its fields are not described yet: the step's code, or a saved output, shows its shape.
+
 A saga's **input is never in a response**, nor any step output: they may hold personal data. The history shows what `logAs` returns, an identifier, as it does everywhere else.
 
 ## Acting
