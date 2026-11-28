@@ -1,10 +1,10 @@
 package dev.octogene.akta
 
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Semaphore
@@ -80,15 +80,19 @@ public class SagaEngine(
             def.inputType?.let { type ->
                 require(serializer.supports(type)) { "Saga ${def.type}: cannot serialize its input $type (missing @Serializable?)" }
             }
-            for (step in def.steps) step.outputType?.let { type ->
-                require(serializer.supports(type)) {
-                    "Saga ${def.type}, step ${step.name}: cannot serialize its output $type (missing @Serializable?)"
+            for (step in def.steps) {
+                step.outputType?.let { type ->
+                    require(serializer.supports(type)) {
+                        "Saga ${def.type}, step ${step.name}: cannot serialize its output $type (missing @Serializable?)"
+                    }
                 }
             }
-            for (step in def.steps) step.idempotency?.let { idempotency ->
-                // A single call, which may last callLock, must end while the service still knows the key.
-                require(idempotency.keyRetention > config.callLock) {
-                    "Saga ${def.type}, step ${step.name}: keyRetention (${idempotency.keyRetention}) must exceed callLock (${config.callLock})"
+            for (step in def.steps) {
+                step.idempotency?.let { idempotency ->
+                    // A single call, which may last callLock, must end while the service still knows the key.
+                    require(idempotency.keyRetention > config.callLock) {
+                        "Saga ${def.type}, step ${step.name}: keyRetention (${idempotency.keyRetention}) must exceed callLock (${config.callLock})"
+                    }
                 }
             }
         }

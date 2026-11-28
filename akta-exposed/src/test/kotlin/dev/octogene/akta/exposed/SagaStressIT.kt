@@ -1,25 +1,25 @@
 package dev.octogene.akta.exposed
 
 import dev.octogene.akta.CheckResult
+import dev.octogene.akta.Idempotency
+import dev.octogene.akta.KotlinxJsonSagaSerializer
 import dev.octogene.akta.SagaConfig
 import dev.octogene.akta.SagaContext
 import dev.octogene.akta.SagaDefinition
 import dev.octogene.akta.SagaEngine
+import dev.octogene.akta.SagaEvent
 import dev.octogene.akta.SagaEvents
+import dev.octogene.akta.SagaListener
 import dev.octogene.akta.SagaState
 import dev.octogene.akta.SagaStep
+import dev.octogene.akta.SagaTransactions
 import dev.octogene.akta.SignalResult
 import dev.octogene.akta.SignalStep
 import dev.octogene.akta.StepNotSent
 import dev.octogene.akta.StepRejected
-import dev.octogene.akta.KotlinxJsonSagaSerializer
-import dev.octogene.akta.SagaTransactions
-import dev.octogene.akta.SagaEvent
-import dev.octogene.akta.SagaListener
+import dev.octogene.akta.StepStatus
 import dev.octogene.akta.StuckCursor
 import dev.octogene.akta.StuckReason
-import dev.octogene.akta.Idempotency
-import dev.octogene.akta.StepStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -127,8 +127,11 @@ class SagaStressIT {
     /** Thread-safe seeded randomness. */
     private class Dice(seed: Long) {
         private val random = Random(seed)
+
         @Synchronized fun chance(p: Double) = random.nextDouble() < p
+
         @Synchronized fun millis(max: Int) = random.nextInt(max + 1).toLong()
+
         /** Picks a key with probability proportional to its weight. */
         @Synchronized fun <T> pick(weights: Map<T, Int>): T {
             var n = random.nextInt(weights.values.sum())
@@ -165,11 +168,16 @@ class SagaStressIT {
                 if (keys) remembered[idempotencyKey!!] = it
             }
         }
+
         @Synchronized fun remove(key: String) { applied.remove(key) }
+
         @Synchronized fun remembers(idempotencyKey: String) = keys && idempotencyKey in remembered
+
         @Synchronized fun lookup(key: String): Effect? = applied[key]
+
         /** A refusal the system keeps a record of: a check finds it. */
         @Synchronized fun refuse(key: String) { if (key !in applied) refused += key }
+
         @Synchronized fun refuses(key: String) = key in refused
     }
 
@@ -314,6 +322,7 @@ class SagaStressIT {
             if (key in decided) return null
             return PaymentEvent("$prefix-${++counter}", succeeded = dice.chance(0.85), customer).also { decided[key] = it }
         }
+
         @Synchronized fun lookup(key: String): PaymentEvent? = decided[key]
     }
 
@@ -423,7 +432,8 @@ class SagaStressIT {
     fun `random failures never break the invariants`() {
         println("SagaStressIT: $sagaCount sagas, $podCount pods, seed $seed (rerun with -Dsaga.seed=$seed)")
         val started = System.nanoTime()
-        val finished = runBlocking(Dispatchers.Default) {        // several threads, as on a real server
+        val finished = runBlocking(Dispatchers.Default) {
+            // several threads, as on a real server
             coroutineScope {
                 val requests = launch { requests() }
                 // pod-1 runs the previous version, which does not know ITEM_EXIT yet.
@@ -511,17 +521,19 @@ class SagaStressIT {
                 val running = pg.query("SELECT id, business_key, input FROM saga WHERE type = '$type' AND state = 'RUNNING'") {
                     Triple(Uuid.parse(it.getString(1)), it.getString(2), Json.decodeFromString<ItemRequest>(it.getString(3)))
                 }
-                for ((id, key, input) in running) for (wait in waits) {
-                    if (!wait.ready(key)) continue                          // nothing charged: no payment
-                    val event = wait.provider.decide(key, input.customer) ?: continue
-                    if (dice.chance(0.1)) {
-                        deliveries.count("lost")
-                        continue
-                    }
-                    repeat(if (dice.chance(0.2)) 2 else 1) {
-                        launch {
-                            delay(dice.millis(2000))
-                            deliver(engine, id, wait.signal, event)
+                for ((id, key, input) in running) {
+                    for (wait in waits) {
+                        if (!wait.ready(key)) continue                          // nothing charged: no payment
+                        val event = wait.provider.decide(key, input.customer) ?: continue
+                        if (dice.chance(0.1)) {
+                            deliveries.count("lost")
+                            continue
+                        }
+                        repeat(if (dice.chance(0.2)) 2 else 1) {
+                            launch {
+                                delay(dice.millis(2000))
+                                deliver(engine, id, wait.signal, event)
+                            }
                         }
                     }
                 }
@@ -785,9 +797,11 @@ class SagaStressIT {
 
         // To investigate a failed run: the history of the first sagas that broke an invariant.
         problems.mapNotNull { Regex("^(ITEM_[A-Z]+-[0-9]+):").find(it)?.groupValues?.get(1) }.distinct().take(2).forEach { k ->
-            println("History of $k:\n" + pg.query(
-                "SELECT l.at, l.step_index, l.event, l.detail, l.actor FROM saga_log l JOIN saga s ON s.id = l.saga_id WHERE s.business_key = '$k' ORDER BY l.id",
-            ) { "  ${it.getString(2)} ${it.getString(3)} ${it.getString(5) ?: ""} ${it.getString(4)?.take(150)}" }.joinToString("\n"))
+            println(
+                "History of $k:\n" + pg.query(
+                    "SELECT l.at, l.step_index, l.event, l.detail, l.actor FROM saga_log l JOIN saga s ON s.id = l.saga_id WHERE s.business_key = '$k' ORDER BY l.id",
+                ) { "  ${it.getString(2)} ${it.getString(3)} ${it.getString(5) ?: ""} ${it.getString(4)?.take(150)}" }.joinToString("\n"),
+            )
         }
         if (problems.isNotEmpty()) {
             fail("${problems.size} invariant violations (seed $seed):\n" + problems.take(50).joinToString("\n"))
@@ -810,10 +824,14 @@ class SagaStressIT {
                 appendLine("Sagas:\n${stateHistogram()}")
                 appendLine("Pod crashes: ${crashes.get()}")
                 appendLine("Injected database failures: ${dbFailures.mapValues { it.value.get() }}")
-                appendLine("Sagas stuck by a check that kept failing: " +
-                    pg.long("SELECT count(DISTINCT saga_id) FROM saga_log WHERE detail LIKE 'Check keeps failing%'"))
-                appendLine("Calls that threw a JVM Error: " +
-                    pg.long("SELECT count(*) FROM saga_log WHERE detail LIKE '%NotImplementedError%'"))
+                appendLine(
+                    "Sagas stuck by a check that kept failing: " +
+                        pg.long("SELECT count(DISTINCT saga_id) FROM saga_log WHERE detail LIKE 'Check keeps failing%'"),
+                )
+                appendLine(
+                    "Calls that threw a JVM Error: " +
+                        pg.long("SELECT count(*) FROM saga_log WHERE detail LIKE '%NotImplementedError%'"),
+                )
                 appendLine("Manual actions: ${manualActions.mapValues { it.value.get() }}")
                 appendLine("Stuck reasons seen by the operator: ${stuckReasons.mapValues { it.value.get() }}")
                 appendLine("Events reported to the listeners: ${reported.size} (saga_log: ${pg.long("SELECT count(*) FROM saga_log")})")

@@ -4,20 +4,22 @@ import dev.octogene.akta.memory.InMemorySagaRepository
 import dev.octogene.akta.memory.InMemorySagaTransactions
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.reflect.typeOf
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertTrue
 import kotlin.time.Clock
 import kotlin.time.Duration
@@ -29,8 +31,6 @@ import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
-import kotlinx.serialization.json.Json
-import kotlin.reflect.typeOf
 
 @Timeout(10)                // a step that never returns must fail the test, not hang the build
 class SagaEngineTest {
@@ -593,8 +593,10 @@ class SagaEngineTest {
     fun `resumeDue leaves alone the types it does not know, as during a rolling deploy`() {
         val stock = FakeStep("stock", { "STK-1" })
         fun definition(type: String) = definition(type, listOf(stock))
-        val newPod = newEngine(InMemorySagaTransactions(repository), repository,
-            listOf(definition("NEW"), definition("TEST")), clock = clock)
+        val newPod = newEngine(
+            InMemorySagaTransactions(repository), repository,
+            listOf(definition("NEW"), definition("TEST")), clock = clock,
+        )
         val brandNew = newPod.create("NEW", "item-1")
         val current = newPod.create("TEST", "item-2")
 
@@ -768,10 +770,14 @@ class SagaEngineTest {
     fun `a hook can start the next saga for the same key`() {
         lateinit var engine: SagaEngine
         val next = definition("NEXT", listOf(FakeStep("audit", { throw StepNotSent("later") })))
-        val completing = definition("COMPLETING", listOf(FakeStep("stock", { "STK-1" })),
-            onCompleted = { engine.create(next, key) })
-        val failing = definition("FAILING", listOf(FakeStep("stock", { throw StepRejected("no stock") })),
-            onFailed = { engine.create(next, key) })
+        val completing = definition(
+            "COMPLETING", listOf(FakeStep("stock", { "STK-1" })),
+            onCompleted = { engine.create(next, key) },
+        )
+        val failing = definition(
+            "FAILING", listOf(FakeStep("stock", { throw StepRejected("no stock") })),
+            onFailed = { engine.create(next, key) },
+        )
         engine = newEngine(InMemorySagaTransactions(repository), repository, listOf(next, completing, failing))
 
         val done = runBlocking { engine.create("COMPLETING", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
@@ -816,10 +822,12 @@ class SagaEngineTest {
     private fun engineWithFailingOnCompleted(vararg steps: SagaStep<Unit, *>, config: SagaConfig = SagaConfig(maxAttempts = 2)) =
         newEngine(
             InMemorySagaTransactions(repository), repository,
-            listOf(definition("TEST", steps.toList(), onCompleted = {
-                check(!hookFails) { "items table locked" }
-                completed += key
-            })),
+            listOf(
+                definition("TEST", steps.toList(), onCompleted = {
+                    check(!hookFails) { "items table locked" }
+                    completed += key
+                }),
+            ),
             config = config, clock = clock,
         )
 

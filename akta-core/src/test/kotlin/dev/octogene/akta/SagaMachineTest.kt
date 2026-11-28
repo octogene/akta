@@ -1,13 +1,13 @@
 package dev.octogene.akta
 
 import org.junit.jupiter.api.Test
+import kotlin.reflect.typeOf
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
-import kotlin.reflect.typeOf
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
 

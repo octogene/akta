@@ -96,10 +96,12 @@ internal class SagaStore(
 
     /** What a decision writes besides the row, for the current step of [saga] (its name is only read to save a result). */
     fun write(effects: List<Effect>, saga: SagaPhase, now: Instant, stepName: () -> String) {
-        for (effect in effects) when (effect) {
-            is Effect.SaveResult -> repository.saveResult(saga.id, saga.stepIndex, stepName(), effect.output, now)
-            is Effect.SaveSignal -> repository.saveSignal(saga.id, effect.signal, effect.value, now)
-            Effect.MarkCompensated -> repository.markCompensated(saga.id, saga.stepIndex, now)
+        for (effect in effects) {
+            when (effect) {
+                is Effect.SaveResult -> repository.saveResult(saga.id, saga.stepIndex, stepName(), effect.output, now)
+                is Effect.SaveSignal -> repository.saveSignal(saga.id, effect.signal, effect.value, now)
+                Effect.MarkCompensated -> repository.markCompensated(saga.id, saga.stepIndex, now)
+            }
         }
     }
 
@@ -129,11 +131,13 @@ internal class SagaStore(
     }
 
     private fun emit(events: List<SagaEvent>) {
-        for (event in events) for (listener in listeners) {
-            try {
-                listener.onEvent(event)
-            } catch (e: Throwable) {
-                if (e.isFatal()) throw e        // anything else: ignored, the saga is not affected
+        for (event in events) {
+            for (listener in listeners) {
+                try {
+                    listener.onEvent(event)
+                } catch (e: Throwable) {
+                    if (e.isFatal()) throw e        // anything else: ignored, the saga is not affected
+                }
             }
         }
     }

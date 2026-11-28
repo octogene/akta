@@ -17,15 +17,15 @@ import org.jetbrains.exposed.v1.core.QueryBuilder
 import org.jetbrains.exposed.v1.core.QueryParameter
 import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
-import org.jetbrains.exposed.v1.core.count
-import org.jetbrains.exposed.v1.core.min
 import org.jetbrains.exposed.v1.core.Table
 import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.count
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.inList
 import org.jetbrains.exposed.v1.core.isNull
 import org.jetbrains.exposed.v1.core.less
 import org.jetbrains.exposed.v1.core.lessEq
+import org.jetbrains.exposed.v1.core.min
 import org.jetbrains.exposed.v1.core.neq
 import org.jetbrains.exposed.v1.core.or
 import org.jetbrains.exposed.v1.core.statements.UpdateBuilder
@@ -285,7 +285,8 @@ public class ExposedSagaRepository : SagaRepository {
     }
 
     override fun saveSignal(sagaId: Uuid, name: String, value: String, now: Instant): Boolean =
-        SagaSignalTable.insertIgnore {                 // ON CONFLICT DO NOTHING: the first signal of a name wins
+        SagaSignalTable.insertIgnore {
+            // ON CONFLICT DO NOTHING: the first signal of a name wins
             it[this.sagaId] = sagaId
             it[signalName] = name
             it[this.value] = value

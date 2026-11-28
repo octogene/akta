@@ -21,7 +21,8 @@ public enum class SagaState {
     /** Every step is done. */
     COMPLETED,
     /** Every completed step was undone. */
-    FAILED;
+    FAILED,
+    ;
 
     public val isFinished: Boolean get() = this == COMPLETED || this == FAILED
 }

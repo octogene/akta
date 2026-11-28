@@ -2,20 +2,19 @@ package dev.octogene.akta.exposed
 
 import dev.octogene.akta.DuplicateSagaException
 import dev.octogene.akta.KotlinxJsonSagaSerializer
+import dev.octogene.akta.SagaConfig
 import dev.octogene.akta.SagaContext
 import dev.octogene.akta.SagaDefinition
 import dev.octogene.akta.SagaEngine
-import dev.octogene.akta.SagaConfig
 import dev.octogene.akta.SagaEvents
 import dev.octogene.akta.SagaRepository
 import dev.octogene.akta.SagaState
-import dev.octogene.akta.StuckCursor
-import dev.octogene.akta.StuckReason
 import dev.octogene.akta.SignalResult
-import dev.octogene.akta.StepStatus
 import dev.octogene.akta.StepNotSent
 import dev.octogene.akta.StepRejected
-
+import dev.octogene.akta.StepStatus
+import dev.octogene.akta.StuckCursor
+import dev.octogene.akta.StuckReason
 import dev.octogene.akta.saga
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -38,11 +37,11 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.time.Clock
-import kotlin.time.Instant
 import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Instant
 
 /** Runs the engine against a real PostgreSQL (Testcontainers: Docker required). */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -353,8 +352,11 @@ class ExposedSagaRepositoryIT {
         // Stuck at the same instant: the cursor must go on by id.
         transaction(database) { exec("UPDATE saga SET stuck_at = (SELECT min(stuck_at) FROM saga)") }
         val pages = generateSequence(runBlocking { engine.findStuck(limit = 2) }) { page ->
-            if (page.size < 2) null
-            else runBlocking { engine.findStuck(limit = 2, after = StuckCursor.after(page.last())) }.takeIf { it.isNotEmpty() }
+            if (page.size < 2) {
+                null
+            } else {
+                runBlocking { engine.findStuck(limit = 2, after = StuckCursor.after(page.last())) }.takeIf { it.isNotEmpty() }
+            }
         }.toList()
         assertEquals(ids.sorted(), pages.flatten().map { it.id })
         assertEquals(StuckReason.TOO_MANY_ATTEMPTS, pages.first().first().stuckReason)
