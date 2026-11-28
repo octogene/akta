@@ -4,6 +4,7 @@ import dev.octogene.akta.SagaEngine
 import dev.octogene.akta.SagaLogEntry
 import dev.octogene.akta.SagaRecord
 import dev.octogene.akta.SagaStats
+import dev.octogene.akta.SagaStepProgress
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
@@ -49,6 +50,26 @@ public data class SagaView(
      * actions make, as the saga was read: it may have moved on since, and an output may still not fit the step.
      */
     val actions: List<ActionView>,
+    /**
+     * The saga's steps, in the order of its definition, and where each stands: what a screen draws as a line. Only
+     * in answers about one saga (`/{id}` and the actions): null in lists, where it would cost a read per saga, and
+     * for a saga type this engine does not know.
+     */
+    val steps: List<StepView>?,
+)
+
+/**
+ * One step: [progress] is DONE, CURRENT, PENDING, UNDONE or NOT_APPLIED. [ref] is what its `logAs` says of its
+ * output, an identifier to look up in the external system: never the output itself.
+ */
+@Serializable
+public data class StepView(
+    val index: Int,
+    val name: String,
+    val progress: String,
+    val ref: String?,
+    val doneAt: String?,
+    val compensatedAt: String?,
 )
 
 /**
@@ -123,7 +144,7 @@ public data class CancelRequest(val reason: String)
 
 // ---- Mapping -----------------------------------------------------------------------------
 
-internal fun SagaRecord.toView(engine: SagaEngine) = SagaView(
+internal fun SagaRecord.toView(engine: SagaEngine, steps: List<SagaStepProgress>? = null) = SagaView(
     id = id.toString(), type = type, key = key, state = state.name, stepIndex = stepIndex,
     stepStatus = stepStatus.name, callAction = callAction?.name, attempts = attempts, checkFailures = checkFailures,
     resumeFailures = resumeFailures, nextAttemptAt = nextAttemptAt.toString(), lockedUntil = lockedUntil?.toString(),
@@ -132,6 +153,7 @@ internal fun SagaRecord.toView(engine: SagaEngine) = SagaView(
     cancelReason = cancelReason, keySince = keySince?.toString(), keyGeneration = keyGeneration,
     traceparent = traceparent, createdAt = createdAt.toString(),
     actions = engine.actions(this).map { ActionView(it.action.name, it.allowed, it.refusal) },
+    steps = steps?.map { StepView(it.index, it.name, it.progress.name, it.ref, it.doneAt?.toString(), it.compensatedAt?.toString()) },
 )
 
 internal fun SagaStats.toView() = StatsView(

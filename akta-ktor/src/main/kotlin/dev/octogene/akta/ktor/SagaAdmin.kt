@@ -2,6 +2,7 @@ package dev.octogene.akta.ktor
 
 import dev.octogene.akta.SagaEngine
 import dev.octogene.akta.SagaRecord
+import dev.octogene.akta.SagaStepProgress
 import dev.octogene.akta.StuckCursor
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -82,7 +83,7 @@ public fun Route.sagaAdminRead(engine: SagaEngine) {
     get("{id}") {
         call.answer {
             val id = call.sagaId()
-            (engine.find(id) ?: throw NoSuchElementException("Saga $id not found")).toView(engine)
+            (engine.find(id) ?: throw NoSuchElementException("Saga $id not found")).toView(engine, engine.stepsOf(id))
         }
     }
     get("{id}/history") {
@@ -173,8 +174,18 @@ private suspend fun ApplicationCall.action(
     block: suspend (Uuid, String) -> SagaRecord,
 ) = answer {
     val who = actor(this) ?: throw Unauthenticated()
-    block(sagaId(), who).toView(engine)
+    val id = sagaId()
+    block(id, who).toView(engine, engine.stepsOf(id))
 }
+
+/** The saga's steps, or null for a saga gone meanwhile, or of a type this engine does not know. */
+@OptIn(ExperimentalUuidApi::class)
+private suspend fun SagaEngine.stepsOf(id: Uuid): List<SagaStepProgress>? =
+    try {
+        steps(id)
+    } catch (_: IllegalArgumentException) {
+        null
+    }
 
 @OptIn(ExperimentalUuidApi::class)
 private fun ApplicationCall.sagaId(): Uuid {
