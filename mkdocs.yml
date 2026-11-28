@@ -96,6 +96,8 @@ nav:
       - Recovery and concurrency: how-it-works/recovery.md
       - Saga data: how-it-works/saga-data.md
       - Guarantees and limits: how-it-works/guarantees.md
+  - Internals:
+      - Engine internals: internals/index.md
   - Operations:
       - operations/index.md
       - Stuck sagas: operations/stuck-sagas.md
