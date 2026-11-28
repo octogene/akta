@@ -33,47 +33,47 @@ internal class SagaManualActions(
 
     /** See [SagaEngine.retry]. */
     suspend fun retry(id: Uuid, actor: String, newKey: Boolean, runFor: Duration): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_RETRY, runFor) { r, now ->
-            machine.retry(r, newKey, now) { signal ->
-                repository.signal(r.id, signal) != null
+        manual(id, actor, SagaEvents.MANUAL_RETRY, runFor) { saga, now ->
+            machine.retry(saga, newKey, now) { signal ->
+                repository.signal(saga.id, signal) != null
             }.let { Change(it.saga, it.detail) }
         }
 
     /** See [SagaEngine.markDone]. */
     suspend fun markDone(id: Uuid, output: String?, actor: String, runFor: Duration): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_DONE, runFor) { r, now ->
-            val running = machine.checkMarkDone(r)
-            val def = definition(r.type)
-            val step = def.stepAt(r.stepIndex)
-            if (step is SignalStep<*, *>) return@manual signalByHand(running, def.signalStepAt(r.stepIndex), output, now)
-            val (encoded, decoded) = manualOutput(r.id, step, output)
-            store.write(listOf(Effect.SaveResult(encoded)), r, now) { step.name }
+        manual(id, actor, SagaEvents.MANUAL_DONE, runFor) { saga, now ->
+            val running = machine.checkMarkDone(saga)
+            val def = definition(saga.type)
+            val step = def.stepAt(saga.stepIndex)
+            if (step is SignalStep<*, *>) return@manual signalByHand(running, def.signalStepAt(saga.stepIndex), output, now)
+            val (encoded, decoded) = manualOutput(saga.id, step, output)
+            store.write(listOf(Effect.SaveResult(encoded)), saga, now) { step.name }
             Change(machine.next(running, def.steps.size, now), detail = describe(step, decoded)?.let { "ref=$it" })
         }
 
     /** See [SagaEngine.abort]. */
     suspend fun abort(id: Uuid, actor: String, currentStepApplied: Boolean, output: String?, runFor: Duration): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_ABORT, runFor) { r, now ->
-            val saga = machine.checkAbort(r, currentStepApplied)
-            if (currentStepApplied && saga !is SagaPhase.Finishing) {
-                val step = definition(r.type).stepAt(r.stepIndex)
-                store.write(listOf(Effect.SaveResult(manualOutput(r.id, step, output).first)), r, now) { step.name }
+        manual(id, actor, SagaEvents.MANUAL_ABORT, runFor) { saga, now ->
+            val aborting = machine.checkAbort(saga, currentStepApplied)
+            if (currentStepApplied && aborting !is SagaPhase.Finishing) {
+                val step = definition(saga.type).stepAt(saga.stepIndex)
+                store.write(listOf(Effect.SaveResult(manualOutput(saga.id, step, output).first)), saga, now) { step.name }
             }
-            Change(machine.abort(saga, currentStepApplied, actor, now), detail = "currentStepApplied=$currentStepApplied")
+            Change(machine.abort(aborting, currentStepApplied, actor, now), detail = "currentStepApplied=$currentStepApplied")
         }
 
     /** See [SagaEngine.markCompensated]. */
     suspend fun markCompensated(id: Uuid, actor: String, runFor: Duration): SagaRecord =
-        manual(id, actor, SagaEvents.MANUAL_COMPENSATED, runFor) { r, now ->
-            val decision = machine.markCompensated(r, now)
-            store.write(decision.effects, r, now) { definition(r.type).stepAt(r.stepIndex).name }
+        manual(id, actor, SagaEvents.MANUAL_COMPENSATED, runFor) { saga, now ->
+            val decision = machine.markCompensated(saga, now)
+            store.write(decision.effects, saga, now) { definition(saga.type).stepAt(saga.stepIndex).name }
             Change(decision.saga)
         }
 
     /** See [SagaEngine.cancel]. */
     suspend fun cancel(id: Uuid, reason: String, actor: String, runFor: Duration): SagaRecord =
-        manual(id, actor, SagaEvents.CANCEL_REQUESTED, runFor) { r, now ->
-            machine.cancel(r, reason, now).let { Change(it.saga, it.detail) }
+        manual(id, actor, SagaEvents.CANCEL_REQUESTED, runFor) { saga, now ->
+            machine.cancel(saga, reason, now).let { Change(it.saga, it.detail) }
         }
 
     /** What an action makes of the saga, and what to log about it. */
@@ -93,12 +93,12 @@ internal class SagaManualActions(
         require(!runFor.isNegative()) { "runFor must not be negative" }
         val trace = traceId()
         val committed = store.tx {
-            val r = store.lock(id) ?: throw NoSuchElementException("Saga $id not found")
+            val saga = store.lock(id) ?: throw NoSuchElementException("Saga $id not found")
             val now = store.now()
-            val changed = change(r, now)
+            val changed = change(saga, now)
             store.save(changed.saga, now)
-            // r: logged on the step the action was taken on
-            store.log(r.id, r.stepIndex, null, event, changed.detail, now, trace, actor)
+            // saga: logged on the step the action was taken on
+            store.log(saga.id, saga.stepIndex, null, event, changed.detail, now, trace, actor)
             changed.saga
         }
         val now = store.now()
@@ -122,23 +122,23 @@ internal class SagaManualActions(
      * markDone on a signal step: [output], the signal's value, is stored as its signal (or the one kept is used), and
      * the step is due at once, to consume it through onSignal: a value onSignal refuses is refused, not marked done.
      */
-    private fun signalByHand(r: SagaPhase.Running, step: AnySignalStep, output: String?, now: Instant): Change {
-        val kept = repository.signal(r.id, step.signal)
-        val given = output?.let { manualOutput(r.id, step, it) }
+    private fun signalByHand(saga: SagaPhase.Running, step: AnySignalStep, output: String?, now: Instant): Change {
+        val kept = repository.signal(saga.id, step.signal)
+        val given = output?.let { manualOutput(saga.id, step, it) }
         require(given != null || kept != null) {
             "Step '${step.name}' needs the value of signal '${step.signal}': none was received"
         }
         if (given != null && kept == null) {
-            repository.saveSignal(r.id, step.signal, checkNotNull(given.first), now)
+            repository.saveSignal(saga.id, step.signal, checkNotNull(given.first), now)
         } else {
             require(given == null || given.first == kept) {
-                "Saga ${r.id} keeps the signal '${step.signal}' it received: retry uses it, or abort gives up"
+                "Saga ${saga.id} keeps the signal '${step.signal}' it received: retry uses it, or abort gives up"
             }
         }
         val value = given?.second
-            ?: serializer.decodeSaved(checkNotNull(kept), checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
+            ?: serializer.decodeSaved(checkNotNull(kept), checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${saga.id}" }
         val detail = listOfNotNull("signal by hand", describe(step, value)?.let { "ref=$it" }).joinToString(" ")
-        return Change(machine.signalByHand(r, now), detail)
+        return Change(machine.signalByHand(saga, now), detail)
     }
 
     /**
