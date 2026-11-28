@@ -205,67 +205,74 @@ internal sealed interface SagaPhase {
     }
 
     companion object {
-        /** The typed form of [r]; throws IllegalStateException, naming the rule, if [r] breaks one. */
-        fun of(r: SagaRecord): SagaPhase {
-            fun rule(ok: Boolean, what: () -> String) = check(ok) { "Saga ${r.id} (${r.state}, ${r.stepStatus}): ${what()}" }
-            rule(r.stepIndex >= 0 && r.attempts >= 0 && r.checkFailures >= 0 && r.keyGeneration >= 0 && r.resumeFailures >= 0) {
+        /** The typed form of [row]; throws IllegalStateException, naming the rule, if [row] breaks one. */
+        fun of(row: SagaRecord): SagaPhase {
+            fun rule(ok: Boolean, what: () -> String) = check(ok) { "Saga ${row.id} (${row.state}, ${row.stepStatus}): ${what()}" }
+            rule(row.stepIndex >= 0 && row.attempts >= 0 && row.checkFailures >= 0 && row.keyGeneration >= 0 && row.resumeFailures >= 0) {
                 "negative step index or counter"
             }
-            rule((r.cancelRequestedAt == null) == (r.cancelReason == null)) { "a cancellation needs both its time and its reason" }
-            rule((r.stepStatus == StepStatus.IN_PROGRESS) == (r.lockedUntil != null)) { "a lock without a call in flight, or the reverse" }
-            rule((r.stepStatus == StepStatus.IN_PROGRESS) == (r.callAction != null)) { "a call in flight says which one" }
-            rule((r.stepStatus == StepStatus.STUCK) == (r.stuckReason != null)) { "a stuck saga has a reason, and only a stuck one" }
-            rule((r.stuckReason == null) == (r.stuckAt == null)) { "a stuck reason goes with its time" }
-            rule(r.stuckFrom == null || r.stuckReason == StuckReason.RESUME_FAILING) { "stuckFrom is only set by resume failures" }
-            rule(r.stuckFrom != StepStatus.STUCK) { "a saga is not stuck from being stuck" }
-            rule((r.stuckReason == StuckReason.HOOK_FAILED) <= (r.state == SagaState.FINISHING)) { "only a finishing saga's hook fails" }
+            rule((row.cancelRequestedAt == null) == (row.cancelReason == null)) { "a cancellation needs both its time and its reason" }
+            rule((row.stepStatus == StepStatus.IN_PROGRESS) == (row.lockedUntil != null)) { "a lock without a call in flight, or the reverse" }
+            rule((row.stepStatus == StepStatus.IN_PROGRESS) == (row.callAction != null)) { "a call in flight says which one" }
+            rule((row.stepStatus == StepStatus.STUCK) == (row.stuckReason != null)) { "a stuck saga has a reason, and only a stuck one" }
+            rule((row.stuckReason == null) == (row.stuckAt == null)) { "a stuck reason goes with its time" }
+            rule(row.stuckFrom == null || row.stuckReason == StuckReason.RESUME_FAILING) { "stuckFrom is only set by resume failures" }
+            rule(row.stuckFrom != StepStatus.STUCK) { "a saga is not stuck from being stuck" }
+            rule((row.stuckReason == StuckReason.HOOK_FAILED) <= (row.state == SagaState.FINISHING)) { "only a finishing saga's hook fails" }
 
-            val identity = Identity(r.id, r.type, r.key, r.input, r.traceparent, r.createdAt)
-            val cancellation = r.cancelRequestedAt?.let { Cancellation(it, checkNotNull(r.cancelReason)) }
-            val key = KeyState(r.keySince, r.keyGeneration)
-            val step = when (r.stepStatus) {
-                StepStatus.READY -> StepState.Ready(r.nextAttemptAt)
-                StepStatus.WAITING -> StepState.Waiting(r.nextAttemptAt)
-                StepStatus.CHECKING -> StepState.Checking(r.nextAttemptAt)
-                StepStatus.REPLAYING -> StepState.Replaying(r.nextAttemptAt)
-                StepStatus.IN_PROGRESS -> StepState.InFlight(checkNotNull(r.callAction), checkNotNull(r.lockedUntil), r.nextAttemptAt)
-                StepStatus.STUCK -> StepState.Stuck(checkNotNull(r.stuckReason), checkNotNull(r.stuckAt), r.stuckFrom, r.nextAttemptAt)
+            val identity = Identity(row.id, row.type, row.key, row.input, row.traceparent, row.createdAt)
+            val cancellation = row.cancelRequestedAt?.let { Cancellation(it, checkNotNull(row.cancelReason)) }
+            val key = KeyState(row.keySince, row.keyGeneration)
+            val step = when (row.stepStatus) {
+                StepStatus.READY -> StepState.Ready(row.nextAttemptAt)
+                StepStatus.WAITING -> StepState.Waiting(row.nextAttemptAt)
+                StepStatus.CHECKING -> StepState.Checking(row.nextAttemptAt)
+                StepStatus.REPLAYING -> StepState.Replaying(row.nextAttemptAt)
+                StepStatus.IN_PROGRESS -> StepState.InFlight(checkNotNull(row.callAction), checkNotNull(row.lockedUntil), row.nextAttemptAt)
+                StepStatus.STUCK -> StepState.Stuck(checkNotNull(row.stuckReason), checkNotNull(row.stuckAt), row.stuckFrom, row.nextAttemptAt)
             }
-            return when (r.state) {
+            return when (row.state) {
                 SagaState.RUNNING -> {
-                    rule(r.failureReason == null || r.stuckReason == StuckReason.RECORD_FAILED) {
+                    rule(row.failureReason == null || row.stuckReason == StuckReason.RECORD_FAILED) {
                         "a running saga keeps a refusal only while stuck because it could not be recorded"
                     }
-                    rule(r.callAction != CallAction.COMPENSATE) { "a running saga does not compensate" }
-                    SagaPhase.Running(identity, r.stepIndex, step, r.attempts, r.checkFailures, r.resumeFailures, key, cancellation, r.lastError, r.failureReason)
+                    rule(row.callAction != CallAction.COMPENSATE) { "a running saga does not compensate" }
+                    SagaPhase.Running(
+                        identity, row.stepIndex, step, row.attempts, row.checkFailures, row.resumeFailures, key, cancellation, row.lastError,
+                        row.failureReason,
+                    )
                 }
                 SagaState.COMPENSATING -> {
-                    rule(r.failureReason != null) { "a saga compensates for a reason" }
-                    rule(r.stepStatus != StepStatus.WAITING && !r.stepStatus.outcomeUnknown) { "an undo neither waits nor is checked" }
-                    rule(r.callAction == null || r.callAction == CallAction.COMPENSATE) { "a compensating saga only compensates" }
+                    rule(row.failureReason != null) { "a saga compensates for a reason" }
+                    rule(row.stepStatus != StepStatus.WAITING && !row.stepStatus.outcomeUnknown) { "an undo neither waits nor is checked" }
+                    rule(row.callAction == null || row.callAction == CallAction.COMPENSATE) { "a compensating saga only compensates" }
                     SagaPhase.Compensating(
-                        identity, r.stepIndex, step, r.attempts, r.checkFailures, r.resumeFailures, key, cancellation, r.lastError,
-                        checkNotNull(r.failureReason),
+                        identity, row.stepIndex, step, row.attempts, row.checkFailures, row.resumeFailures, key, cancellation, row.lastError,
+                        checkNotNull(row.failureReason),
                     )
                 }
                 SagaState.FINISHING -> {
-                    rule(r.stepStatus == StepStatus.READY || r.stepStatus == StepStatus.STUCK) { "a finishing saga only runs its hook, or is stuck" }
-                    rule(r.checkFailures == 0 && r.keySince == null && r.keyGeneration == 0) { "a finishing saga has no check nor key" }
-                    rule(r.stuckReason == null || r.stuckReason == StuckReason.HOOK_FAILED || r.stuckReason == StuckReason.RESUME_FAILING) {
+                    rule(row.stepStatus == StepStatus.READY || row.stepStatus == StepStatus.STUCK) {
+                        "a finishing saga only runs its hook, or is stuck"
+                    }
+                    rule(row.checkFailures == 0 && row.keySince == null && row.keyGeneration == 0) { "a finishing saga has no check nor key" }
+                    rule(row.stuckReason == null || row.stuckReason == StuckReason.HOOK_FAILED || row.stuckReason == StuckReason.RESUME_FAILING) {
                         "a finishing saga is stuck by its hook, or by resume failures"
                     }
-                    rule(r.failureReason != null || r.lastError == null || r.stepStatus == StepStatus.STUCK || r.attempts > 0) {
+                    rule(row.failureReason != null || row.lastError == null || row.stepStatus == StepStatus.STUCK || row.attempts > 0) {
                         "a completing saga has no error, but its hook's"
                     }
-                    SagaPhase.Finishing(identity, r.stepIndex, step, r.attempts, r.resumeFailures, cancellation, r.lastError, r.failureReason)
+                    SagaPhase.Finishing(
+                        identity, row.stepIndex, step, row.attempts, row.resumeFailures, cancellation, row.lastError, row.failureReason,
+                    )
                 }
                 SagaState.COMPLETED, SagaState.FAILED -> {
-                    rule(r.stepStatus == StepStatus.READY) { "a finished saga has no step in progress" }
-                    rule(r.checkFailures == 0 && r.resumeFailures == 0) { "a finished saga has no failure counted" }
-                    rule(r.keySince == null && r.keyGeneration == 0) { "a finished saga has no key" }
-                    rule((r.state == SagaState.FAILED) == (r.failureReason != null)) { "a saga failed for a reason, and completed without one" }
-                    rule(r.state == SagaState.FAILED || r.lastError == null) { "a completed saga has no error" }
-                    SagaPhase.Finished(identity, r.stepIndex, r.attempts, r.nextAttemptAt, cancellation, r.lastError, r.failureReason)
+                    rule(row.stepStatus == StepStatus.READY) { "a finished saga has no step in progress" }
+                    rule(row.checkFailures == 0 && row.resumeFailures == 0) { "a finished saga has no failure counted" }
+                    rule(row.keySince == null && row.keyGeneration == 0) { "a finished saga has no key" }
+                    rule((row.state == SagaState.FAILED) == (row.failureReason != null)) { "a saga failed for a reason, and completed without one" }
+                    rule(row.state == SagaState.FAILED || row.lastError == null) { "a completed saga has no error" }
+                    SagaPhase.Finished(identity, row.stepIndex, row.attempts, row.nextAttemptAt, cancellation, row.lastError, row.failureReason)
                 }
             }
         }
