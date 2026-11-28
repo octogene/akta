@@ -67,13 +67,13 @@ public fun Route.sagaAdminRead(engine: SagaEngine) {
         call.answer {
             val limit = call.limit(default = 50)
             val page = engine.findStuck(limit, call.types(), call.request.queryParameters["after"]?.let(::parseCursor))
-            StuckPage(page.map { it.toView() }, next = page.takeIf { it.size == limit }?.last()?.let(::cursorOf))
+            StuckPage(page.map { it.toView(engine) }, next = page.takeIf { it.size == limit }?.last()?.let(::cursorOf))
         }
     }
     get("by-key") {
         call.answer {
             val key = call.request.queryParameters["key"]?.takeIf { it.isNotBlank() } ?: throw BadRequest("key is required")
-            engine.findByKey(key, call.limit(default = 20)).map { it.toView() }
+            engine.findByKey(key, call.limit(default = 20)).map { it.toView(engine) }
         }
     }
     get("trace/{traceId}") {
@@ -82,7 +82,7 @@ public fun Route.sagaAdminRead(engine: SagaEngine) {
     get("{id}") {
         call.answer {
             val id = call.sagaId()
-            (engine.find(id) ?: throw NoSuchElementException("Saga $id not found")).toView()
+            (engine.find(id) ?: throw NoSuchElementException("Saga $id not found")).toView(engine)
         }
     }
     get("{id}/history") {
@@ -111,28 +111,28 @@ public fun Route.sagaAdminRead(engine: SagaEngine) {
 @OptIn(ExperimentalUuidApi::class)
 public fun Route.sagaAdminActions(engine: SagaEngine, actor: (ApplicationCall) -> String?) {
     post("{id}/retry") {
-        call.action(actor) { id, who ->
+        call.action(engine, actor) { id, who ->
             val body = call.body(RetryRequest())
             engine.retry(id, who, newKey = body.newKey)
         }
     }
     post("{id}/mark-done") {
-        call.action(actor) { id, who ->
+        call.action(engine, actor) { id, who ->
             val body = call.body(MarkDoneRequest())
             engine.markDone(id, body.output?.toString(), who)
         }
     }
     post("{id}/abort") {
-        call.action(actor) { id, who ->
+        call.action(engine, actor) { id, who ->
             val body = call.body<AbortRequest>(default = null)
             engine.abort(id, who, body.currentStepApplied, body.output?.toString())
         }
     }
     post("{id}/mark-compensated") {
-        call.action(actor) { id, who -> engine.markCompensated(id, who) }
+        call.action(engine, actor) { id, who -> engine.markCompensated(id, who) }
     }
     post("{id}/cancel") {
-        call.action(actor) { id, who ->
+        call.action(engine, actor) { id, who ->
             val body = call.body<CancelRequest>(default = null)
             if (body.reason.isBlank()) throw BadRequest("reason must not be blank")
             engine.cancel(id, body.reason, who)
@@ -168,11 +168,12 @@ private fun errorBody(message: String?) = json.encodeToString(ErrorView(message 
 
 @OptIn(ExperimentalUuidApi::class)
 private suspend fun ApplicationCall.action(
+    engine: SagaEngine,
     actor: (ApplicationCall) -> String?,
     block: suspend (Uuid, String) -> SagaRecord,
 ) = answer {
     val who = actor(this) ?: throw Unauthenticated()
-    block(sagaId(), who).toView()
+    block(sagaId(), who).toView(engine)
 }
 
 @OptIn(ExperimentalUuidApi::class)

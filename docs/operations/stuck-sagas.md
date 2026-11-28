@@ -54,3 +54,5 @@ Every action is logged with its author. Each commits its change, then runs the s
 
 !!! tip "Build the screen around the reason"
     The reason maps to the action: an admin screen can suggest it, show the lookup to do in the external system, and ask for the output only when `markDone` needs one.
+
+    `engine.actions(saga)` says which actions the saga takes now, and why it refuses the others, from the same checks the actions make: offer only those. The [admin API](admin-api.md) includes them with every saga.

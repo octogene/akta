@@ -41,6 +41,29 @@ routing {
 | `GET /{id}/history` | Everything that happened to it, oldest first, with who did each manual action. |
 | `GET /trace/{traceId}?limit=` | What one request did to sagas, from its trace id. |
 
+Every saga in a response (`/{id}`, `/stuck`, `/by-key`, and the answer to an action) carries **`actions`**: each manual action, whether the saga takes it now, and if not, why, in the words the action would answer `409` with:
+
+```json
+"actions": [
+  {"action": "RETRY", "allowed": true, "refusal": null},
+  {"action": "RETRY_WITH_NEW_KEY", "allowed": false, "refusal": "Step 'hold' of saga 0193… sends no idempotency key: retry it without newKey"},
+  {"action": "MARK_DONE", "allowed": true, "refusal": null},
+  …
+]
+```
+
+| `action` | Request |
+|---|---|
+| `RETRY` | `POST /{id}/retry` |
+| `RETRY_WITH_NEW_KEY` | `POST /{id}/retry` `{"newKey": true}` |
+| `MARK_DONE` | `POST /{id}/mark-done` |
+| `ABORT` | `POST /{id}/abort` `{"currentStepApplied": false}` |
+| `ABORT_CURRENT_STEP_APPLIED` | `POST /{id}/abort` `{"currentStepApplied": true}` |
+| `MARK_COMPENSATED` | `POST /{id}/mark-compensated` |
+| `CANCEL` | `POST /{id}/cancel` |
+
+They come from the checks the actions themselves make, so a screen that offers only the allowed ones never offers what the engine would refuse. An action that would change nothing (`cancel` on a saga already compensating) is reported refused, saying so. Two things can still make an allowed action answer `409`: the saga moved on since it was read, or the `output` given does not fit the step.
+
 A saga's **input is never in a response**, nor any step output: they may hold personal data. The history shows what `logAs` returns, an identifier, as it does everywhere else.
 
 ## Acting
