@@ -139,28 +139,24 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
     }
 
     /**
-     * The saga after its call, before its outcome decides: the lock released. Any outcome but a failed check ends the
-     * series of failed checks. Its step is READY here only to be a valid phase: every outcome sets what it becomes.
-     */
-    fun released(current: Unfinished): Unfinished =
-        current.with(step = StepState.Ready(current.due), checkFailures = 0)
-
-    /**
-     * What a call's [outcome] makes of the saga [r] (its lock released), whose current step is [step] of [stepCount]:
-     * the saga, and what to write besides it, in the same transaction. [checkFailures] is the count before this record
-     * reset it. [replay]: an earlier attempt may have been applied; [unclaimed]: the saga before the claim.
+     * What a call's [outcome] makes of the saga [claimed] (its call in flight, still ours): the saga, its lock
+     * released, and what to write besides it, in the same transaction. [replay]: an earlier attempt may have been
+     * applied; [unclaimed]: the saga before the claim.
      */
     fun decide(
-        r: Unfinished,
-        checkFailures: Int,
+        claimed: Unfinished,
         outcome: Outcome,
-        step: SagaStep<*, *>,
-        stepCount: Int,
         replay: Boolean,
         unclaimed: Unfinished,
         now: Instant,
         signalStored: (signal: String) -> Boolean = { false },
     ): Decision {
+        val step = stepOf(claimed)
+        val stepCount = definition(claimed.type).steps.size
+        // Counted when the check was claimed. Any outcome but a failed check ends the series of failed checks.
+        val checkFailures = claimed.checkFailures
+        // The lock released. READY here only to be a valid phase: every outcome below sets what the step becomes.
+        val r = claimed.with(step = StepState.Ready(claimed.due), checkFailures = 0)
         val effects = mutableListOf<Effect>()
         // A signal step's timeout check: what it found is stored as the signal (one received first wins), and the step
         // is due at once, to consume it in a claim of its own, through onSignal. If it found nothing, cannot tell, or

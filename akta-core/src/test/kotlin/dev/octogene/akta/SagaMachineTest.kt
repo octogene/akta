@@ -39,6 +39,9 @@ class SagaMachineTest {
 
     private val machine = machine(call, idempotentCall)
 
+    /** The same steps, the idempotent one first: a saga on step 0 calls it. */
+    private val idempotentFirst = machine(idempotentCall, call)
+
     private fun saga(stepIndex: Int = 0, status: StepStatus = StepStatus.READY, attempts: Int = 1) = SagaRecord(
         id = Uuid.parse("01900000-0000-7000-8000-000000000001"), type = "T", key = "k", state = SagaState.RUNNING,
         stepIndex = stepIndex, stepStatus = status, attempts = attempts, nextAttemptAt = now, lockedUntil = null,
@@ -51,8 +54,8 @@ class SagaMachineTest {
     /** The row a decision writes. */
     private val Decision.record get() = saga.record()
 
-    private fun decide(outcome: Outcome, r: SagaRecord = saga(), step: SagaStep<*, *> = call, steps: Int = 2, replay: Boolean = false) =
-        r.typed().let { machine.decide(it, it.checkFailures, outcome, step, steps, replay, unclaimed = it, now) }
+    private fun decide(outcome: Outcome, r: SagaRecord = saga(), machine: SagaMachine = this.machine, replay: Boolean = false) =
+        r.typed().let { machine.decide(it, outcome, replay, unclaimed = it, now) }
 
     private fun stuck(r: SagaRecord, reason: StuckReason, error: String) = machine.stuck(r.typed(), reason, error, now).record()
 
@@ -82,7 +85,7 @@ class SagaMachineTest {
         assertEquals(StepStatus.CHECKING, checked.stepStatus)
         assertEquals(now + config.settleDelay, checked.nextAttemptAt)
 
-        val replayed = decide(Outcome.Unknown("timeout"), step = idempotentCall).record
+        val replayed = decide(Outcome.Unknown("timeout"), machine = idempotentFirst).record
         assertEquals(now + config.backoff(1), replayed.nextAttemptAt)  // no settle delay
         assertEquals("timeout; retrying with the same key", replayed.lastError)
     }
@@ -90,11 +93,11 @@ class SagaMachineTest {
     @Test
     fun `a request not sent is retried, unless an earlier attempt may have been applied`() {
         val r = saga().copy(keySince = now)
-        val first = decide(Outcome.NotSent("refused"), r, idempotentCall).record
+        val first = decide(Outcome.NotSent("refused"), r, idempotentFirst).record
         assertEquals(StepStatus.READY, first.stepStatus)
         assertNull(first.keySince)                                      // the key was not used
 
-        val replay = decide(Outcome.NotSent("refused"), r, idempotentCall, replay = true).record
+        val replay = decide(Outcome.NotSent("refused"), r, idempotentFirst, replay = true).record
         assertEquals(StepStatus.REPLAYING, replay.stepStatus)
         assertEquals(now, replay.keySince)
     }

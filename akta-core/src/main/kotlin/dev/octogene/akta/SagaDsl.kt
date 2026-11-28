@@ -50,6 +50,11 @@ public class SagaBuilder<I> @PublishedApi internal constructor(
     private val steps = mutableListOf<SagaStep<I, *>>()
     private var onCompleted: SagaContext<I>.() -> Unit = noHook()
     private var onFailed: SagaContext<I>.() -> Unit = noHook()
+
+    /**
+     * The blocks declared so far ("onCompleted", "onFailed"), so that [once] can refuse a second one: without it,
+     * a second `onCompleted { }` would silently replace the first, which would never run.
+     */
     private val declared = mutableSetOf<String>()
 
     /** A block is declared once: a second one would silently replace the first. */

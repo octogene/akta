@@ -673,21 +673,18 @@ public class SagaEngine(
      * nothing was recorded: the saga is gone, or this call is no longer the one in flight (logged
      * LATE_RESULT_IGNORED).
      */
-    private fun record(work: Work, reported: Outcome): SagaPhase? {
+    private fun record(work: Work, outcome: Outcome): SagaPhase? {
         val current = store.lock(work.saga.id) ?: return null
         val now = store.now()
         if (!machine.stillClaimed(current, work.saga)) {
-            log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, reported), now)
+            log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, outcome), now)
             return null
         }
-        val outcome = reported
-        val def = definition(current.type)
         current as SagaPhase.Unfinished                       // still claimed: its call is in flight
-        val r = machine.released(current)
         // For a signal step's check that found nothing or could not tell: a signal received meanwhile answers instead.
-        val signalStored = { signal: String -> repository.signal(r.id, signal) != null }
-        val decided = machine.decide(r, current.checkFailures, outcome, work.step, def.steps.size, work.replay, work.unclaimed, now, signalStored)
-            .also { store.write(it.effects, r, now) { work.step.name } }.saga
+        val signalStored = { signal: String -> repository.signal(current.id, signal) != null }
+        val decided = machine.decide(current, outcome, work.replay, work.unclaimed, now, signalStored)
+            .also { store.write(it.effects, current, now) { work.step.name } }.saga
         // Cancelled while the call was in flight: the outcome is recorded, and the saga now compensates, this step
         // included if it was applied.
         val updated = machine.cancelIfRequested(decided, now)
@@ -715,13 +712,15 @@ public class SagaEngine(
      *   the saga (it would turn a refusal into a success) and abort keep it as the reason.
      * - Any other outcome (only a database failure can stop those, no user code runs): look in the external
      *   system, then markDone, retry or abort.
+     *
+     * Returns null, as [record] does, when nothing was recorded: the saga is gone, or the call is no longer ours.
      */
     private fun recordFailed(work: Work, outcome: Outcome, error: Throwable): SagaPhase? {
         val current = store.lock(work.saga.id) ?: return null
         val now = store.now()
         if (!machine.stillClaimed(current, work.saga)) {
             log(work, SagaEvents.LATE_RESULT_IGNORED, describe(work, outcome), now)
-            return current
+            return null
         }
         current as SagaPhase.Unfinished                       // still claimed: its call is in flight
         val decision = machine.recordFailed(

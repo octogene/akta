@@ -7,6 +7,8 @@ import kotlin.uuid.Uuid
 
 /**
  * The manual actions on a saga, documented on [SagaEngine]: [retry], [markDone], [abort], [markCompensated], [cancel].
+ * The first four get a stuck saga going again; [cancel] is a business request on any unfinished saga, here because it
+ * takes the same path: a change committed, then the saga run on.
  *
  * Each action commits its change, then runs the saga on for up to runFor (10 s by default), as [SagaEngine.run]
  * does: a call started before that may take up to callLock more. Duration.ZERO returns at once and leaves the saga to
@@ -45,7 +47,7 @@ internal class SagaManualActions(
             val step = def.stepAt(r.stepIndex)
             if (step is SignalStep<*, *>) return@manual signalByHand(running, def.signalStepAt(r.stepIndex), output, now)
             val (encoded, decoded) = manualOutput(r.id, step, output)
-            repository.saveResult(r.id, r.stepIndex, step.name, encoded, now)
+            store.write(listOf(Effect.SaveResult(encoded)), r, now) { step.name }
             Change(machine.next(running, def.steps.size, now), detail = describe(step, decoded)?.let { "ref=$it" })
         }
 
@@ -55,7 +57,7 @@ internal class SagaManualActions(
             val saga = machine.checkAbort(r, currentStepApplied)
             if (currentStepApplied && saga !is SagaPhase.Finishing) {
                 val step = definition(r.type).stepAt(r.stepIndex)
-                repository.saveResult(r.id, r.stepIndex, step.name, manualOutput(r.id, step, output).first, now)
+                store.write(listOf(Effect.SaveResult(manualOutput(r.id, step, output).first)), r, now) { step.name }
             }
             Change(machine.abort(saga, currentStepApplied, actor, now), detail = "currentStepApplied=$currentStepApplied")
         }
@@ -93,11 +95,11 @@ internal class SagaManualActions(
         val committed = store.tx {
             val r = store.lock(id) ?: throw NoSuchElementException("Saga $id not found")
             val now = store.now()
-            val (updated, detail) = change(r, now).let { it.saga to it.detail }
-            store.save(updated, now)
+            val changed = change(r, now)
+            store.save(changed.saga, now)
             // r: logged on the step the action was taken on
-            store.log(r.id, r.stepIndex, null, event, detail, now, trace, actor)
-            updated
+            store.log(r.id, r.stepIndex, null, event, changed.detail, now, trace, actor)
+            changed.saga
         }
         val now = store.now()
         if (!runFor.isPositive() || !machine.canMoveOn(committed, now)) return committed.record()
