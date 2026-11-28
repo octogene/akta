@@ -25,48 +25,48 @@ internal class SagaSignals(
         type: KType,
         trace: String?,
     ): SignalResult {
-        val r = store.lock(sagaId) ?: return SignalResult.NoSaga
+        val saga = store.lock(sagaId) ?: return SignalResult.NoSaga
         val now = store.now()
-        val def = definition(r.type)
+        val def = definition(saga.type)
         val index = def.steps.indexOfFirst { it is SignalStep<*, *> && it.signal == name }
-        require(index >= 0) { "No step of saga type ${r.type} waits for signal '$name'" }
+        require(index >= 0) { "No step of saga type ${saga.type} waits for signal '$name'" }
         val step = def.signalStepAt(index)
-        require(step.outputType == type) { "Signal '$name' of saga type ${r.type} carries ${step.outputType}, not $type" }
+        require(step.outputType == type) { "Signal '$name' of saga type ${saga.type} carries ${step.outputType}, not $type" }
         val encoded = serializer.encode(value, type)
         val size = encoded.utf8Size()
         require(size <= config.maxDataBytes) { "Signal '$name' is $size bytes, over maxDataBytes (${config.maxDataBytes})" }
 
         fun received(what: String) {
             val detail = listOfNotNull(what, describe(step, value)?.let { "ref=$it" }).joinToString(" ")
-            store.log(r.id, index, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
+            store.log(saga.id, index, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
         }
-        when (machine.arrival(r, index)) {
-            Arrival.TOO_LATE -> { received("ignored: too late"); return SignalResult.Ignored(r.id) }
-            Arrival.CANCELLED -> { received("ignored: cancelled"); return SignalResult.Ignored(r.id) }
+        when (machine.arrival(saga, index)) {
+            Arrival.TOO_LATE -> { received("ignored: too late"); return SignalResult.Ignored(saga.id) }
+            Arrival.CANCELLED -> { received("ignored: cancelled"); return SignalResult.Ignored(saga.id) }
             Arrival.STORE -> Unit
         }
-        if (!repository.saveSignal(r.id, name, encoded, now)) {
+        if (!repository.saveSignal(saga.id, name, encoded, now)) {
             received("ignored: already received")
-            return SignalResult.Ignored(r.id)
+            return SignalResult.Ignored(saga.id)
         }
-        return when (machine.useOfStored(r, index)) {
+        return when (machine.useOfStored(saga, index)) {
             Use.WAKE -> {
-                store.save(machine.woken(r, now), now)
+                store.save(machine.woken(saga, now), now)
                 received("delivered")
-                SignalResult.Delivered(r.id)
+                SignalResult.Delivered(saga.id)
             }
             Use.KEEP -> {
                 received("stored")
-                SignalResult.Stored(r.id)
+                SignalResult.Stored(saga.id)
             }
         }
     }
 
     /** The signal step [step] starts waiting for its signal, until its timeout. */
-    fun startWaiting(r: SagaPhase.Unfinished, step: AnySignalStep, now: Instant, trace: String?): SagaPhase {
-        val waiting = machine.waiting(r, step, now)
+    fun startWaiting(saga: SagaPhase.Unfinished, step: AnySignalStep, now: Instant, trace: String?): SagaPhase {
+        val waiting = machine.waiting(saga, step, now)
         store.save(waiting, now)
-        store.log(r.id, r.stepIndex, step.name, SagaEvents.WAIT_STARTED, "signal '${step.signal}' until ${waiting.due}", now, trace)
+        store.log(saga.id, saga.stepIndex, step.name, SagaEvents.WAIT_STARTED, "signal '${step.signal}' until ${waiting.due}", now, trace)
         return waiting
     }
 
@@ -75,7 +75,7 @@ internal class SagaSignals(
      * logged; the next step is for the caller to claim.
      */
     fun consumeStored(
-        r: SagaPhase.Unfinished,
+        saga: SagaPhase.Unfinished,
         def: AnyDefinition,
         step: AnySignalStep,
         ctx: SagaContext<Any?>,
@@ -83,18 +83,18 @@ internal class SagaSignals(
         now: Instant,
         trace: String?,
     ): SagaPhase {
-        val value = serializer.decodeSaved(stored, checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${r.id}" }
-        val updated = signalDecision(r, def, step, ctx, value, stored, now)
+        val value = serializer.decodeSaved(stored, checkNotNull(step.outputType)) { "signal '${step.signal}' of saga ${saga.id}" }
+        val updated = signalDecision(saga, def, step, ctx, value, stored, now)
         store.save(updated, now)
         // Logged after the change, as in deliver(): the event shows the saga as the signal left it.
         val detail = listOfNotNull("consumed (stored earlier)", describe(step, value)?.let { "ref=$it" }).joinToString(" ")
-        store.log(r.id, r.stepIndex, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
+        store.log(saga.id, saga.stepIndex, step.name, SagaEvents.SIGNAL_RECEIVED, detail, now, trace)
         return updated
     }
 
     /** What a signal makes of the saga, not saved yet: onSignal accepts it (next step) or rejects it (compensate). */
     private fun signalDecision(
-        r: SagaPhase.Unfinished,
+        saga: SagaPhase.Unfinished,
         def: AnyDefinition,
         step: AnySignalStep,
         ctx: SagaContext<Any?>,
@@ -104,10 +104,10 @@ internal class SagaSignals(
     ): SagaPhase =
         try {
             onSignal(step, ctx, value)
-            repository.saveResult(r.id, r.stepIndex, step.name, encoded, now)
-            machine.next(r, def.steps.size, now)
+            repository.saveResult(saga.id, saga.stepIndex, step.name, encoded, now)
+            machine.next(saga, def.steps.size, now)
         } catch (e: StepRejected) {
-            machine.refused(r, e.toString(), now)
+            machine.refused(saga, e.toString(), now)
         }
 
     /**
@@ -133,12 +133,12 @@ internal class SagaSignals(
      * stops, the signal kept.
      */
     fun blockOnStoredSignal(id: Uuid, failure: SignalFailed, trace: String?): SagaPhase? {
-        val r = store.lock(id) ?: return null
-        val step = definition(r.type).steps[r.stepIndex] as? SignalStep<*, *> ?: return r
+        val saga = store.lock(id) ?: return null
+        val step = definition(saga.type).steps[saga.stepIndex] as? SignalStep<*, *> ?: return saga
         val now = store.now()
-        val blocked = machine.blockedByStoredSignal(r, failure.message, now) ?: return r
+        val blocked = machine.blockedByStoredSignal(saga, failure.message, now) ?: return saga
         store.save(blocked, now)
-        store.log(r.id, r.stepIndex, step.name, SagaEvents.RECORD_FAILED, blocked.lastError, now, trace)
+        store.log(saga.id, saga.stepIndex, step.name, SagaEvents.RECORD_FAILED, blocked.lastError, now, trace)
         return blocked
     }
 }
