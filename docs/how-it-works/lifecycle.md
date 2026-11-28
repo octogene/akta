@@ -79,3 +79,4 @@ Each of them goes through the same row lock, so they never act on a saga at the 
 - **A hook that throws** rolls back what it wrote. It runs again after backoff, and after `maxAttempts` failures in a row the saga stops (`HOOK_FAILED`). `retry` runs it again; it never calls a step again.
 - **A stuck `onCompleted`** can be aborted instead: every step is undone, the last one included. `cancel` is refused while finishing, since the steps are done.
 - **A saga without the hook** ends in the transaction of its last outcome, as there is nothing to run.
+- **A hook does not call the engine**, except `create`, which joins the hook's transaction to start the next saga. Any other call (`run`, `signal`, `find`…) would open a transaction inside the engine's: the engine refuses it with an `IllegalStateException`, so the hook fails and the saga ends up `HOOK_FAILED`, saying why. The same holds for `onSignal`.

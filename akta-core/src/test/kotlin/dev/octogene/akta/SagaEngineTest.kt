@@ -857,6 +857,22 @@ class SagaEngineTest {
     }
 
     @Test
+    fun `a hook that calls the engine fails clearly, instead of opening a transaction inside the engine's`() {
+        lateinit var engine: SagaEngine
+        engine = newEngine(
+            InMemorySagaTransactions(repository), repository,
+            listOf(definition("TEST", listOf(FakeStep("stock", { "STK-1" })), onCompleted = { runBlocking { engine.find(sagaId) } })),
+            config = SagaConfig(maxAttempts = 1), clock = clock,
+        )
+        val saga = runBlocking { engine.create("TEST", "item-1").let { engine.run(it, clock.now + 10.seconds) } }
+
+        assertEquals(StuckReason.HOOK_FAILED, saga.stuckReason)
+        assertTrue(saga.lastError!!.contains("called inside one of its own transactions"), saga.lastError)
+        // The engine works on once the hook no longer calls it: nothing was left behind on the thread.
+        assertNotNull(runBlocking { engine.find(saga.id) })
+    }
+
+    @Test
     fun `an onCompleted that cannot run can be aborted, every step undone`() {
         val stock = FakeStep("stock", { "STK-1" })
         val booking = FakeStep("booking", { "RES-1" })

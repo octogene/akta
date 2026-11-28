@@ -39,13 +39,22 @@ internal class SagaStore(
         Instant.fromEpochSeconds(it.epochSeconds, it.nanosecondsOfSecond / 1_000 * 1_000)
     }
 
-    /** One transaction; its events go to the listeners once it has committed. A retried attempt starts afresh. */
+    /**
+     * One transaction; its events go to the listeners once it has committed. A retried attempt starts afresh.
+     *
+     * Never inside another one: the engine does not nest its transactions, so one opened in another means that user
+     * code running in a transaction (onSignal, onCompleted, onFailed) called the engine. Through Dispatchers.IO it
+     * would wait on the row the outer transaction locks; joined to the outer transaction, its events would be
+     * reported before that one commits, or rolls back. Refused instead, checked on the calling thread (where a
+     * runBlocking in a hook runs) and on the one that runs the block (where a SagaTransactions that joins runs it).
+     */
     suspend fun <T> tx(block: () -> T): T {
+        checkNotNested()
         var committed: Pending? = null
         val result = transactions.inTransaction {
+            checkNotNested()
             val pending = Pending()
             committed = pending
-            val outer = current.get()
             current.set(pending)
             try {
                 block().also {
@@ -55,11 +64,16 @@ internal class SagaStore(
                 }
             } finally {
                 // remove(), not set(null): pooled threads are left exactly as they were found.
-                if (outer == null) current.remove() else current.set(outer)
+                current.remove()
             }
         }
         committed?.let { emit(it.events) }
         return result
+    }
+
+    private fun checkNotNested() = check(current.get() == null) {
+        "The engine was called inside one of its own transactions: onSignal, onCompleted and onFailed must not call " +
+            "it (create excepted, which joins their transaction)"
     }
 
     /**
