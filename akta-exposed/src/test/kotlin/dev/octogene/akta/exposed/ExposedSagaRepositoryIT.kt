@@ -137,6 +137,18 @@ class ExposedSagaRepositoryIT {
     }
 
     @Test
+    fun `step results keep the undone ones, with when they were undone, in step order`() {
+        val saga = engine("stock" to { "STK-1" }, "booking" to { throw StepRejected("no") }).start("item-results")
+
+        val results = runBlocking { ExposedSagaTransactions(database).inTransaction { repository.stepResults(saga.id) } }
+        assertEquals(listOf(0), results.map { it.stepIndex })                  // booking refused: nothing saved
+        assertEquals("stock", results.single().stepName)
+        assertEquals("\"STK-1\"", results.single().output)
+        assertNotNull(results.single().compensatedAt)
+        assertTrue(results.single().compensatedAt!! >= results.single().doneAt)
+    }
+
+    @Test
     fun `the failure reason is stored, and cut at MAX_TEXT like lastError`() {
         val long = "no ".repeat(1000)
         val saga = engine("stock" to { "STK-1" }, "booking" to { throw StepRejected("no") }).start("item-3")

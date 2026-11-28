@@ -297,6 +297,42 @@ public class SagaEngine(
 
     public suspend fun find(id: Uuid): SagaRecord? = store.tx { repository.find(id) }
 
+    /**
+     * The steps of the saga [id], in the order of its definition, and where each stands: done, current, pending,
+     * undone, or never applied. Each done or undone step carries what its `logAs` says of its output, never the
+     * output itself. Null if there is no such saga. One read of the saga and its results: for a saga's detail,
+     * not for a list.
+     *
+     * @throws IllegalArgumentException if the saga's type is not one this engine knows.
+     */
+    public suspend fun steps(id: Uuid): List<SagaStepProgress>? {
+        val (saga, results) = store.tx { (repository.find(id) ?: return@tx null) to repository.stepResults(id) } ?: return null
+        val def = definition(saga.type)
+        val phase = saga.phase()
+        val byIndex = results.associateBy { it.stepIndex }
+        val progress = machine.progress(phase, def.steps.size, byIndex.mapValues { it.value.compensatedAt != null })
+        return def.steps.indices.map { index ->
+            val step = def.stepAt(index)
+            val result = byIndex[index]
+            SagaStepProgress(
+                index, step.name, progress[index], ref = result?.let { ref(step, it) }, doneAt = result?.doneAt,
+                compensatedAt = result?.compensatedAt,
+            )
+        }
+    }
+
+    /** What the step's `logAs` says of its saved output; null if it says nothing, or the output cannot be read. */
+    private fun ref(step: AnyStep, result: StepResultRecord): String? {
+        val type = step.outputType ?: return describe(step, Unit)
+        val text = result.output ?: return describe(step, null)
+        val value = try {
+            serializer.decodeSaved(text, type) { "the output of step '${step.name}'" }
+        } catch (_: SagaDataException) {
+            return null
+        }
+        return describe(step, value)
+    }
+
     // ---- Reads for operators ----------------------------------------------------------------
 
     /**

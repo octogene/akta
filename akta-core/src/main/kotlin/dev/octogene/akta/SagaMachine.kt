@@ -360,6 +360,22 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
         )
     }
 
+    /**
+     * Where each of the [stepCount] steps of [saga] stands, from the results saved for it ([undone] by step index:
+     * false if done, true if undone). The current step is the one an unfinished saga is on, whatever is saved for it
+     * (a RECORD_FAILED may have saved its output); a finishing or finished saga has none.
+     */
+    fun progress(saga: SagaPhase, stepCount: Int, undone: Map<Int, Boolean>): List<StepProgress> =
+        (0 until stepCount).map { index ->
+            when {
+                saga is Unfinished && saga !is Finishing && index == saga.stepIndex -> StepProgress.CURRENT
+                undone[index] == true -> StepProgress.UNDONE
+                undone[index] == false -> StepProgress.DONE
+                saga is Running -> StepProgress.PENDING
+                else -> StepProgress.NOT_APPLIED                  // compensating or ended: it will never run
+            }
+        }
+
     /** See [SagaEngine.cancel]. */
     fun cancel(saga: SagaPhase, reason: String, now: Instant): Decision {
         require(saga !is Finished) { "Saga ${saga.id} is finished: undoing it is a new saga" }

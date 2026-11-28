@@ -194,6 +194,30 @@ class SagaOperationsTest {
     }
 
     @Test
+    fun `the steps of a saga say where each stands, with what logAs says of its output`() {
+        val definition = saga("T") {
+            step<String>("hold") { execute { "H-1" }; compensate { throw IOException("stock down") }; logAs { it } }
+            step<String>("pay") { execute { "P-1" }; compensate { }; logAs { it } }
+            step("confirm") { execute { throw StepRejected("no slot") } }
+            step("notify") { execute { } }
+        }
+        val engine = engine(definition, config = once)
+        val id = engine.create(definition, "K-1")
+        engine.run(id)                                                          // pay undone, hold's undo stuck
+
+        val steps = runBlocking { engine.steps(id) }!!
+        assertEquals(listOf("hold", "pay", "confirm", "notify"), steps.map { it.name })
+        assertEquals(
+            listOf(StepProgress.CURRENT, StepProgress.UNDONE, StepProgress.NOT_APPLIED, StepProgress.NOT_APPLIED),
+            steps.map { it.progress },
+        )
+        assertEquals(listOf("H-1", "P-1", null, null), steps.map { it.ref })
+        assertEquals(clock.now, steps[1].compensatedAt)
+        assertNull(steps[0].compensatedAt)                                       // its undo is the one stuck
+        assertNull(runBlocking { engine.steps(Uuid.random()) })
+    }
+
+    @Test
     fun `leaving STUCK clears the reason, by retry or by markDone`() {
         var fail = true
         val definition = saga("T") {
