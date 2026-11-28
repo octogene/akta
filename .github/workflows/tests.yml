@@ -41,7 +41,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       # --continue: a failure in one module still runs the others' tests.
       # checkKotlinAbi: the public API must match api/*.api (./gradlew updateKotlinAbi records a change made on purpose).
-      - run: ./gradlew checkKotlinAbi test stressTest --continue
+      # ktlintCheck: the style in .editorconfig (./gradlew ktlintFormat fixes most of it).
+      - run: ./gradlew checkKotlinAbi ktlintCheck test stressTest --continue
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
