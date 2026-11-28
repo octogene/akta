@@ -249,6 +249,9 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
         val stuck = unfinished?.step as? StepState.Stuck
         require(unfinished != null && stuck != null) { "Saga ${saga.id} is not stuck" }
         require(!newKey || unfinished !is Finishing) { "Saga ${saga.id} is finishing: it has no call, nor a key to renew" }
+        require(!newKey || stepOf(unfinished).idempotency != null) {
+            "Step '${stepOf(unfinished).name}' of saga ${saga.id} sends no idempotency key: retry it without newKey"
+        }
         require(newKey || stuck.reason != StuckReason.KEY_EXPIRED) {
             "The idempotency key of saga ${saga.id} may be forgotten by its service: confirm the step was not applied, " +
                 "then retry with newKey = true (or markDone, or abort)"
@@ -325,6 +328,36 @@ internal class SagaMachine(private val config: SagaConfig, private val definitio
     fun markCompensated(saga: SagaPhase, now: Instant): Decision {
         require(saga is Compensating && saga.step is StepState.Stuck) { "Saga ${saga.id} has no stuck compensation" }
         return Decision(previousUndo(saga, now), listOf(Effect.MarkCompensated))
+    }
+
+    /**
+     * Each manual action, and why [saga] refuses it now: the guards of the actions themselves, run on [saga], so
+     * that a screen never offers what the action would refuse. An action that would change nothing (cancel on a
+     * saga already compensating or cancelled) is reported refused too, saying so.
+     */
+    fun actions(saga: SagaPhase, now: Instant): List<ManualActionCheck> {
+        fun refusal(guard: () -> Any?): String? = try {
+            guard()
+            null
+        } catch (e: IllegalArgumentException) {
+            e.message ?: e.toString()
+        }
+        val cancel = refusal { cancel(saga, reason = "", now) } ?: when {
+            saga !is Running -> "Saga ${saga.id} is already ${saga.state}: cancel would change nothing"
+            saga.cancellation != null -> "Saga ${saga.id} is already cancelled (${saga.cancellation.reason}): cancel would change nothing"
+            else -> null
+        }
+        val abortApplied = refusal { checkAbort(saga, currentStepApplied = true) }
+            ?: "Saga ${saga.id} is finishing: abort undoes every step, currentStepApplied changes nothing".takeIf { saga is Finishing }
+        return listOf(
+            ManualActionCheck(ManualAction.RETRY, refusal { retry(saga, newKey = false, now) { false } }),
+            ManualActionCheck(ManualAction.RETRY_WITH_NEW_KEY, refusal { retry(saga, newKey = true, now) { false } }),
+            ManualActionCheck(ManualAction.MARK_DONE, refusal { checkMarkDone(saga) }),
+            ManualActionCheck(ManualAction.ABORT, refusal { checkAbort(saga, currentStepApplied = false) }),
+            ManualActionCheck(ManualAction.ABORT_CURRENT_STEP_APPLIED, abortApplied),
+            ManualActionCheck(ManualAction.MARK_COMPENSATED, refusal { markCompensated(saga, now) }),
+            ManualActionCheck(ManualAction.CANCEL, cancel),
+        )
     }
 
     /** See [SagaEngine.cancel]. */

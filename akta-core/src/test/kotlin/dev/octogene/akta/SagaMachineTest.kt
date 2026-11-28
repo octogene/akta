@@ -141,9 +141,12 @@ class SagaMachineTest {
     @Test
     fun `a manual action refused leaves the decision unmade`() {
         assertFailsWith<IllegalArgumentException> { machine.retry(saga().phase(), newKey = false, now) { false } }
-        val expired = stuck(saga(), StuckReason.KEY_EXPIRED, "forgotten").phase()
+        val expired = stuck(saga(stepIndex = 1), StuckReason.KEY_EXPIRED, "forgotten").phase()   // the idempotent step
         assertFailsWith<IllegalArgumentException> { machine.retry(expired, newKey = false, now) { false } }
         assertEquals(1, machine.retry(expired, newKey = true, now) { false }.record.keyGeneration)
+        // A fresh key only means something for a step that sends one.
+        val notIdempotent = stuck(saga(), StuckReason.TOO_MANY_ATTEMPTS, "down").phase()
+        assertFailsWith<IllegalArgumentException> { machine.retry(notIdempotent, newKey = true, now) { false } }
 
         val refused = stuck(saga(), StuckReason.RECORD_FAILED, "hook").copy(failureReason = "refused").phase()
         assertFailsWith<IllegalArgumentException> { machine.checkMarkDone(refused) }

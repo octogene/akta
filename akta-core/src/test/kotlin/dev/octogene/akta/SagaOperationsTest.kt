@@ -109,6 +109,91 @@ class SagaOperationsTest {
     }
 
     @Test
+    fun `the actions reported for a saga are exactly those its actions accept`() {
+        val unknown = saga("CANNOT_TELL") {
+            step("call") { execute { throw IOException("read timeout") }; check { CheckResult.CannotTell } }
+        }
+        val tooBig = saga("OUTPUT_UNSTORABLE") { step<String>("call") { execute { "x".repeat(100) } } }
+        val hook = saga("HOOK_FAILED") {
+            step("call") { execute { } }
+            onCompleted { error("hook failed") }
+        }
+        val unrecordable = saga("RECORD_FAILED") {
+            awaitSignal<String>("wait", signal = "payment", timeout = 1.hours) { onSignal { error("onSignal bug") } }
+        }
+        val noSignal = saga("NO_SIGNAL") { awaitSignal<String>("wait", signal = "payment", timeout = 1.minutes) }
+        val waiting = saga("WAITING") { awaitSignal<String>("wait", signal = "payment", timeout = 10.hours) }
+        val undo = saga("UNDO_STUCK") {
+            step("first") { execute { }; compensate { throw IOException("undo failed") } }
+            step("second") { execute { throw StepRejected("no") } }
+        }
+        val idempotent = saga("IDEMPOTENT") {
+            step("call") { idempotent(24.hours); execute { throw StepNotSent("connection refused") } }
+        }
+        val checking = saga("CHECKING") {
+            step("call") { execute { throw IOException("read timeout") }; check { CheckResult.CannotTell } }
+        }
+        val done = saga("COMPLETED") { step("call") { execute { } } }
+        val definitions = arrayOf(unknown, tooBig, hook, unrecordable, noSignal, waiting, undo, idempotent, checking, done, notSent())
+        val engine = engine(*definitions, config = SagaConfig(maxAttempts = 1, settleDelay = 1.seconds, maxDataBytes = 50))
+        val ids = definitions.associate { it.type to engine.create(it, "K-${it.type}") }
+        (ids - "CHECKING").values.forEach { engine.run(it) }
+        runBlocking { engine.signal(ids.getValue("RECORD_FAILED"), "payment", "paid") }
+        engine.resumeAfter(2.minutes)                                           // checks and the signal timeout
+        engine.run(ids.getValue("CHECKING"))                                    // CHECKING, not due before a second
+        // The output an action needs for each saga's current step, where it needs one.
+        val outputs = mapOf("OUTPUT_UNSTORABLE" to "\"x\"", "NO_SIGNAL" to "\"paid\"", "RECORD_FAILED" to "\"paid\"")
+
+        for ((type, id) in ids) {
+            val saga = engine.stored(id)
+            val reported = engine.actions(saga).associate { it.action to it.allowed }
+            val output = outputs[type]
+            val accepted = ManualAction.entries.associateWith { action ->
+                val before = repository.snapshot()
+                try {
+                    runBlocking {
+                        when (action) {
+                            ManualAction.RETRY -> engine.retry(id, "op", runFor = Duration.ZERO)
+                            ManualAction.RETRY_WITH_NEW_KEY -> engine.retry(id, "op", newKey = true, runFor = Duration.ZERO)
+                            ManualAction.MARK_DONE -> engine.markDone(id, output, "op", runFor = Duration.ZERO)
+                            ManualAction.ABORT -> engine.abort(id, "op", currentStepApplied = false, runFor = Duration.ZERO)
+                            ManualAction.ABORT_CURRENT_STEP_APPLIED ->
+                                engine.abort(id, "op", currentStepApplied = true, output = output, runFor = Duration.ZERO)
+                            ManualAction.MARK_COMPENSATED -> engine.markCompensated(id, "op", runFor = Duration.ZERO)
+                            ManualAction.CANCEL -> engine.cancel(id, "changed my mind", "op", runFor = Duration.ZERO)
+                        }
+                    }
+                    true
+                } catch (_: IllegalArgumentException) {
+                    false
+                } finally {
+                    repository.restore(before)
+                }
+            }
+            // Accepted, but changing nothing, so reported refused: cancel on a saga already compensating, and
+            // currentStepApplied on a finishing saga (abort undoes every step either way).
+            val expected = when (saga.state) {
+                SagaState.COMPENSATING -> accepted + (ManualAction.CANCEL to false)
+                SagaState.FINISHING -> accepted + (ManualAction.ABORT_CURRENT_STEP_APPLIED to false)
+                else -> accepted
+            }
+            assertEquals(expected, reported, "$type (${saga.state}, ${saga.stepStatus}, ${saga.stuckReason})")
+        }
+        // A few that matter on a screen.
+        fun allowed(type: String) = engine.actions(engine.stored(ids.getValue(type))).filter { it.allowed }.map { it.action }.toSet()
+        assertEquals(
+            setOf(ManualAction.RETRY, ManualAction.MARK_DONE, ManualAction.ABORT, ManualAction.ABORT_CURRENT_STEP_APPLIED, ManualAction.CANCEL),
+            allowed("CANNOT_TELL"),
+        )
+        assertEquals(setOf(ManualAction.RETRY, ManualAction.MARK_COMPENSATED), allowed("UNDO_STUCK"))
+        assertTrue(ManualAction.RETRY_WITH_NEW_KEY in allowed("IDEMPOTENT"))
+        assertEquals(setOf(ManualAction.CANCEL), allowed("CHECKING"))                      // an outcome is unknown: no abort
+        assertEquals(setOf(ManualAction.ABORT, ManualAction.CANCEL), allowed("WAITING"))
+        assertEquals(emptySet(), allowed("COMPLETED"))
+        assertTrue(engine.actions(engine.stored(ids.getValue("COMPLETED"))).all { it.refusal!!.isNotBlank() })
+    }
+
+    @Test
     fun `leaving STUCK clears the reason, by retry or by markDone`() {
         var fail = true
         val definition = saga("T") {
