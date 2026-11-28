@@ -80,26 +80,26 @@ internal class SagaStore(
      */
     fun save(saga: SagaPhase, now: Instant) {
         val row = saga.record()
-        val r = row.copy(
+        val stored = row.copy(
             lastError = row.lastError?.storable(),
             failureReason = row.failureReason?.storable(),
             cancelReason = row.cancelReason?.storable(),
         )
         val pending = current.get()
         if (pending == null) {
-            repository.save(r, now)
+            repository.save(stored, now)
             return
         }
-        pending.unsaved[r.id] = r to now
-        pending.latest[r.id] = r
+        pending.unsaved[stored.id] = stored to now
+        pending.latest[stored.id] = stored
     }
 
-    /** What a decision writes besides the row, for the current step of [r] (its name is only read to save a result). */
-    fun write(effects: List<Effect>, r: SagaPhase, now: Instant, stepName: () -> String) {
+    /** What a decision writes besides the row, for the current step of [saga] (its name is only read to save a result). */
+    fun write(effects: List<Effect>, saga: SagaPhase, now: Instant, stepName: () -> String) {
         for (effect in effects) when (effect) {
-            is Effect.SaveResult -> repository.saveResult(r.id, r.stepIndex, stepName(), effect.output, now)
-            is Effect.SaveSignal -> repository.saveSignal(r.id, effect.signal, effect.value, now)
-            Effect.MarkCompensated -> repository.markCompensated(r.id, r.stepIndex, now)
+            is Effect.SaveResult -> repository.saveResult(saga.id, saga.stepIndex, stepName(), effect.output, now)
+            is Effect.SaveSignal -> repository.saveSignal(saga.id, effect.signal, effect.value, now)
+            Effect.MarkCompensated -> repository.markCompensated(saga.id, saga.stepIndex, now)
         }
     }
 
@@ -118,8 +118,8 @@ internal class SagaStore(
         // Reported after commit, with the saga as this transaction last read or wrote it. None from create(),
         // which runs in the caller's transaction.
         val pending = current.get() ?: return
-        val r = pending.latest[sagaId] ?: return
-        pending.events += SagaEvent(entry, r.type, r.state, r.stepStatus, r.stuckReason)
+        val row = pending.latest[sagaId] ?: return
+        pending.events += SagaEvent(entry, row.type, row.state, row.stepStatus, row.stuckReason)
     }
 
     /** Writes the sagas the transaction changed and has not written yet, once each. */
