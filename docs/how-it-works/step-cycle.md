@@ -68,6 +68,8 @@ If the record transaction rolls back (a constraint, the database), the call's ou
 
 When the deadline passes, nothing is lost: the saga is left `READY` (or `CHECKING`, `REPLAYING`, `WAITING`) with its `next_attempt_at`, and the recovery job continues it.
 
+How to choose the deadline, `callLock` and the other durations: [Timing and budgets](../operations/timing.md).
+
 ## The crash case
 
 If the pod dies during the call, the row stays `IN_PROGRESS` until `locked_until`. The next claim after that, by any pod, sees an expired lock:

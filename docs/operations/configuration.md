@@ -1,5 +1,7 @@
 # Configuration
 
+How the durations below fit together, and how to choose them: [Timing and budgets](timing.md).
+
 ```kotlin
 SagaEngine(..., config = SagaConfig(
     callLock = 35.seconds,
