@@ -356,6 +356,15 @@ public class ExposedSagaRepository : SagaRepository {
             .orderBy(SagaLogTable.at to SortOrder.ASC, SagaLogTable.id to SortOrder.ASC)
             .map { it.toEntry() }
 
+    // The index saga_log_saga, read backwards: only the entries returned.
+    override fun recentHistory(sagaId: Uuid, limit: Int): List<SagaLogEntry> =
+        SagaLogTable.selectAll()
+            .where { SagaLogTable.sagaId eq sagaId }
+            .orderBy(SagaLogTable.at to SortOrder.DESC, SagaLogTable.id to SortOrder.DESC)
+            .limit(limit)
+            .map { it.toEntry() }
+            .reversed()
+
     override fun historyByTrace(traceId: String, limit: Int): List<SagaLogEntry> =
         SagaLogTable.selectAll()
             .where { SagaLogTable.traceId eq traceId }

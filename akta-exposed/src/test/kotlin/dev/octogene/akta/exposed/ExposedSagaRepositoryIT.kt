@@ -137,6 +137,16 @@ class ExposedSagaRepositoryIT {
     }
 
     @Test
+    fun `the recent history is the latest entries, oldest first, as the whole history orders them`() {
+        val saga = engine("stock" to { "STK-1" }, "booking" to { throw StepRejected("no") }).start("item-recent")
+        val (all, recent) = runBlocking {
+            ExposedSagaTransactions(database).inTransaction { repository.history(saga.id) to repository.recentHistory(saga.id, 3) }
+        }
+        assertTrue(all.size > 3, all.toString())
+        assertEquals(all.takeLast(3), recent)
+    }
+
+    @Test
     fun `step results keep the undone ones, with when they were undone, in step order`() {
         val saga = engine("stock" to { "STK-1" }, "booking" to { throw StepRejected("no") }).start("item-results")
 

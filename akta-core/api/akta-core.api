@@ -187,6 +187,25 @@ public final class dev/octogene/akta/SagaDefinition {
 	public final fun getType ()Ljava/lang/String;
 }
 
+public final class dev/octogene/akta/SagaDetail {
+	public fun <init> (Ldev/octogene/akta/SagaRecord;Ljava/util/List;Ljava/util/List;Ljava/util/List;Z)V
+	public final fun component1 ()Ldev/octogene/akta/SagaRecord;
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Ljava/util/List;
+	public final fun component4 ()Ljava/util/List;
+	public final fun component5 ()Z
+	public final fun copy (Ldev/octogene/akta/SagaRecord;Ljava/util/List;Ljava/util/List;Ljava/util/List;Z)Ldev/octogene/akta/SagaDetail;
+	public static synthetic fun copy$default (Ldev/octogene/akta/SagaDetail;Ldev/octogene/akta/SagaRecord;Ljava/util/List;Ljava/util/List;Ljava/util/List;ZILjava/lang/Object;)Ldev/octogene/akta/SagaDetail;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getActions ()Ljava/util/List;
+	public final fun getEarlierHistory ()Z
+	public final fun getHistory ()Ljava/util/List;
+	public final fun getSaga ()Ldev/octogene/akta/SagaRecord;
+	public final fun getSteps ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class dev/octogene/akta/SagaDslKt {
 	public static final fun sagaWithoutInput (Ljava/lang/String;Lkotlin/jvm/functions/Function1;)Ldev/octogene/akta/SagaDefinition;
 }
@@ -206,11 +225,15 @@ public final class dev/octogene/akta/SagaEngine {
 	public final fun create (Ldev/octogene/akta/SagaDefinition;Ljava/lang/String;Ljava/lang/String;)Lkotlin/uuid/Uuid;
 	public static synthetic fun create$default (Ldev/octogene/akta/SagaEngine;Ldev/octogene/akta/SagaDefinition;Ljava/lang/String;Ljava/lang/Object;Ljava/lang/String;ILjava/lang/Object;)Lkotlin/uuid/Uuid;
 	public static synthetic fun create$default (Ldev/octogene/akta/SagaEngine;Ldev/octogene/akta/SagaDefinition;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lkotlin/uuid/Uuid;
+	public final fun detail (Lkotlin/uuid/Uuid;ILkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static synthetic fun detail$default (Ldev/octogene/akta/SagaEngine;Lkotlin/uuid/Uuid;ILkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun find (Lkotlin/uuid/Uuid;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun findAll (Ljava/util/Collection;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun findByKey (Ljava/lang/String;ILkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun findByKey$default (Ldev/octogene/akta/SagaEngine;Ljava/lang/String;ILkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun findStuck (ILjava/util/Collection;Ldev/octogene/akta/StuckCursor;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun findStuck$default (Ldev/octogene/akta/SagaEngine;ILjava/util/Collection;Ldev/octogene/akta/StuckCursor;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
+	public final fun history (Lkotlin/uuid/Uuid;ILkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun history (Lkotlin/uuid/Uuid;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun historyByTrace (Ljava/lang/String;ILkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun historyByTrace$default (Ldev/octogene/akta/SagaEngine;Ljava/lang/String;ILkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
@@ -394,6 +417,7 @@ public abstract interface class dev/octogene/akta/SagaRepository {
 	public abstract fun log (Ldev/octogene/akta/SagaLogEntry;)V
 	public abstract fun markCompensated (Lkotlin/uuid/Uuid;ILkotlin/time/Instant;)V
 	public abstract fun purgeFinished (Lkotlin/time/Instant;I)I
+	public fun recentHistory (Lkotlin/uuid/Uuid;I)Ljava/util/List;
 	public abstract fun results (Lkotlin/uuid/Uuid;)Ljava/util/Map;
 	public abstract fun save (Ldev/octogene/akta/SagaRecord;Lkotlin/time/Instant;)V
 	public abstract fun saveResult (Lkotlin/uuid/Uuid;ILjava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;)V
@@ -409,6 +433,7 @@ public final class dev/octogene/akta/SagaRepository$Companion {
 
 public final class dev/octogene/akta/SagaRepository$DefaultImpls {
 	public static synthetic fun lock$default (Ldev/octogene/akta/SagaRepository;Lkotlin/uuid/Uuid;ZILjava/lang/Object;)Ldev/octogene/akta/SagaRecord;
+	public static fun recentHistory (Ldev/octogene/akta/SagaRepository;Lkotlin/uuid/Uuid;I)Ljava/util/List;
 }
 
 public abstract interface class dev/octogene/akta/SagaSerializer {
@@ -685,6 +710,7 @@ public final class dev/octogene/akta/memory/InMemorySagaRepository : dev/octogen
 	public fun log (Ldev/octogene/akta/SagaLogEntry;)V
 	public fun markCompensated (Lkotlin/uuid/Uuid;ILkotlin/time/Instant;)V
 	public fun purgeFinished (Lkotlin/time/Instant;I)I
+	public fun recentHistory (Lkotlin/uuid/Uuid;I)Ljava/util/List;
 	public fun results (Lkotlin/uuid/Uuid;)Ljava/util/Map;
 	public fun save (Ldev/octogene/akta/SagaRecord;Lkotlin/time/Instant;)V
 	public fun saveResult (Lkotlin/uuid/Uuid;ILjava/lang/String;Ljava/lang/String;Lkotlin/time/Instant;)V
